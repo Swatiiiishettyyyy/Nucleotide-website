@@ -9,11 +9,11 @@ from .OTP_schema import (
     VerifiedData
 )
 from deps import get_db
-from Utils import Security
-from OTP import otp_manager
-from User.user_session_crud import get_user_by_mobile, create_user
-from Device.Device_session_crud import create_device_session
-from OTP import OTP_crud
+from ..Utils import security
+from . import otp_manager
+from ..User.user_session_crud import get_user_by_mobile, create_user
+from ..Device.Device_session_crud import create_device_session
+from . import OTP_crud
 
 from dotenv import load_dotenv
 import os
@@ -44,7 +44,7 @@ def send_otp(request: SendOTPRequest, db: Session = Depends(get_db)):
     otp_manager.store_otp(request.country_code, request.mobile, otp, expires_in=OTP_EXPIRY_SECONDS)
 
     # Store hashed version in DB audit log
-    otp_log.create_sent_log(
+    OTP_crud.create_sent_log(
         db=db,
         phone_number=f"{request.country_code}{request.mobile}",
         otp_hash=security.hash_value(otp)
@@ -79,7 +79,7 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
 
     # Compare plaintext (fast check)
     if stored != req.otp:
-        otp_log.mark_failed(
+        OTP_crud.mark_failed(
             db=db,
             phone_number=phone_number,
             user_entered_otp_hash=security.hash_value(req.otp)
@@ -91,17 +91,17 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
 
     # Retrieve last sent OTP log and mark as verified
     last_sent = (
-        db.query(otp_log.OTPLog)
+        db.query(OTP_crud.OTPLog)
         .filter(
-            otp_log.OTPLog.phone_number == phone_number,
-            otp_log.OTPLog.status == "sent"
+            OTP_crud.OTPLog.phone_number == phone_number,
+            OTP_crud.OTPLog.status == "sent"
         )
-        .order_by(otp_log.OTPLog.generated_at.desc())
+        .order_by(OTP_crud.OTPLog.generated_at.desc())
         .first()
     )
 
     if last_sent:
-        otp_log.mark_verified(
+        OTP_crud.mark_verified(
             db=db,
             log_id=last_sent.id,
             user_entered_otp_hash=security.hash_value(req.otp)

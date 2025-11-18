@@ -8,8 +8,8 @@ pymysql
 redis
 python-dotenv
 email-validator
-"pydantic[email]"
->>
+# "pydantic[email]"
+
 #pip install -r requirements.txt
 
 # cd nucleotide_backend

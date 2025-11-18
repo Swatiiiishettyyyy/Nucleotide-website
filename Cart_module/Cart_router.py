@@ -3,13 +3,13 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from database import SessionLocal
-from Cart_model import CartItem
+from .Cart_model import CartItem
 from Product_module.Product_model import Product
 from Login_module.User.user_model import User
-from Cart_schema import CartAdd, CartUpdate
+from .Cart_schema import CartAdd, CartUpdate
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user
-from Cart_audit_crud import create_audit_log
+from .Cart_audit_crud import create_audit_log
 
 router = APIRouter(prefix="/cart", tags=["Cart"])
 

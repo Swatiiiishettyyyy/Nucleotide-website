@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from Profile_schema import (
+from .Profile_schema import (
     EditProfileRequest,
     EditProfileResponse,
     UserProfileData,
@@ -42,27 +42,33 @@ def edit_profile(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user)
 ):
-    """
-    Edit current user's profile information.
-    At least one field (name, email, or mobile) must be provided.
-    """
-    # Check if at least one field is provided
+    # Must provide at least one field
     if not any([req.name, req.email, req.mobile]):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="At least one field (name, email, or mobile) must be provided"
         )
 
-    # If mobile is being updated, check if it already exists for another user
-    if req.mobile and req.mobile != current_user.mobile:
-        existing_user = auth.get_user_by_mobile(db, req.mobile)
-        if existing_user and existing_user.id != current_user.id:
+    # --- EMAIL DUPLICATE CHECK ---
+    if req.email and req.email != current_user.email:
+        existing_email_user = user_session_crud.get_user_by_email(db, req.email)
+        if existing_email_user and existing_email_user.id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Mobile number already registered with another account"
+                detail="Email already exists"
             )
 
-    updated_user = auth.update_user_profile(
+    # --- MOBILE DUPLICATE CHECK ---
+    if req.mobile and req.mobile != current_user.mobile:
+        existing_mobile_user = user_session_crud.get_user_by_mobile(db, req.mobile)
+        if existing_mobile_user and existing_mobile_user.id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Mobile number already exists"
+            )
+
+    # UPDATE USER
+    updated_user = user_session_crud.update_user_profile(
         db=db,
         user_id=current_user.id,
         name=req.name,

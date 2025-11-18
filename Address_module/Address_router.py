@@ -3,8 +3,8 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from deps import get_db
-from Address_schema import AddressRequest, AddressResponse, AddressListResponse, AddressData
-from Address_crud import save_address, get_addresses_by_user
+from .Address_schema import AddressRequest, AddressResponse, AddressListResponse, AddressData
+from .Address_crud import save_address, get_addresses_by_user
 from Login_module.Utils.auth_user import get_current_user
 
 router = APIRouter(prefix="/address", tags=["Address"])

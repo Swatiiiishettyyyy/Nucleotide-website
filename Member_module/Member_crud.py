@@ -1,4 +1,4 @@
-from Member_model import Member
+from .Member_model import Member
 
 def save_member(db, user, req):
     if req.member_id == 0:

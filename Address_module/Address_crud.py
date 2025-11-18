@@ -1,5 +1,5 @@
-from Address_model import Address
-from  Address_audit_model import AddressAudit
+from .Address_model import Address
+from  .Address_audit_model import AddressAudit
 
 def save_address(db, user, req):
     if req.address_id == 0:

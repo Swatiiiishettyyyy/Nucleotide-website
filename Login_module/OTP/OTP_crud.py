@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 from datetime import datetime
-from OTP.OTP_Log_Model import OTPLog
-from Utils.Security import hash_value  # Use central hashing function
+from .OTP_Log_Model import OTPLog
+from ..Utils.security import hash_value  # Use central hashing function
 
 
 def create_sent_log(db: Session, phone_number: str, otp_hash: str):

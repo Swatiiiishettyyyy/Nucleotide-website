@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any
-from Cart_audit_model import AuditLog
+from .Cart_audit_model import AuditLog
 from Login_module.User.user_model import User
 
 

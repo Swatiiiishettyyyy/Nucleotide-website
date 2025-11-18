@@ -3,8 +3,8 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from deps import get_db
-from Member_schema import MemberRequest, MemberResponse, MemberListResponse, MemberData
-from Member_crud import save_member, get_members_by_user
+from .Member_schema import MemberRequest, MemberResponse, MemberListResponse, MemberData
+from .Member_crud import save_member, get_members_by_user
 from Login_module.Utils.auth_user import get_current_user
 
 router = APIRouter(prefix="/member", tags=["Member"])

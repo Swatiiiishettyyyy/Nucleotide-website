@@ -3,7 +3,9 @@ from datetime import datetime, timedelta
 import secrets
 from typing import Optional
 from .user_model import User
-
+from Profile_module.Profile_audit_crud import log_profile_update
+from sqlalchemy.exc import IntegrityError
+from fastapi import HTTPException
 
 
 def get_user_by_mobile(db: Session, mobile: str) -> Optional[User]:
@@ -44,13 +46,17 @@ def update_user_profile(
     email: Optional[str] = None,
     mobile: Optional[str] = None
 ) -> Optional[User]:
-    """
-    Update user profile information.
-    Only updates fields that are provided (not None).
-    """
+
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         return None
+
+    # Store old data
+    old_data = {
+        "name": user.name,
+        "email": user.email,
+        "mobile": user.mobile
+    }
 
     # Update only provided fields
     if name is not None:
@@ -63,9 +69,27 @@ def update_user_profile(
     try:
         db.commit()
         db.refresh(user)
+
+        # Store new data
+        new_data = {
+            "name": user.name,
+            "email": user.email,
+            "mobile": user.mobile
+        }
+
+        # If nothing changed, no need to log
+        if old_data != new_data:
+            log_profile_update(db, user.id, old_data, new_data)
+
         return user
+
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail="Email or Mobile already exists"
+        )
+
     except Exception as e:
         db.rollback()
         raise e
-
-

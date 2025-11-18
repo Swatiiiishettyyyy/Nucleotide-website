@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from Product_model import Product
+from .Product_model import Product
 from database import SessionLocal
 from deps import get_db
-from Product_schema import (
+from .Product_schema import (
     ProductCreate,
     ProductResponse,
     ProductListResponse,
