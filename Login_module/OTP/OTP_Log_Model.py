@@ -1,20 +1,23 @@
-from sqlalchemy import Column, Integer, String, DateTime, func, Text
+from sqlalchemy import Column, Integer, String, DateTime, func, Text, ForeignKey
 from database import Base
 
 
-class OTPLog(Base):
-    __tablename__ = "otp_logs"
+class OTPAuditLog(Base):
+    """
+    OTP audit log - tracks events only, no OTP values stored.
+    Event types: GENERATED, VERIFIED, FAILED, BLOCKED
+    """
+    __tablename__ = "otp_audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    phone_number = Column(String(30), nullable=False, index=True) 
-    # includes country code
-    hashed_otp = Column(String(255), nullable=False)
-    generated_at = Column(DateTime(timezone=True), server_default=func.now())
-    
-    user_entered_otp = Column(String(255), nullable=True)  # filled only when verifying
-    verified_at = Column(DateTime(timezone=True), nullable=True)
-
-    # status: sent / verified / failed
-    status = Column(String(20), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    device_id = Column(String(255), nullable=True, index=True)
+    event_type = Column(String(20), nullable=False, index=True)  # GENERATED, VERIFIED, FAILED, BLOCKED
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    reason = Column(Text, nullable=True)  # Optional reason or failed attempt count
+    phone_number = Column(String(30), nullable=True, index=True)  # For backward compatibility
+    ip_address = Column(String(50), nullable=True, index=True)  # IP address of request
+    user_agent = Column(String(500), nullable=True)  # User agent/browser info
+    correlation_id = Column(String(100), nullable=True, index=True)  # For request tracing
     
     

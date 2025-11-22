@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from Login_module.Utils import security
 from deps import get_db
 from Login_module.User.user_session_crud import get_user_by_id
+from Login_module.Device.Device_session_crud import update_last_active, get_device_session
 
 security_scheme = HTTPBearer()
 
@@ -15,6 +16,7 @@ def get_current_user(
 ):
     """
     Validates JWT token and returns the current authenticated user.
+    Updates session last_active timestamp on each request.
     """
     token = credentials.credentials
 
@@ -35,6 +37,31 @@ def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Token does not contain user info"
         )
+
+    # Validate and update session
+    session_id = payload.get("session_id")
+    if session_id:
+        try:
+            session = get_device_session(db, int(session_id))
+            if not session:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session not found"
+                )
+            if not session.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session has been logged out"
+                )
+            # Update last_active timestamp
+            update_last_active(db, int(session_id))
+        except HTTPException:
+            raise
+        except (ValueError, Exception) as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid session"
+            )
 
     try:
         user = get_user_by_id(db, int(user_id))

@@ -1,13 +1,19 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from typing import Optional, List
 
 class CartAdd(BaseModel):
     product_id: int
+    address_id: int  # Required - every cart item must have an address
+    member_ids: List[int]  # List of member IDs - for couple: 2 members, for family: up to 4 members
     quantity: int = 1
-
-
-class CartUpdate(BaseModel):
-    quantity: int
+    
+    @validator('member_ids')
+    def validate_member_ids(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError('At least one member_id is required')
+        if len(v) > 4:
+            raise ValueError('Maximum 4 members allowed per product')
+        return v
 
 
 class CartItemResponse(BaseModel):

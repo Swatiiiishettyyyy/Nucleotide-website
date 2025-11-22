@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, func
+from sqlalchemy import Column, Integer, String, DateTime, JSON, func, Text
 from database import Base
 
 class AuditLog(Base):
@@ -12,6 +12,7 @@ class AuditLog(Base):
     entity_type = Column(String(50), nullable=False)  # CART_ITEM, CART
     entity_id = Column(Integer, nullable=True)
     details = Column(JSON, nullable=True)  # Store additional details as JSON
-    ip_address = Column(String(50), nullable=True)
+    ip_address = Column(String(50), nullable=True, index=True)
     user_agent = Column(String(500), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    correlation_id = Column(String(100), nullable=True, index=True)  # For request tracing
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

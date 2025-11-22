@@ -1,28 +1,31 @@
+"""
+Session audit log CRUD operations.
+"""
 from sqlalchemy.orm import Session
 from datetime import datetime
 from typing import Optional
-from .OTP_Log_Model import OTPAuditLog
+from .Device_session_audit_model import SessionAuditLog
 
 
-def create_otp_audit_log(
+def create_session_audit_log(
     db: Session,
-    event_type: str,  # GENERATED, VERIFIED, FAILED, BLOCKED
+    event_type: str,  # CREATED, DELETED, EXPIRED, ACTIVITY
     user_id: Optional[int] = None,
+    session_id: Optional[int] = None,
     device_id: Optional[str] = None,
-    phone_number: Optional[str] = None,
     reason: Optional[str] = None,
     ip_address: Optional[str] = None,
     user_agent: Optional[str] = None,
     correlation_id: Optional[str] = None
-) -> OTPAuditLog:
+) -> SessionAuditLog:
     """
-    Create OTP audit log entry. No OTP values are stored, only events.
+    Create session audit log entry.
     """
-    log = OTPAuditLog(
+    log = SessionAuditLog(
         user_id=user_id,
+        session_id=session_id,
         device_id=device_id,
         event_type=event_type,
-        phone_number=phone_number,
         reason=reason,
         timestamp=datetime.utcnow(),
         ip_address=ip_address,
@@ -33,3 +36,4 @@ def create_otp_audit_log(
     db.commit()
     db.refresh(log)
     return log
+

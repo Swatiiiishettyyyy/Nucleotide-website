@@ -13,7 +13,9 @@ def create_audit_log(
     cart_id: Optional[int] = None,
     details: Optional[Dict[str, Any]] = None,
     ip_address: Optional[str] = None,
-    user_agent: Optional[str] = None
+    user_agent: Optional[str] = None,
+    username: Optional[str] = None,  # Pass username directly to avoid DB lookup
+    correlation_id: Optional[str] = None  # For request tracing
 ) -> AuditLog:
     """
     Create an audit log entry.
@@ -28,9 +30,11 @@ def create_audit_log(
         details: Additional details as dictionary
         ip_address: User's IP address
         user_agent: User's browser/device info
+        username: Username (pass directly to avoid DB lookup - performance optimization)
+        correlation_id: Request correlation ID for tracing related events
     """
-    username = None
-    if user_id:
+    # Only lookup username if not provided (backward compatibility)
+    if not username and user_id:
         user = db.query(User).filter(User.id == user_id).first()
         if user:
             username = user.name or user.mobile
@@ -46,6 +50,12 @@ def create_audit_log(
         ip_address=ip_address,
         user_agent=user_agent
     )
+    
+    # Add correlation_id to details if provided
+    if correlation_id and details:
+        details['correlation_id'] = correlation_id
+    elif correlation_id:
+        audit_log.details = {'correlation_id': correlation_id}
     
     db.add(audit_log)
     db.commit()

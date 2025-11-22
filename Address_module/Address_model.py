@@ -6,20 +6,17 @@ class Address(Base):
     __tablename__ = "addresses"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-    first_name = Column(String(100))
-    last_name = Column(String(100))
-    email = Column(String(255))
-    mobile = Column(String(20))
+    # Removed: first_name, last_name, email, mobile (as per requirements)
 
     address_label = Column(String(50))
     street_address = Column(String(255))
     landmark = Column(String(255))
     city = Column(String(100))
     state = Column(String(100))
-    postal_code = Column(String(20))
-    country = Column(String(100))
+    postal_code = Column(String(20), nullable=False, index=True)  # Pincode - required for auto-generation
+    country = Column(String(100), default="India")
 
     save_for_future = Column(Boolean, default=True)
 

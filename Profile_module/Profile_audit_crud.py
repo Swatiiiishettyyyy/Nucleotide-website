@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, JSON, func
 from sqlalchemy.orm import Session
 from database import Base
+from typing import Optional
 import json
 
 
@@ -12,10 +13,21 @@ class ProfileAuditLog(Base):
     action = Column(String(50), nullable=False)  # EDIT / VIEW / etc.
     old_data = Column(JSON, nullable=True)
     new_data = Column(JSON, nullable=True)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    ip_address = Column(String(50), nullable=True, index=True)
+    user_agent = Column(String(500), nullable=True)
+    correlation_id = Column(String(100), nullable=True, index=True)  # For request tracing
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
-def log_profile_update(db: Session, user_id: int, old_data: dict, new_data: dict):
+def log_profile_update(
+    db: Session,
+    user_id: int,
+    old_data: dict,
+    new_data: dict,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    correlation_id: Optional[str] = None
+):
     """
     Store profile update audit log.
     """
@@ -23,7 +35,10 @@ def log_profile_update(db: Session, user_id: int, old_data: dict, new_data: dict
         user_id=user_id,
         action="PROFILE_UPDATE",
         old_data=old_data,
-        new_data=new_data
+        new_data=new_data,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        correlation_id=correlation_id
     )
     
     db.add(log_entry)

@@ -8,8 +8,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_SECONDS: int = 86400
 
     # OTP config
-    OTP_EXPIRY_SECONDS: int = 300
-    OTP_MAX_REQUESTS_PER_HOUR: int = 5
+    OTP_EXPIRY_SECONDS: int = 120  # 2 minutes
+    OTP_MAX_REQUESTS_PER_HOUR: int = 15  # 15 per hour
+    OTP_MAX_FAILED_ATTEMPTS: int = 5  # Block after 5 failed attempts
+    OTP_BLOCK_DURATION_SECONDS: int = 600  # 10 minutes block
 
     ENVIRONMENT: str = "development"
 
