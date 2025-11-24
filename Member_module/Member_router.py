@@ -15,7 +15,7 @@ router = APIRouter(prefix="/member", tags=["Member"])
 def save_member_api(
     req: MemberRequest,
     request: Request,
-    category: str = Query("genome_testing", description="Category of the product"),
+    category_id: Optional[int] = Query(None, description="Category ID (defaults to Genetic Testing)"),
     plan_type: Optional[str] = Query(None, description="Plan type: single, couple, or family"),
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
@@ -27,7 +27,7 @@ def save_member_api(
     
     member = save_member(
         db, user, req,
-        category=category,
+        category_id=category_id,
         plan_type=plan_type,
         ip_address=ip_address,
         user_agent=user_agent,
@@ -44,12 +44,12 @@ def save_member_api(
 # Get list of members for user
 @router.get("/list", response_model=MemberListResponse)
 def get_member_list(
-    category: Optional[str] = Query(None, description="Filter by category"),
+    category_id: Optional[int] = Query(None, description="Filter by category ID"),
     plan_type: Optional[str] = Query(None, description="Filter by plan type"),
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    members = get_members_by_user(db, user, category=category, plan_type=plan_type)
+    members = get_members_by_user(db, user, category=category_id, plan_type=plan_type)
     data = []
     for m in members:
         data.append({
@@ -58,6 +58,7 @@ def get_member_list(
             "relation": m.relation.value if hasattr(m.relation, 'value') else str(m.relation),
             "age": m.age,
             "gender": m.gender,
+            "dob": m.dob.isoformat() if m.dob else None,
             "mobile": m.mobile
         })
     return {

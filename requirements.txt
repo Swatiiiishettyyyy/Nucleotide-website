@@ -10,6 +10,7 @@ python-dotenv
 email-validator
 APScheduler
 requests
+razorpay
 # "pydantic[email]"
 
 #pip install -r requirements.txt

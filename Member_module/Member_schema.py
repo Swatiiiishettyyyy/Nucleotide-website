@@ -1,5 +1,7 @@
-from pydantic import BaseModel, validator
+from datetime import date
 from typing import List, Optional
+
+from pydantic import BaseModel, validator
 
 class MemberRequest(BaseModel):
     member_id: int
@@ -7,6 +9,7 @@ class MemberRequest(BaseModel):
     relation: str
     age: Optional[int] = None
     gender: Optional[str] = None  # M, F, Other
+    dob: Optional[date] = None
     mobile: Optional[str] = None
     
     @validator('age')
@@ -20,6 +23,12 @@ class MemberRequest(BaseModel):
         if v and v.upper() not in ['M', 'F', 'MALE', 'FEMALE', 'OTHER']:
             raise ValueError('Gender must be M, F, or Other')
         return v.upper() if v else None
+
+    @validator('dob')
+    def validate_dob(cls, v: Optional[date]):
+        if v and v > date.today():
+            raise ValueError('Date of birth cannot be in the future')
+        return v
     
     @validator('mobile')
     def validate_mobile(cls, v):
@@ -36,6 +45,7 @@ class MemberData(BaseModel):
     relation: str
     age: Optional[int] = None
     gender: Optional[str] = None
+    dob: Optional[date] = None
     mobile: Optional[str] = None
 
 class MemberResponse(BaseModel):

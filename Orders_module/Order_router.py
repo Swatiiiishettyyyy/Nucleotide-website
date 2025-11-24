@@ -1,0 +1,407 @@
+"""
+Order router - handles order creation, payment, and tracking.
+"""
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from sqlalchemy.orm import Session
+from typing import List
+import uuid
+import logging
+
+from deps import get_db
+from Login_module.Utils.auth_user import get_current_user
+from Login_module.User.user_model import User
+from .Order_schema import (
+    CreateOrderRequest,
+    OrderResponse,
+    RazorpayOrderResponse,
+    VerifyPaymentRequest,
+    PaymentVerificationResponse,
+    UpdateOrderStatusRequest,
+    OrderTrackingResponse
+)
+from .Order_crud import (
+    create_order_from_cart,
+    verify_and_complete_payment,
+    update_order_status,
+    get_order_by_id,
+    get_user_orders
+)
+from .razorpay_service import create_razorpay_order
+from .Order_model import OrderStatus, PaymentStatus
+from Cart_module.Cart_model import CartItem
+
+router = APIRouter(prefix="/orders", tags=["Orders"])
+
+logger = logging.getLogger(__name__)
+
+
+def get_client_info(request: Request):
+    """Extract client IP and user agent from request"""
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    return ip, user_agent
+
+
+@router.post("/create", response_model=RazorpayOrderResponse)
+def create_order(
+    request_data: CreateOrderRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Create order from cart items.
+    Creates Razorpay order for payment.
+    No COD option - payment must be completed online.
+    """
+    try:
+        # Validate cart items
+        cart_items = (
+            db.query(CartItem)
+            .filter(
+                CartItem.id.in_(request_data.cart_item_ids),
+                CartItem.user_id == current_user.id
+            )
+            .all()
+        )
+        
+        if len(cart_items) != len(request_data.cart_item_ids):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="One or more cart items not found"
+            )
+        
+        # Calculate total amount
+        subtotal = 0.0
+        delivery_charge = 50.0
+        grouped_items = {}
+        
+        for item in cart_items:
+            group_key = item.group_id or f"single_{item.id}"
+            if group_key not in grouped_items:
+                grouped_items[group_key] = []
+            grouped_items[group_key].append(item)
+        
+        for group_key, items in grouped_items.items():
+            item = items[0]
+            product = item.product
+            subtotal += item.quantity * product.SpecialPrice
+        
+        total_amount = subtotal + delivery_charge
+        
+        # Create Razorpay order first
+        razorpay_order = create_razorpay_order(
+            amount=total_amount,
+            currency="INR",
+            receipt=f"order_{current_user.id}_{uuid.uuid4().hex[:8]}",
+            notes={
+                "user_id": str(current_user.id),
+                "address_id": str(request_data.address_id)
+            }
+        )
+        
+        # Create order in database
+        order = create_order_from_cart(
+            db=db,
+            user_id=current_user.id,
+            address_id=request_data.address_id,
+            cart_item_ids=request_data.cart_item_ids,
+            razorpay_order_id=razorpay_order.get("id")
+        )
+        
+        logger.info(f"Order {order.order_number} created for user {current_user.id}")
+        
+        return RazorpayOrderResponse(
+            razorpay_order_id=razorpay_order.get("id"),
+            amount=total_amount,
+            currency="INR",
+            order_id=order.id,
+            order_number=order.order_number
+        )
+    
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating order: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error creating order: {str(e)}"
+        )
+
+
+@router.post("/verify-payment", response_model=PaymentVerificationResponse)
+def verify_payment(
+    payment_data: VerifyPaymentRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Verify Razorpay payment and complete order.
+    Removes cart items after successful payment.
+    """
+    try:
+        # Verify and complete payment
+        order = verify_and_complete_payment(
+            db=db,
+            order_id=payment_data.order_id,
+            razorpay_order_id=payment_data.razorpay_order_id,
+            razorpay_payment_id=payment_data.razorpay_payment_id,
+            razorpay_signature=payment_data.razorpay_signature
+        )
+        
+        # Verify order belongs to user
+        if order.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Order does not belong to you"
+            )
+        
+        # Delete cart items after successful payment
+        # Get order item details (product_id, member_id pairs)
+        order_item_pairs = [(item.product_id, item.member_id) for item in order.items]
+        
+        # Find and delete matching cart items by product_id and member_id
+        deleted_group_ids = set()
+        
+        for product_id, member_id in order_item_pairs:
+            cart_item = (
+                db.query(CartItem)
+                .filter(
+                    CartItem.user_id == current_user.id,
+                    CartItem.product_id == product_id,
+                    CartItem.member_id == member_id
+                )
+                .first()
+            )
+            
+            if cart_item:
+                # If cart item has group_id, delete all items in the group (for couple/family products)
+                if cart_item.group_id and cart_item.group_id not in deleted_group_ids:
+                    group_items = (
+                        db.query(CartItem)
+                        .filter(
+                            CartItem.group_id == cart_item.group_id,
+                            CartItem.user_id == current_user.id
+                        )
+                        .all()
+                    )
+                    for item in group_items:
+                        db.delete(item)
+                    deleted_group_ids.add(cart_item.group_id)
+                elif not cart_item.group_id:
+                    # Single item, delete it
+                    db.delete(cart_item)
+        
+        db.commit()
+        
+        logger.info(f"Payment verified and order {order.order_number} completed for user {current_user.id}")
+        
+        return PaymentVerificationResponse(
+            status="success",
+            message="Payment verified successfully. Order confirmed.",
+            order_id=order.id,
+            order_number=order.order_number,
+            payment_status=order.payment_status.value
+        )
+    
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error verifying payment: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error verifying payment: {str(e)}"
+        )
+
+
+@router.get("/list", response_model=List[OrderResponse])
+def get_orders(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all orders for current user"""
+    orders = get_user_orders(db, current_user.id)
+    
+    result = []
+    for order in orders:
+        order_items = [
+            {
+                "order_item_id": item.id,
+                "product_id": item.product_id,
+                "product_name": item.product.Name if item.product else "Unknown",
+                "member_id": item.member_id,
+                "member_name": item.member.name if item.member else "Unknown",
+                "quantity": item.quantity,
+                "unit_price": item.unit_price,
+                "total_price": item.total_price
+            }
+            for item in order.items
+        ]
+        
+        result.append({
+            "order_id": order.id,
+            "order_number": order.order_number,
+            "user_id": order.user_id,
+            "address_id": order.address_id,
+            "total_amount": order.total_amount,
+            "payment_status": order.payment_status.value,
+            "order_status": order.order_status.value,
+            "razorpay_order_id": order.razorpay_order_id,
+            "created_at": order.created_at,
+            "items": order_items
+        })
+    
+    return result
+
+
+@router.get("/{order_id}", response_model=OrderResponse)
+def get_order(
+    order_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get order details by ID"""
+    order = get_order_by_id(db, order_id, user_id=current_user.id)
+    
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Order not found"
+        )
+    
+    order_items = [
+        {
+            "order_item_id": item.id,
+            "product_id": item.product_id,
+            "product_name": item.product.Name if item.product else "Unknown",
+            "member_id": item.member_id,
+            "member_name": item.member.name if item.member else "Unknown",
+            "quantity": item.quantity,
+            "unit_price": item.unit_price,
+            "total_price": item.total_price
+        }
+        for item in order.items
+    ]
+    
+    return {
+        "order_id": order.id,
+        "order_number": order.order_number,
+        "user_id": order.user_id,
+        "address_id": order.address_id,
+        "total_amount": order.total_amount,
+        "payment_status": order.payment_status.value,
+        "order_status": order.order_status.value,
+        "razorpay_order_id": order.razorpay_order_id,
+        "created_at": order.created_at,
+        "items": order_items
+    }
+
+
+@router.get("/{order_id}/tracking", response_model=OrderTrackingResponse)
+def get_order_tracking(
+    order_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get order tracking information with status history.
+    """
+    order = get_order_by_id(db, order_id, user_id=current_user.id)
+    
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Order not found"
+        )
+    
+    # Get status history
+    status_history_data = [
+        {
+            "status": hist.status.value,
+            "previous_status": hist.previous_status.value if hist.previous_status else None,
+            "notes": hist.notes,
+            "changed_by": hist.changed_by,
+            "created_at": hist.created_at.isoformat() if hist.created_at else None
+        }
+        for hist in order.status_history
+    ]
+    
+    return {
+        "order_id": order.id,
+        "order_number": order.order_number,
+        "current_status": order.order_status.value,
+        "status_history": status_history_data,
+        "estimated_completion": order.scheduled_date if order.scheduled_date else None
+    }
+
+
+@router.put("/{order_id}/status")
+def update_order_status_api(
+    order_id: int,
+    status_data: UpdateOrderStatusRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update order status (typically used by admin/lab technicians).
+    Valid statuses: order_confirmed, scheduled, schedule_confirmed_by_lab,
+    sample_collected, sample_received_by_lab, testing_in_progress, report_ready
+    """
+    try:
+        # Validate status
+        try:
+            new_status = OrderStatus(status_data.status)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status: {status_data.status}"
+            )
+        
+        # Verify order exists
+        order = get_order_by_id(db, order_id)
+        if not order:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found"
+            )
+        
+        # Update status
+        order = update_order_status(
+            db=db,
+            order_id=order_id,
+            new_status=new_status,
+            changed_by=str(current_user.id),
+            notes=status_data.notes,
+            scheduled_date=status_data.scheduled_date,
+            technician_name=status_data.technician_name,
+            technician_contact=status_data.technician_contact,
+            lab_name=status_data.lab_name
+        )
+        
+        return {
+            "status": "success",
+            "message": f"Order status updated to {new_status.value}",
+            "order_id": order.id,
+            "order_number": order.order_number,
+            "current_status": order.order_status.value
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error updating order status: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating order status: {str(e)}"
+        )
+

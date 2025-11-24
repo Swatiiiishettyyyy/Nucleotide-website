@@ -1,15 +1,18 @@
 from .Member_model import Member, RelationType
 from .Member_audit_model import MemberAuditLog
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from fastapi import HTTPException
-from typing import Optional
+from typing import Optional, Union
 from datetime import datetime
+
+from Product_module.category_service import resolve_category
 
 def save_member(
     db: Session,
     user,
     req,
-    category: str = "genome_testing",
+    category_id: Optional[int] = None,
     plan_type: Optional[str] = None,
     ip_address: Optional[str] = None,
     user_agent: Optional[str] = None,
@@ -19,6 +22,13 @@ def save_member(
     Save or update member.
     Validates that member is not already in a conflicting plan type.
     """
+    category_obj = resolve_category(db, category_id)
+    category_name = category_obj.name
+    category_filter = or_(
+        Member.associated_category_id == category_obj.id,
+        Member.associated_category == category_name
+    )
+
     # Check for duplicate member in same category
     if req.member_id == 0:  # New member
         # Check if member with same name AND relation already exists in same category
@@ -27,13 +37,13 @@ def save_member(
             Member.user_id == user.id,
             Member.name == req.name,
             Member.relation == RelationType[req.relation.upper()] if hasattr(RelationType, req.relation.upper()) else RelationType.OTHER,
-            Member.associated_category == category
+            category_filter
         ).first()
         
         if existing:
             raise HTTPException(
                 status_code=400,
-                detail=f"Member '{req.name}' with relation '{req.relation}' already exists in {category} category. Cannot add duplicate."
+                detail=f"Member '{req.name}' with relation '{req.relation}' already exists in {category_name} category. Cannot add duplicate."
             )
         
         # If adding to family plan, check if member is already in personal/couple plan
@@ -41,7 +51,7 @@ def save_member(
             conflicting_member = db.query(Member).filter(
                 Member.user_id == user.id,
                 Member.name == req.name,
-                Member.associated_category == category,
+                category_filter,
                 Member.associated_plan_type.in_(["single", "couple"])
             ).first()
             
@@ -55,7 +65,7 @@ def save_member(
             conflicting_member = db.query(Member).filter(
                 Member.user_id == user.id,
                 Member.name == req.name,
-                Member.associated_category == category,
+                category_filter,
                 Member.associated_plan_type == "family"
             ).first()
             
@@ -81,8 +91,10 @@ def save_member(
             relation=relation_enum,
             age=req.age,
             gender=req.gender,
+            dob=req.dob,
             mobile=req.mobile,
-            associated_category=category,
+            associated_category=category_name,
+            associated_category_id=category_obj.id,
             associated_plan_type=plan_type
         )
         db.add(member)
@@ -95,8 +107,9 @@ def save_member(
             "relation": req.relation,
             "age": req.age,
             "gender": req.gender,
+            "dob": req.dob.isoformat() if req.dob else None,
             "mobile": req.mobile,
-            "category": category,
+            "category": category_name,
             "plan_type": plan_type
         }
         audit = MemberAuditLog(
@@ -122,6 +135,7 @@ def save_member(
             "relation": str(member.relation.value) if hasattr(member.relation, 'value') else str(member.relation),
             "age": member.age,
             "gender": member.gender,
+            "dob": member.dob.isoformat() if member.dob else None,
             "mobile": member.mobile
         }
         
@@ -129,6 +143,7 @@ def save_member(
         member.relation = relation_enum
         member.age = req.age
         member.gender = req.gender
+        member.dob = req.dob
         member.mobile = req.mobile
         # Don't update category/plan_type on edit (to maintain integrity)
         db.commit()
@@ -139,6 +154,7 @@ def save_member(
             "relation": req.relation,
             "age": req.age,
             "gender": req.gender,
+            "dob": req.dob.isoformat() if req.dob else None,
             "mobile": req.mobile
         }
         audit = MemberAuditLog(
@@ -155,12 +171,15 @@ def save_member(
         db.commit()
     return member
 
-def get_members_by_user(db: Session, user, category: Optional[str] = None, plan_type: Optional[str] = None):
+def get_members_by_user(db: Session, user, category: Optional[Union[int, str]] = None, plan_type: Optional[str] = None):
     """Get members for user, optionally filtered by category and plan_type"""
     query = db.query(Member).filter(Member.user_id == user.id)
     
     if category:
-        query = query.filter(Member.associated_category == category)
+        if isinstance(category, int):
+            query = query.filter(Member.associated_category_id == category)
+        else:
+            query = query.filter(Member.associated_category == category)
     if plan_type:
         query = query.filter(Member.associated_plan_type == plan_type)
     

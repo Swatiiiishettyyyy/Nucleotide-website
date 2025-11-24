@@ -42,6 +42,8 @@ def add_to_cart(
         product = db.query(Product).filter(Product.ProductId == item.product_id).first()
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
+
+        category_name = product.category.name if product.category else "this category"
         
         # Validate address exists and belongs to user
         address = db.query(Address).filter(
@@ -67,17 +69,28 @@ def add_to_cart(
         if len(members) != len(item.member_ids):
             raise HTTPException(status_code=404, detail="One or more members not found")
         
-        # Check if any of these members are already in cart for a different product
-        existing_cart_members = db.query(CartItem).filter(
-            CartItem.user_id == current_user.id,
-            CartItem.member_id.in_(item.member_ids),
-            CartItem.product_id != item.product_id  # Different product
-        ).first()
+        # Check if any of these members are already in cart for another product
+        # within the same category
+        existing_cart_members = (
+            db.query(CartItem)
+            .join(Product, CartItem.product_id == Product.ProductId)
+            .filter(
+                CartItem.user_id == current_user.id,
+                CartItem.member_id.in_(item.member_ids),
+                Product.category_id == product.category_id,
+                CartItem.product_id != item.product_id
+            )
+            .first()
+        )
         
         if existing_cart_members:
             raise HTTPException(
                 status_code=400,
-                detail="One or more members are already in your cart for a different product. Please remove them first."
+                detail=(
+                    "One or more members in this request already belong to another "
+                    f"product in the '{category_name}' category. "
+                    "A member cannot subscribe to multiple products in the same category."
+                )
             )
         
         # Check if same product with same members and address already exists in cart
@@ -199,7 +212,6 @@ def add_to_cart(
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Error adding to cart for user {current_user.id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error adding to cart: {str(e)}")
 
 
@@ -249,28 +261,28 @@ def update_cart_item(
 
         product = cart_item.product
         
-    # Audit log
-    ip, user_agent = get_client_info(request)
-    correlation_id = str(uuid.uuid4())
-    create_audit_log(
-        db=db,
-        user_id=current_user.id,
-        action="UPDATE",
-        entity_type="CART_ITEM",
-        entity_id=cart_item.id,
-        cart_id=cart_item.id,
-        details={
-            "product_id": product.ProductId,
-            "old_quantity": old_quantity,
-            "new_quantity": update.quantity,
-            "group_id": group_id,
-            "items_updated": updated_count
-        },
-        ip_address=ip,
-        user_agent=user_agent,
-        username=current_user.name or current_user.mobile,
-        correlation_id=correlation_id
-    )
+        # Audit log
+        ip, user_agent = get_client_info(request)
+        correlation_id = str(uuid.uuid4())
+        create_audit_log(
+            db=db,
+            user_id=current_user.id,
+            action="UPDATE",
+            entity_type="CART_ITEM",
+            entity_id=cart_item.id,
+            cart_id=cart_item.id,
+            details={
+                "product_id": product.ProductId,
+                "old_quantity": old_quantity,
+                "new_quantity": update.quantity,
+                "group_id": group_id,
+                "items_updated": updated_count
+            },
+            ip_address=ip,
+            user_agent=user_agent,
+            username=current_user.name or current_user.mobile,
+            correlation_id=correlation_id
+        )
         
         return {
             "status": "success",

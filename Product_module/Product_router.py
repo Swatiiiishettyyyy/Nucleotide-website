@@ -1,21 +1,34 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from .Product_model import Product
-from database import SessionLocal
+from .Product_model import Product, PlanType
 from deps import get_db
 from .Product_schema import (
     ProductCreate,
-    ProductResponse,
     ProductListResponse,
-    ProductSingleResponse
+    ProductSingleResponse,
 )
+from .category_service import resolve_category
 
 router = APIRouter(prefix="/products", tags=["Products"])
 
+
 @router.post("/addProduct", response_model=ProductSingleResponse)
 def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
-    new_product = Product(**payload.dict())
+    category = resolve_category(db, payload.category_id)
+
+    new_product = Product(
+        Name=payload.Name,
+        Price=payload.Price,
+        SpecialPrice=payload.SpecialPrice,
+        ShortDescription=payload.ShortDescription,
+        Discount=payload.Discount,
+        Description=payload.Description,
+        Images=payload.Images,
+        plan_type=PlanType(payload.plan_type.value),
+        max_members=payload.max_members,
+        category_id=category.id,
+    )
     db.add(new_product)
     db.commit()
     db.refresh(new_product)
@@ -23,7 +36,7 @@ def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
     return {
         "status": "success",
         "message": "Product created successfully.",
-        "data": new_product
+        "data": new_product,
     }
 
 
@@ -34,15 +47,12 @@ def get_products(db: Session = Depends(get_db)):
     return {
         "status": "success",
         "message": "Product list fetched successfully.",
-        "data": products
+        "data": products,
     }
-
-from fastapi import HTTPException
 
 
 @router.get("/detail/{ProductId}", response_model=ProductSingleResponse)
 def get_product_detail(ProductId: int, db: Session = Depends(get_db)):
-    # Use ProductId as in the model
     product = db.query(Product).filter(Product.ProductId == ProductId).first()
 
     if not product:
@@ -51,5 +61,5 @@ def get_product_detail(ProductId: int, db: Session = Depends(get_db)):
     return {
         "status": "success",
         "message": "Product fetched successfully.",
-        "data": product
+        "data": product,
     }

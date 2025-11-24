@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func, with_for_update
+from sqlalchemy import func
 from datetime import datetime, timedelta
 import secrets
 from typing import Optional
@@ -22,51 +22,39 @@ def create_device_session(
     max_active_sessions: int = 4,
     correlation_id: Optional[str] = None
 ) -> DeviceSession:
-    """
-    Create a new device session for a user.
-    If user has more than max_active_sessions, delete the oldest session.
-    Uses database-level locking to prevent race conditions.
-    """
+
     try:
-        # Use database lock to prevent race conditions
-        # Lock the user's sessions to prevent concurrent session creation
+        # Lock active sessions for this user
         active_sessions = (
             db.query(DeviceSession)
             .filter(
                 DeviceSession.user_id == user_id,
                 DeviceSession.is_active == True
             )
-            .with_for_update()  # Row-level lock
+            .with_for_update()
             .order_by(DeviceSession.last_active.asc())
             .all()
         )
-        
+
         # If max sessions reached, delete oldest
         if len(active_sessions) >= max_active_sessions:
-            # Delete oldest session(s) to make room
             sessions_to_delete = active_sessions[:len(active_sessions) - max_active_sessions + 1]
             for old_session in sessions_to_delete:
                 db.delete(old_session)
-            db.flush()  # Flush before commit
-        
-        # Generate session token (ensure uniqueness)
+            db.flush()
+
+        # Generate unique session token
         session_token = secrets.token_urlsafe(32)
-        max_retries = 5
-        retry_count = 0
-        while retry_count < max_retries:
+        for _ in range(5):
             existing = db.query(DeviceSession).filter(DeviceSession.session_token == session_token).first()
             if not existing:
                 break
             session_token = secrets.token_urlsafe(32)
-            retry_count += 1
-        
-        if retry_count >= max_retries:
+        else:
             raise Exception("Failed to generate unique session token")
-        
-        # Use browser_info from user_agent or device_details
-        browser_info = user_agent or device_details or None
-        
-        # Create new session
+
+        browser_info = user_agent or device_details
+
         ds = DeviceSession(
             user_id=user_id,
             session_token=session_token,
@@ -76,16 +64,18 @@ def create_device_session(
             browser_info=browser_info,
             last_active=datetime.utcnow(),
             is_active=True,
-            # Legacy fields for backward compatibility
+
+            # backward-compat
             session_key=session_token,
             device_details=device_details,
             user_agent=user_agent
         )
+
         db.add(ds)
         db.commit()
         db.refresh(ds)
-        
-        # Audit log for session creation
+
+        # Audit log
         try:
             create_session_audit_log(
                 db=db,
@@ -100,42 +90,37 @@ def create_device_session(
             )
         except Exception as e:
             logger.warning(f"Failed to create session audit log: {e}")
-            # Don't fail session creation if audit log fails
-        
+
         return ds
+
     except Exception as e:
         db.rollback()
         logger.error(f"Error creating device session: {e}")
         raise
 
 
+
 def get_device_session(db: Session, session_id: int) -> Optional[DeviceSession]:
-    """
-    Retrieve device session by ID.
-    """
     return db.query(DeviceSession).filter(DeviceSession.id == session_id).first()
 
 
+
 def get_device_session_by_token(db: Session, session_token: str) -> Optional[DeviceSession]:
-    """
-    Retrieve device session by session token.
-    """
     return db.query(DeviceSession).filter(
         DeviceSession.session_token == session_token,
         DeviceSession.is_active == True
     ).first()
 
 
+
 def update_last_active(db: Session, session_id: int) -> bool:
-    """
-    Update the last_active timestamp for a session.
-    """
-    session = db.query(DeviceSession).filter(DeviceSession.id == session_id).first()
-    if session:
-        session.last_active = datetime.utcnow()
+    session_data = db.query(DeviceSession).filter(DeviceSession.id == session_id).first()
+    if session_data:
+        session_data.last_active = datetime.utcnow()
         db.commit()
         return True
     return False
+
 
 
 def deactivate_session(
@@ -146,24 +131,27 @@ def deactivate_session(
     user_agent: Optional[str] = None,
     correlation_id: Optional[str] = None
 ) -> bool:
-    """
-    Deactivate a device session (logout).
-    Only deletes this specific session; other sessions remain active.
-    """
-    session = db.query(DeviceSession).filter(DeviceSession.id == session_id).first()
-    if session:
-        session.is_active = False
-        session.event_on_logout = datetime.utcnow()
+
+    # FIXED: Incorrect usage of "session.query" → should be "db.query"
+    session_data = (
+        db.query(DeviceSession)
+        .filter(DeviceSession.id == session_id)
+        .with_for_update()
+        .first()
+    )
+
+    if session_data:
+        session_data.is_active = False
+        session_data.event_on_logout = datetime.utcnow()
         db.commit()
-        
-        # Audit log for session deletion
+
         try:
             create_session_audit_log(
                 db=db,
                 event_type="DELETED",
-                user_id=session.user_id,
+                user_id=session_data.user_id,
                 session_id=session_id,
-                device_id=session.device_id,
+                device_id=session_data.device_id,
                 reason=reason or "User logout",
                 ip_address=ip_address,
                 user_agent=user_agent,
@@ -171,65 +159,54 @@ def deactivate_session(
             )
         except Exception as e:
             logger.warning(f"Failed to create session audit log: {e}")
-        
+
         return True
+
     return False
 
 
+
 def deactivate_session_by_token(db: Session, session_token: str, reason: Optional[str] = None) -> bool:
-    """
-    Deactivate a device session by token (logout).
-    """
-    session = get_device_session_by_token(db, session_token)
-    if session:
-        session.is_active = False
-        session.event_on_logout = datetime.utcnow()
+    session_data = get_device_session_by_token(db, session_token)
+    if session_data:
+        session_data.is_active = False
+        session_data.event_on_logout = datetime.utcnow()
         db.commit()
         return True
     return False
 
 
+
 def get_user_active_sessions(db: Session, user_id: int) -> list[DeviceSession]:
-    """
-    Get all active sessions for a user.
-    """
     return (
         db.query(DeviceSession)
-        .filter(
-            DeviceSession.user_id == user_id,
-            DeviceSession.is_active == True
-        )
+        .filter(DeviceSession.user_id == user_id, DeviceSession.is_active == True)
         .order_by(DeviceSession.last_active.desc())
         .all()
     )
 
 
+
 def cleanup_inactive_sessions(db: Session, hours_inactive: int = 24) -> int:
-    """
-    Delete inactive or deleted sessions older than specified hours.
-    Returns count of deleted sessions.
-    """
-    cutoff_time = datetime.utcnow() - timedelta(hours=hours_inactive)
-    
-    # Delete sessions that are inactive and older than cutoff
+    cutoff = datetime.utcnow() - timedelta(hours=hours_inactive)
+
     deleted_count = (
         db.query(DeviceSession)
         .filter(
             DeviceSession.is_active == False,
-            DeviceSession.event_on_logout < cutoff_time
+            DeviceSession.event_on_logout < cutoff
         )
         .delete()
     )
-    
-    # Also delete sessions that haven't been active for a long time (stale sessions)
+
     stale_count = (
         db.query(DeviceSession)
         .filter(
-            DeviceSession.last_active < cutoff_time,
+            DeviceSession.last_active < cutoff,
             DeviceSession.is_active == True
         )
         .delete()
     )
-    
+
     db.commit()
     return deleted_count + stale_count

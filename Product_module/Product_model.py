@@ -1,6 +1,18 @@
-from sqlalchemy import Column, Integer, String, Float, JSON, Enum
+from sqlalchemy import Column, Integer, String, Float, JSON, Enum, ForeignKey
+from sqlalchemy.orm import relationship
 from database import Base
 import enum
+
+DEFAULT_CATEGORY_NAME = "Genetic Testing"
+
+
+class Category(Base):
+    __tablename__ = "categories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, unique=True, index=True)
+
+    products = relationship("Product", back_populates="category")
 
 
 class PlanType(str, enum.Enum):
@@ -26,5 +38,6 @@ class Product(Base):
     
     # New fields for plan type and category
     plan_type = Column(Enum(PlanType), nullable=False, default=PlanType.SINGLE, index=True)
-    category = Column(String(100), nullable=False, default="genome_testing", index=True)
+    category_id = Column(Integer, ForeignKey("categories.id"), nullable=False, index=True)
+    category = relationship("Category", back_populates="products")
     max_members = Column(Integer, nullable=False, default=1)  # 1 for single, 2 for couple, 4 for family

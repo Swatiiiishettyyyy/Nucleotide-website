@@ -16,6 +16,16 @@ class CartAdd(BaseModel):
         return v
 
 
+class CartUpdate(BaseModel):
+    quantity: int
+    
+    @validator('quantity')
+    def validate_quantity(cls, v):
+        if v < 1:
+            raise ValueError('Quantity must be at least 1')
+        return v
+
+
 class CartItemResponse(BaseModel):
     cart_id: int
     user_id: Optional[int] = None
