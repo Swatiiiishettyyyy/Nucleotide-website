@@ -9,8 +9,8 @@ import json
 logger = logging.getLogger(__name__)
 
 def save_address(db: Session, user, req, request: Optional[Request] = None, correlation_id: Optional[str] = None):
-    # Auto-fill city and state from pincode (if not provided)
-    req.auto_fill_city_state()
+    # Auto-fill city/state/locality from pincode (if not provided)
+    locality_options = req.auto_fill_city_state() or []
     
     # If still not filled, allow manual entry (don't block user)
     # But warn if pincode lookup failed
@@ -35,6 +35,7 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
             address_label=req.address_label,
             street_address=req.street_address,
             landmark=req.landmark,
+            locality=req.locality,
             city=req.city,
             state=req.state,
             postal_code=req.postal_code,
@@ -49,6 +50,7 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
             "address_label": req.address_label,
             "street_address": req.street_address,
             "landmark": req.landmark,
+            "locality": req.locality,
             "city": req.city,
             "state": req.state,
             "postal_code": req.postal_code,
@@ -65,6 +67,7 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
             "address_label": address.address_label,
             "street_address": address.street_address,
             "landmark": address.landmark,
+            "locality": address.locality,
             "city": address.city,
             "state": address.state,
             "postal_code": address.postal_code,
@@ -75,6 +78,7 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
         address.address_label = req.address_label
         address.street_address = req.street_address
         address.landmark = req.landmark
+        address.locality = req.locality
         address.city = req.city
         address.state = req.state
         address.postal_code = req.postal_code
@@ -87,6 +91,7 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
             "address_label": req.address_label,
             "street_address": req.street_address,
             "landmark": req.landmark,
+            "locality": req.locality,
             "city": req.city,
             "state": req.state,
             "postal_code": req.postal_code,
@@ -109,7 +114,7 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
     db.add(audit)
     db.commit()
 
-    return address
+    return address, locality_options
 
 def get_addresses_by_user(db, user):
     return db.query(Address).filter_by(user_id=user.id).all()

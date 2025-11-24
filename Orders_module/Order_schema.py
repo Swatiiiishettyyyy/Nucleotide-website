@@ -8,7 +8,10 @@ from datetime import datetime
 
 class CreateOrderRequest(BaseModel):
     """Request to create order from cart"""
-    address_id: int = Field(..., description="Shipping address ID")
+    address_id: Optional[int] = Field(
+        None,
+        description="Optional shipping address ID. If omitted, the address from selected cart items will be used."
+    )
     cart_item_ids: List[int] = Field(..., description="List of cart item IDs to order")
 
 
@@ -19,6 +22,8 @@ class OrderItemData(BaseModel):
     product_name: str
     member_id: int
     member_name: str
+    address_id: int
+    address_label: Optional[str] = None
     quantity: int
     unit_price: float
     total_price: float

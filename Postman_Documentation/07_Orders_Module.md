@@ -26,7 +26,7 @@ Authorization: Bearer <access_token>
 ### Request Body
 ```json
 {
-  "address_id": 1,
+  "address_id": null,
   "cart_item_ids": [1, 2, 3]
 }
 ```
@@ -34,7 +34,7 @@ Authorization: Bearer <access_token>
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| address_id | integer | Yes | Shipping address ID | 1 |
+| address_id | integer | No | Optional shipping address ID. When omitted, the address from the selected cart items is used. | 1 |
 | cart_item_ids | array | Yes | List of cart item IDs to order | [1, 2, 3] |
 
 ### Success Response (200 OK)
@@ -75,7 +75,7 @@ Authorization: Bearer <access_token>
 1. Prerequisites:
    - Valid access token
    - Items in cart (use Cart module)
-   - Valid address_id
+   - (Optional) address_id if you want to override the addresses stored on cart items
 2. Create a new POST request in Postman
 3. Set URL to: `http://localhost:8000/orders/create`
 4. Set Headers:
@@ -89,13 +89,13 @@ Authorization: Bearer <access_token>
 ### Prerequisites
 - Valid access token
 - Items in cart (use Cart module "View Cart" to get cart_item_ids)
-- Valid address_id (use Address module)
+- Optional address_id (use Address module) if you need to force a different shipping address
 
-### Notes
 - Creates a Razorpay order for payment
 - Order is created with status "pending_payment"
 - Cart items are not removed until payment is verified
 - Amount includes delivery charge (50.00)
+- Each order item keeps its own address from the cart; the top-level `address_id` is used as the primary shipping address (defaults to the cart item's address when only one exists)
 
 ---
 
@@ -238,6 +238,8 @@ Authorization: Bearer <access_token>
         "product_name": "DNA Test Kit - Couple",
         "member_id": 1,
         "member_name": "John Doe",
+        "address_id": 5,
+        "address_label": "Home",
         "quantity": 1,
         "unit_price": 8000.00,
         "total_price": 8000.00
@@ -248,6 +250,8 @@ Authorization: Bearer <access_token>
         "product_name": "DNA Test Kit - Couple",
         "member_id": 2,
         "member_name": "Jane Doe",
+        "address_id": 6,
+        "address_label": "Parents House",
         "quantity": 1,
         "unit_price": 8000.00,
         "total_price": 8000.00
@@ -330,6 +334,8 @@ Authorization: Bearer <access_token>
       "product_name": "DNA Test Kit - Couple",
       "member_id": 1,
       "member_name": "John Doe",
+      "address_id": 5,
+      "address_label": "Home",
       "quantity": 1,
       "unit_price": 8000.00,
       "total_price": 8000.00

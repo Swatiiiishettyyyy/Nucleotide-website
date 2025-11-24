@@ -30,6 +30,7 @@ Authorization: Bearer <access_token>
   "address_label": "Home",
   "street_address": "123 Main Street",
   "landmark": "Near Park",
+  "locality": "Lower Parel",
   "city": "Mumbai",
   "state": "Maharashtra",
   "postal_code": "400001",
@@ -45,6 +46,7 @@ Authorization: Bearer <access_token>
   "address_label": "Office",
   "street_address": "456 Business Park",
   "landmark": "Building A",
+  "locality": "Connaught Place",
   "city": "Delhi",
   "state": "Delhi",
   "postal_code": "110001",
@@ -60,6 +62,7 @@ Authorization: Bearer <access_token>
   "address_label": "Home",
   "street_address": "789 Residential Area",
   "landmark": null,
+  "locality": null,
   "city": null,
   "state": null,
   "postal_code": "400001",
@@ -75,6 +78,7 @@ Authorization: Bearer <access_token>
 | address_label | string | Yes | Label for address (Home, Office, etc.) | "Home" |
 | street_address | string | Yes | Street address | "123 Main Street" |
 | landmark | string | No | Nearby landmark | "Near Park" |
+| locality | string | No | Specific area/region (auto-filled; pick from pincode options) | "Whitefield" |
 | city | string | No | City (auto-filled from pincode if not provided) | "Mumbai" |
 | state | string | No | State (auto-filled from pincode if not provided) | "Maharashtra" |
 | postal_code | string | Yes | 6-digit pincode | "400001" |
@@ -92,12 +96,25 @@ Authorization: Bearer <access_token>
     "address_label": "Home",
     "street_address": "123 Main Street",
     "landmark": "Near Park",
+    "locality": "Lower Parel",
     "city": "Mumbai",
     "state": "Maharashtra",
     "postal_code": "400001",
     "country": "India",
     "save_for_future": true
-  }
+  },
+  "locality_options": [
+    {
+      "name": "Lower Parel",
+      "branch_type": "Sub Office",
+      "delivery_status": "Delivery"
+    },
+    {
+      "name": "Worli",
+      "branch_type": "Sub Office",
+      "delivery_status": "Delivery"
+    }
+  ]
 }
 ```
 
@@ -149,7 +166,7 @@ Authorization: Bearer <access_token>
 ### Notes
 - Use `address_id: 0` to create a new address
 - Use existing `address_id` to update an address
-- City and state are auto-filled from pincode if not provided
+- City, state, and locality are auto-filled from pincode if not provided. The save response includes `locality_options` so you can prompt the user to pick the exact area (e.g., Whitefield, Koramangala, etc.)
 - Pincode must be exactly 6 digits
 - Address is required before adding items to cart
 
@@ -184,6 +201,7 @@ Authorization: Bearer <access_token>
       "address_label": "Home",
       "street_address": "123 Main Street",
       "landmark": "Near Park",
+      "locality": "Lower Parel",
       "city": "Mumbai",
       "state": "Maharashtra",
       "postal_code": "400001",
@@ -196,6 +214,7 @@ Authorization: Bearer <access_token>
       "address_label": "Office",
       "street_address": "456 Business Park",
       "landmark": "Building A",
+      "locality": "Connaught Place",
       "city": "Delhi",
       "state": "Delhi",
       "postal_code": "110001",
@@ -242,7 +261,64 @@ Authorization: Bearer <access_token>
 
 ---
 
-## Endpoint 3: Delete Address
+## Endpoint 3: Lookup Pincode Details
+
+### Details
+- **Method:** `GET`
+- **Endpoint:** `/address/pincode/{postal_code}`
+- **Description:** Fetch city, state, and all available localities for a given 6-digit pincode.
+
+### Headers
+```
+(No authentication required)
+```
+
+### Path Parameters
+| Parameter | Type | Required | Description | Example |
+|-----------|------|----------|-------------|---------|
+| postal_code | string | Yes | 6-digit pincode | `560001` |
+
+### Success Response (200 OK)
+```json
+{
+  "status": "success",
+  "message": "Pincode details fetched successfully.",
+  "data": {
+    "city": "Bangalore",
+    "state": "Karnataka",
+    "localities": [
+      {
+        "name": "Whitefield",
+        "branch_type": "Sub Office",
+        "delivery_status": "Delivery",
+        "district": "Bangalore",
+        "state": "Karnataka",
+        "pincode": "560066"
+      },
+      {
+        "name": "Koramangala",
+        "branch_type": "Sub Office",
+        "delivery_status": "Delivery",
+        "district": "Bangalore",
+        "state": "Karnataka",
+        "pincode": "560034"
+      }
+    ]
+  }
+}
+```
+
+### Error Responses
+- **400 Bad Request:** Postal code is not exactly 6 digits.
+- **404 Not Found:** No city/state data found for the provided pincode.
+
+### Notes
+- Use this endpoint to populate a locality drop-down before saving an address.
+- Responses are cached, so repeated lookups for the same pincode are fast.
+
+---
+
+## Endpoint 4: Delete Address
 
 ### Details
 - **Method:** `DELETE`

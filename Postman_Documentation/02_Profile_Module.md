@@ -262,3 +262,4 @@ user_id: (set after verify-otp)
 ### Issue: "Not authenticated"
 - **Solution:** Ensure you have a valid access token in the Authorization header with format: `Bearer <token>`.
 
+

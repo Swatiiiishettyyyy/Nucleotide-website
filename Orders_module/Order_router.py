@@ -89,6 +89,9 @@ def create_order(
         
         total_amount = subtotal + delivery_charge
         
+        # Derive primary address id (requested or from first cart item)
+        primary_address_id = request_data.address_id or (cart_items[0].address_id if cart_items else None)
+
         # Create Razorpay order first
         razorpay_order = create_razorpay_order(
             amount=total_amount,
@@ -96,7 +99,7 @@ def create_order(
             receipt=f"order_{current_user.id}_{uuid.uuid4().hex[:8]}",
             notes={
                 "user_id": str(current_user.id),
-                "address_id": str(request_data.address_id)
+                "address_id": str(primary_address_id) if primary_address_id else "None"
             }
         )
         
@@ -104,7 +107,7 @@ def create_order(
         order = create_order_from_cart(
             db=db,
             user_id=current_user.id,
-            address_id=request_data.address_id,
+            address_id=primary_address_id,
             cart_item_ids=request_data.cart_item_ids,
             razorpay_order_id=razorpay_order.get("id")
         )
@@ -237,6 +240,8 @@ def get_orders(
                 "product_name": item.product.Name if item.product else "Unknown",
                 "member_id": item.member_id,
                 "member_name": item.member.name if item.member else "Unknown",
+                "address_id": item.address_id,
+                "address_label": item.address.address_label if item.address else None,
                 "quantity": item.quantity,
                 "unit_price": item.unit_price,
                 "total_price": item.total_price
@@ -283,6 +288,8 @@ def get_order(
             "product_name": item.product.Name if item.product else "Unknown",
             "member_id": item.member_id,
             "member_name": item.member.name if item.member else "Unknown",
+            "address_id": item.address_id,
+            "address_label": item.address.address_label if item.address else None,
             "quantity": item.quantity,
             "unit_price": item.unit_price,
             "total_price": item.total_price

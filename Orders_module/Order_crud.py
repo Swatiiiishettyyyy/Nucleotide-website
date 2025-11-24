@@ -29,7 +29,7 @@ def generate_order_number() -> str:
 def create_order_from_cart(
     db: Session,
     user_id: int,
-    address_id: int,
+    address_id: Optional[int],
     cart_item_ids: List[int],
     razorpay_order_id: Optional[str] = None
 ) -> Order:
@@ -53,14 +53,34 @@ def create_order_from_cart(
     if not cart_items:
         raise ValueError("No cart items selected")
     
-    # Validate address belongs to user
-    address = db.query(Address).filter(
-        Address.id == address_id,
-        Address.user_id == user_id
-    ).first()
-    
-    if not address:
-        raise ValueError("Address not found or does not belong to you")
+    # Determine primary address for order header
+    unique_cart_address_ids = {item.address_id for item in cart_items}
+    primary_address_id = address_id
+    address = None
+
+    if primary_address_id:
+        address = db.query(Address).filter(
+            Address.id == primary_address_id,
+            Address.user_id == user_id
+        ).first()
+        if not address:
+            raise ValueError("Address not found or does not belong to you")
+    else:
+        if not unique_cart_address_ids:
+            raise ValueError("No addresses associated with selected cart items")
+        primary_address_id = next(iter(unique_cart_address_ids))
+        address = db.query(Address).filter(
+            Address.id == primary_address_id,
+            Address.user_id == user_id
+        ).first()
+        if not address:
+            raise ValueError("Primary address derived from cart items not found")
+        if len(unique_cart_address_ids) > 1:
+            logger.info(
+                "Order creation for user %s contains multiple addresses; using %s as primary",
+                user_id,
+                primary_address_id
+            )
     
     # Calculate totals
     subtotal = 0.0
@@ -88,7 +108,7 @@ def create_order_from_cart(
     order = Order(
         order_number=generate_order_number(),
         user_id=user_id,
-        address_id=address_id,
+        address_id=primary_address_id,
         subtotal=subtotal,
         delivery_charge=delivery_charge,
         discount=discount,
@@ -137,6 +157,7 @@ def create_order_from_cart(
                 "address_label": address_obj.address_label,
                 "street_address": address_obj.street_address,
                 "landmark": address_obj.landmark,
+                "locality": address_obj.locality,
                 "city": address_obj.city,
                 "state": address_obj.state,
                 "postal_code": address_obj.postal_code,
@@ -151,7 +172,7 @@ def create_order_from_cart(
             order_id=order.id,
             product_id=product.ProductId,
             member_id=member.id,
-            address_id=address_id,
+            address_id=cart_item.address_id,
             snapshot_id=snapshot.id,
             quantity=cart_item.quantity,
             unit_price=product.SpecialPrice,

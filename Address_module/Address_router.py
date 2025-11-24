@@ -1,13 +1,20 @@
+import uuid
+from typing import List
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
-from typing import List
-import uuid
 
-from deps import get_db
-from .Address_schema import AddressRequest, AddressResponse, AddressListResponse, AddressData
-from .Address_crud import save_address, get_addresses_by_user, delete_address
-from Login_module.Utils.auth_user import get_current_user
 from Cart_module.Cart_model import CartItem
+from Login_module.Utils.auth_user import get_current_user
+from deps import get_db
+from .Address_crud import delete_address, get_addresses_by_user, save_address
+from .Address_schema import (
+    AddressListResponse,
+    AddressRequest,
+    AddressResponse,
+    PincodeLookupResponse,
+)
+from .pincode_service import get_pincode_details
 
 router = APIRouter(prefix="/address", tags=["Address"])
 
@@ -21,7 +28,7 @@ def save_address_api(
 ):
     # Generate correlation ID for request tracing
     correlation_id = str(uuid.uuid4())
-    address = save_address(db, user, req, request=request, correlation_id=correlation_id)
+    address, locality_options = save_address(db, user, req, request=request, correlation_id=correlation_id)
     if not address:
         raise HTTPException(status_code=404, detail="Address not found for editing")
 
@@ -35,12 +42,14 @@ def save_address_api(
             "address_label": address.address_label,
             "street_address": address.street_address,
             "landmark": address.landmark,
+            "locality": address.locality,
             "city": address.city,
             "state": address.state,
             "postal_code": address.postal_code,
             "country": address.country,
             "save_for_future": address.save_for_future
-        }
+        },
+        "locality_options": locality_options
     }
 
 # Get all addresses of user
@@ -59,6 +68,7 @@ def get_address_list(
             "address_label": addr.address_label,
             "street_address": addr.street_address,
             "landmark": addr.landmark,
+            "locality": addr.locality,
             "city": addr.city,
             "state": addr.state,
             "postal_code": addr.postal_code,
@@ -69,6 +79,31 @@ def get_address_list(
         "status": "success",
         "message": "Address list fetched successfully.",
         "data": data
+    }
+
+
+@router.get("/pincode/{postal_code}", response_model=PincodeLookupResponse)
+def lookup_pincode(postal_code: str):
+    """Fetch city/state/locality options for a pincode."""
+    sanitized = postal_code.strip().replace(" ", "")
+    if len(sanitized) != 6 or not sanitized.isdigit():
+        raise HTTPException(status_code=400, detail="Postal code must be 6 digits")
+
+    city, state, localities = get_pincode_details(sanitized)
+    if not city or not state:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Could not find city/state for pincode {sanitized}.",
+        )
+
+    return {
+        "status": "success",
+        "message": "Pincode details fetched successfully.",
+        "data": {
+            "city": city,
+            "state": state,
+            "localities": localities,
+        },
     }
 
 # Delete address

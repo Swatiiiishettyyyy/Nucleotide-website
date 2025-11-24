@@ -13,6 +13,7 @@ class Address(Base):
     address_label = Column(String(50))
     street_address = Column(String(255))
     landmark = Column(String(255))
+    locality = Column(String(150))
     city = Column(String(100))
     state = Column(String(100))
     postal_code = Column(String(20), nullable=False, index=True)  # Pincode - required for auto-generation
