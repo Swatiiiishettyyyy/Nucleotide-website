@@ -85,42 +85,65 @@ Authorization: Bearer <access_token>
 
 ### Error Responses
 
-#### 400 Bad Request - Invalid Age
+#### 422 Unprocessable Entity - Invalid Age
 ```json
 {
-  "detail": [
+  "status": "error",
+  "message": "Request validation failed.",
+  "details": [
     {
-      "loc": ["body", "age"],
-      "msg": "Age must be between 0 and 150",
+      "source": "body",
+      "field": "age",
+      "message": "Age must be between 0 and 150",
       "type": "value_error"
     }
   ]
 }
 ```
 
-#### 400 Bad Request - Invalid Gender
+#### 422 Unprocessable Entity - Invalid Gender
 ```json
 {
-  "detail": [
+  "status": "error",
+  "message": "Request validation failed.",
+  "details": [
     {
-      "loc": ["body", "gender"],
-      "msg": "Gender must be M, F, or Other",
+      "source": "body",
+      "field": "gender",
+      "message": "Gender must be M, F, or Other",
       "type": "value_error"
     }
   ]
 }
 ```
 
-#### 400 Bad Request - Invalid Mobile
+#### 422 Unprocessable Entity - Invalid Mobile
 ```json
 {
-  "detail": [
+  "status": "error",
+  "message": "Request validation failed.",
+  "details": [
     {
-      "loc": ["body", "mobile"],
-      "msg": "Mobile number must be 10 digits",
+      "source": "body",
+      "field": "mobile",
+      "message": "Mobile number must be 10 digits",
       "type": "value_error"
     }
   ]
+}
+```
+
+#### 422 Unprocessable Entity - Member Already Exists in Category
+```json
+{
+  "detail": "Member 'John Doe' with relation 'self' already exists in the 'Genetic Testing' category."
+}
+```
+
+#### 422 Unprocessable Entity - Member Already Linked to Another Plan
+```json
+{
+  "detail": "Member 'Jane Doe' is already associated with your 'family' plan in the 'Genetic Testing' category. Remove them before assigning to another plan."
 }
 ```
 

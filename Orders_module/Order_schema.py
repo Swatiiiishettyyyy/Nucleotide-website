@@ -18,15 +18,18 @@ class CreateOrderRequest(BaseModel):
 class OrderItemData(BaseModel):
     """Order item data"""
     order_item_id: int
-    product_id: int
+    product_id: Optional[int] = None  # Can be NULL if product was deleted (snapshot preserves data)
     product_name: str
-    member_id: int
+    member_id: Optional[int] = None  # Can be NULL if member was deleted (snapshot preserves data)
     member_name: str
-    address_id: int
+    address_id: Optional[int] = None  # Can be NULL if address was deleted (snapshot preserves data)
     address_label: Optional[str] = None
+    address_details: Optional[dict] = None  # Full address details
     quantity: int
     unit_price: float
     total_price: float
+    order_status: str  # Per-item status
+    status_updated_at: Optional[datetime] = None
 
 
 class OrderResponse(BaseModel):
@@ -34,7 +37,7 @@ class OrderResponse(BaseModel):
     order_id: int
     order_number: str
     user_id: int
-    address_id: int
+    address_id: Optional[int] = None  # Can be NULL if address was deleted (snapshot preserves data)
     total_amount: float
     payment_status: str
     order_status: str
@@ -78,13 +81,27 @@ class UpdateOrderStatusRequest(BaseModel):
     technician_name: Optional[str] = None
     technician_contact: Optional[str] = None
     lab_name: Optional[str] = None
+    order_item_id: Optional[int] = None  # Update specific order item
+    address_id: Optional[int] = None  # Update all items with this address
+
+
+class AddressTrackingData(BaseModel):
+    """Tracking data grouped by address"""
+    address_id: Optional[int] = None  # Can be NULL if address was deleted (snapshot preserves data)
+    address_label: Optional[str] = None
+    address_details: Optional[dict] = None
+    members: List[dict]  # List of members at this address
+    current_status: str
+    status_history: List[dict]
+    estimated_completion: Optional[datetime] = None
 
 
 class OrderTrackingResponse(BaseModel):
     """Order tracking information"""
     order_id: int
     order_number: str
-    current_status: str
-    status_history: List[dict]
+    current_status: str  # Overall order status
+    status_history: List[dict]  # Order-level status history
     estimated_completion: Optional[datetime] = None
+    address_tracking: List[AddressTrackingData]  # Per-address tracking
 

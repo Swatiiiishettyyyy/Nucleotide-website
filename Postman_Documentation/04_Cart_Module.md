@@ -6,7 +6,7 @@ http://localhost:8000/cart
 ```
 
 ## Overview
-This module handles shopping cart operations. Users can add products to cart, update quantities, delete items, view cart, and clear the entire cart. Cart items are linked to members and addresses.
+This module handles shopping cart operations. Users can add products to cart, update quantities, delete items, view cart, and clear the entire cart. Cart items are linked to members and addresses. For couple and family plans, members can have either the same address or different addresses.
 
 ---
 
@@ -15,7 +15,7 @@ This module handles shopping cart operations. Users can add products to cart, up
 ### Details
 - **Method:** `POST`
 - **Endpoint:** `/cart/add`
-- **Description:** Add item to cart. For couple/family products, creates multiple rows (2 for couple, 4 for family). Every cart item must be linked with member_id and address_id.
+- **Description:** Add item to cart. For couple/family products, creates multiple rows (2 for couple, 3-4 for family). Every cart item must be linked with member_id and address_id. Addresses can be the same for all members or different for each member.
 
 ### Headers
 ```
@@ -23,7 +23,7 @@ Content-Type: application/json
 Authorization: Bearer <access_token>
 ```
 
-### Request Body - Single Plan Product
+### Request Body - Single Plan Product (Single Address)
 ```json
 {
   "product_id": 1,
@@ -33,7 +33,7 @@ Authorization: Bearer <access_token>
 }
 ```
 
-### Request Body - Couple Plan Product
+### Request Body - Couple Plan Product (Same Address for Both Members)
 ```json
 {
   "product_id": 2,
@@ -43,7 +43,17 @@ Authorization: Bearer <access_token>
 }
 ```
 
-### Request Body - Family Plan Product
+### Request Body - Couple Plan Product (Different Addresses for Each Member)
+```json
+{
+  "product_id": 2,
+  "address_id": [1, 2],
+  "member_ids": [1, 2],
+  "quantity": 1
+}
+```
+
+### Request Body - Family Plan Product (Same Address for All Members)
 ```json
 {
   "product_id": 3,
@@ -53,15 +63,45 @@ Authorization: Bearer <access_token>
 }
 ```
 
+### Request Body - Family Plan Product (Different Addresses for Each Member)
+```json
+{
+  "product_id": 3,
+  "address_id": [1, 2, 3, 4],
+  "member_ids": [1, 2, 3, 4],
+  "quantity": 1
+}
+```
+
+### Request Body - Family Plan Product (3 Mandatory Members - Minimum)
+```json
+{
+  "product_id": 3,
+  "address_id": 1,
+  "member_ids": [1, 2, 3],
+  "quantity": 1
+}
+```
+
+### Request Body - Family Plan Product (3 Mandatory + 1 Optional Member)
+```json
+{
+  "product_id": 3,
+  "address_id": [1, 1, 1, 2],
+  "member_ids": [1, 2, 3, 4],
+  "quantity": 1
+}
+```
+
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
 | product_id | integer | Yes | Product ID to add | 1 |
-| address_id | integer | Yes | Shipping address ID | 1 |
-| member_ids | array | Yes | List of member IDs (1 for single, 2 for couple, 4 for family) | [1, 2] |
+| address_id | integer or array | Yes | Shipping address ID(s). Single address (shared) or list of addresses (one per member). Must be 1 address or match member count. | 1 or [1, 2] |
+| member_ids | array | Yes | List of member IDs (1 for single, 2 for couple, 3-4 for family) | [1, 2] |
 | quantity | integer | Yes | Quantity (default: 1) | 1 |
 
-### Success Response (200 OK)
+### Success Response (200 OK) - Same Address
 ```json
 {
   "status": "success",
@@ -70,8 +110,37 @@ Authorization: Bearer <access_token>
     "cart_item_ids": [1, 2],
     "cart_id": 1,
     "product_id": 2,
-    "address_id": 1,
+    "address_ids": [1],
     "member_ids": [1, 2],
+    "member_address_map": [
+      {"member_id": 1, "address_id": 1},
+      {"member_id": 2, "address_id": 1}
+    ],
+    "quantity": 1,
+    "plan_type": "couple",
+    "price": 9000.00,
+    "special_price": 8000.00,
+    "total_amount": 8000.00,
+    "items_created": 2
+  }
+}
+```
+
+### Success Response (200 OK) - Different Addresses
+```json
+{
+  "status": "success",
+  "message": "Product added to cart successfully.",
+  "data": {
+    "cart_item_ids": [3, 4],
+    "cart_id": 3,
+    "product_id": 2,
+    "address_ids": [1, 2],
+    "member_ids": [1, 2],
+    "member_address_map": [
+      {"member_id": 1, "address_id": 1},
+      {"member_id": 2, "address_id": 2}
+    ],
     "quantity": 1,
     "plan_type": "couple",
     "price": 9000.00,
@@ -91,45 +160,77 @@ Authorization: Bearer <access_token>
 }
 ```
 
-#### 404 Not Found - Address Not Found
+#### 422 Unprocessable Entity - Address Not Found
 ```json
 {
-  "detail": "Address not found or does not belong to you"
+  "detail": "Address 99 not found or does not belong to you."
 }
 ```
 
-#### 404 Not Found - Member Not Found
+#### 422 Unprocessable Entity - Member Not Found
 ```json
 {
-  "detail": "One or more members not found"
+  "detail": "One or more member IDs not found for this user."
 }
 ```
 
-#### 400 Bad Request - Invalid Member Count
+#### 422 Unprocessable Entity - Invalid Member Count
 ```json
 {
-  "detail": "Couple plan requires exactly 2 members, got 1"
+  "detail": "Couple plan requires exactly 2 members, got 1."
 }
 ```
 
-#### 400 Bad Request - Duplicate Members
+#### 422 Unprocessable Entity - Invalid Family Plan Member Count
+```json
+{
+  "detail": "Family plan requires 3-4 members (3 mandatory + 1 optional), got 2."
+}
+```
+
+#### 422 Unprocessable Entity - Address Count Mismatch
+```json
+{
+  "detail": "Address count mismatch. Provide either 1 shared address or 2 addresses (one per member). Got 3 address(es) for 2 member(s)."
+}
+```
+
+#### 422 Unprocessable Entity - Address Not Found
+```json
+{
+  "detail": "Address(es) [99, 100] not found or do not belong to you."
+}
+```
+
+#### 422 Unprocessable Entity - Duplicate Members
 ```json
 {
   "detail": "Duplicate member IDs are not allowed. Each member can only be added once per product."
 }
 ```
 
-#### 400 Bad Request - Member Already in Same Category
+#### 422 Unprocessable Entity - Member Already in Same Category
 ```json
 {
-  "detail": "One or more members in this request already belong to another product in the 'Genetic Testing' category. A member cannot subscribe to multiple products in the same category."
+  "detail": {
+    "message": "Members already associated with another product in 'Genetic Testing' category.",
+    "conflicts": [
+      {
+        "member_id": 7,
+        "member_name": "Jane Doe",
+        "existing_product_id": 12,
+        "existing_product_name": "Genome Duo",
+        "existing_plan_type": "couple"
+      }
+    ]
+  }
 }
 ```
 
-#### 400 Bad Request - Item Already in Cart
+#### 422 Unprocessable Entity - Item Already in Cart
 ```json
 {
-  "detail": "This product with the same members and address is already in your cart."
+  "detail": "This product with the same members is already in your cart."
 }
 ```
 
@@ -158,9 +259,12 @@ Authorization: Bearer <access_token>
 ### Notes
 - Single plan requires exactly 1 member
 - Couple plan requires exactly 2 members
-- Family plan requires exactly 4 members
+- Family plan requires 3-4 members (3 mandatory + 1 optional)
+- Address can be a single integer (shared by all members) or a list of integers (one per member)
+- Address count must be either 1 (shared) or match the member count (one per member)
+- Members can have the same address or different addresses for couple/family plans
 - Members cannot be mapped to multiple products *within the same category* (enforced automatically)
-- Same product with same members and address cannot be added twice
+- Same product with the same members cannot be added twice (address differences are ignored for duplicate check)
 
 ---
 
@@ -400,8 +504,13 @@ Authorization: Bearer <access_token>
         "cart_id": 1,
         "cart_item_ids": [1, 2],
         "product_id": 2,
+        "address_ids": [1],
         "address_id": 1,
         "member_ids": [1, 2],
+        "member_address_map": [
+          {"member_id": 1, "address_id": 1},
+          {"member_id": 2, "address_id": 1}
+        ],
         "product_name": "DNA Test Kit - Couple",
         "product_images": "https://example.com/image.jpg",
         "plan_type": "couple",
@@ -470,6 +579,9 @@ Authorization: Bearer <access_token>
 - Items are grouped by group_id for couple/family products
 - Summary includes subtotal, delivery charge, and grand total
 - Delivery charge is fixed at 50.00
+- `address_ids` contains unique address IDs used in the group
+- `address_id` (singular) is provided for backward compatibility when all members share the same address
+- `member_address_map` shows the address assigned to each member
 
 ---
 
@@ -487,37 +599,52 @@ Authorization: Bearer <access_token>
    - Body: `{"product_id": 1, "address_id": 1, "member_ids": [1], "quantity": 1}`
    - Save: cart_id from response
 
-3. **Add Couple Plan Product to Cart**
+3. **Add Couple Plan Product to Cart (Same Address)**
    - Request: `POST /cart/add`
    - Body: `{"product_id": 2, "address_id": 1, "member_ids": [1, 2], "quantity": 1}`
    - Save: cart_id from response
 
-4. **View Cart**
-   - Request: `GET /cart/view`
-   - Verify: Both products are in cart
+4. **Add Couple Plan Product to Cart (Different Addresses)**
+   - Request: `POST /cart/add`
+   - Body: `{"product_id": 2, "address_id": [1, 2], "member_ids": [1, 2], "quantity": 1}`
+   - Save: cart_id from response
 
-5. **Update Cart Item Quantity**
+5. **Add Family Plan Product to Cart (3 Members - Minimum)**
+   - Request: `POST /cart/add`
+   - Body: `{"product_id": 3, "address_id": 1, "member_ids": [1, 2, 3], "quantity": 1}`
+   - Save: cart_id from response
+
+6. **Add Family Plan Product to Cart (4 Members - Maximum)**
+   - Request: `POST /cart/add`
+   - Body: `{"product_id": 3, "address_id": [1, 1, 1, 2], "member_ids": [1, 2, 3, 4], "quantity": 1}`
+   - Save: cart_id from response
+
+7. **View Cart**
+   - Request: `GET /cart/view`
+   - Verify: All products are in cart with correct address mappings
+
+8. **Update Cart Item Quantity**
    - Request: `PUT /cart/update/{cart_item_id}`
    - Body: `{"quantity": 2}`
    - Verify: Quantity updated
 
-6. **View Cart Again**
+9. **View Cart Again**
    - Request: `GET /cart/view`
    - Verify: Updated quantities and new totals
 
-7. **Delete Single Item**
-   - Request: `DELETE /cart/delete/{cart_item_id}`
-   - Verify: Item removed
+10. **Delete Single Item**
+    - Request: `DELETE /cart/delete/{cart_item_id}`
+    - Verify: Item removed
 
-8. **View Cart**
-   - Request: `GET /cart/view`
-   - Verify: Item is no longer in cart
+11. **View Cart**
+    - Request: `GET /cart/view`
+    - Verify: Item is no longer in cart
 
-9. **Clear Cart**
-   - Request: `DELETE /cart/clear`
-   - Verify: All items removed
+12. **Clear Cart**
+    - Request: `DELETE /cart/clear`
+    - Verify: All items removed
 
-10. **View Cart**
+13. **View Cart**
     - Request: `GET /cart/view`
     - Verify: Cart is empty
 
@@ -557,13 +684,19 @@ cart_item_id: (set after adding to cart)
 - **Solution:** Create members first using the Member module, and ensure member_ids belong to you.
 
 ### Issue: "Couple plan requires exactly 2 members"
-- **Solution:** Ensure you provide exactly 2 member_ids for couple products, 1 for single, and 4 for family.
+- **Solution:** Ensure you provide exactly 2 member_ids for couple products, 1 for single, and 3-4 for family (3 mandatory + 1 optional).
+
+### Issue: "Address count mismatch"
+- **Solution:** Provide either 1 shared address or a number of addresses matching the member count. For example, 2 members need either 1 address or 2 addresses.
+
+### Issue: "Address(es) [X, Y] not found or does not belong to you"
+- **Solution:** Ensure all address IDs exist and belong to you. Create addresses first using the Address module.
 
 ### Issue: "One or more members are already in your cart for a different product"
 - **Solution:** Remove the member from the other product in cart first, or use different members.
 
-### Issue: "This product with the same members and address is already in your cart"
-- **Solution:** Update the quantity of existing cart item instead of adding duplicate.
+### Issue: "This product with the same members is already in your cart"
+- **Solution:** Update the quantity of existing cart item instead of adding duplicate. Note: Address differences are ignored when checking for duplicates.
 
 ### Issue: "Cart item not found"
 - **Solution:** Ensure the cart_item_id exists and belongs to you. Use "View Cart" to get valid cart_item_ids.

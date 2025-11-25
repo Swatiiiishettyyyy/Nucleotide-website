@@ -57,7 +57,7 @@ Authorization: Bearer <access_token>
 }
 ```
 
-#### 400 Bad Request - Invalid Request
+#### 422 Unprocessable Entity - Invalid Request
 ```json
 {
   "detail": "Cart is empty or invalid"
@@ -92,10 +92,11 @@ Authorization: Bearer <access_token>
 - Optional address_id (use Address module) if you need to force a different shipping address
 
 - Creates a Razorpay order for payment
-- Order is created with status "pending_payment"
+- Order is created with status "order_confirmed" (after payment)
 - Cart items are not removed until payment is verified
 - Amount includes delivery charge (50.00)
 - Each order item keeps its own address from the cart; the top-level `address_id` is used as the primary shipping address (defaults to the cart item's address when only one exists)
+- **For couple/family packs with different addresses**: Each order item has its own status tracking, allowing independent tracking per address
 
 ---
 
@@ -143,14 +144,14 @@ Authorization: Bearer <access_token>
 
 ### Error Responses
 
-#### 400 Bad Request - Invalid Signature
+#### 422 Unprocessable Entity - Invalid Signature
 ```json
 {
   "detail": "Invalid payment signature"
 }
 ```
 
-#### 400 Bad Request - Payment Verification Failed
+#### 422 Unprocessable Entity - Payment Verification Failed
 ```json
 {
   "detail": "Payment verification failed"
@@ -190,6 +191,7 @@ Authorization: Bearer <access_token>
 ### Prerequisites
 - Valid access token
 - Order created (from "Create Order" endpoint)
+
 - Payment completed on Razorpay
 - Valid payment signature from Razorpay
 
@@ -240,9 +242,19 @@ Authorization: Bearer <access_token>
         "member_name": "John Doe",
         "address_id": 5,
         "address_label": "Home",
+        "address_details": {
+          "address_label": "Home",
+          "street_address": "123 Main St",
+          "locality": "Whitefield",
+          "city": "Bangalore",
+          "state": "Karnataka",
+          "postal_code": "560066"
+        },
         "quantity": 1,
         "unit_price": 8000.00,
-        "total_price": 8000.00
+        "total_price": 8000.00,
+        "order_status": "order_confirmed",
+        "status_updated_at": "2025-11-24T10:00:00"
       },
       {
         "order_item_id": 2,
@@ -252,9 +264,19 @@ Authorization: Bearer <access_token>
         "member_name": "Jane Doe",
         "address_id": 6,
         "address_label": "Parents House",
+        "address_details": {
+          "address_label": "Parents House",
+          "street_address": "456 Park Ave",
+          "locality": "Koramangala",
+          "city": "Bangalore",
+          "state": "Karnataka",
+          "postal_code": "560095"
+        },
         "quantity": 1,
         "unit_price": 8000.00,
-        "total_price": 8000.00
+        "total_price": 8000.00,
+        "order_status": "order_confirmed",
+        "status_updated_at": "2025-11-24T10:00:00"
       }
     ]
   }
@@ -290,6 +312,8 @@ Authorization: Bearer <access_token>
 - Returns all orders for the current user
 - Returns empty array if no orders exist
 - Orders include full item details with product and member information
+- Each order item shows its own `order_status` for per-address tracking
+- For couple/family packs with different addresses, each item can have different status
 
 ---
 
@@ -328,18 +352,28 @@ Authorization: Bearer <access_token>
   "razorpay_order_id": "order_MN1234567890",
   "created_at": "2025-11-24T10:00:00",
   "items": [
-    {
-      "order_item_id": 1,
-      "product_id": 2,
-      "product_name": "DNA Test Kit - Couple",
-      "member_id": 1,
-      "member_name": "John Doe",
-      "address_id": 5,
-      "address_label": "Home",
-      "quantity": 1,
-      "unit_price": 8000.00,
-      "total_price": 8000.00
-    }
+      {
+        "order_item_id": 1,
+        "product_id": 2,
+        "product_name": "DNA Test Kit - Couple",
+        "member_id": 1,
+        "member_name": "John Doe",
+        "address_id": 5,
+        "address_label": "Home",
+        "address_details": {
+          "address_label": "Home",
+          "street_address": "123 Main St",
+          "locality": "Whitefield",
+          "city": "Bangalore",
+          "state": "Karnataka",
+          "postal_code": "560066"
+        },
+        "quantity": 1,
+        "unit_price": 8000.00,
+        "total_price": 8000.00,
+        "order_status": "order_confirmed",
+        "status_updated_at": "2025-11-24T10:00:00"
+      }
   ]
 }
 ```
@@ -402,7 +436,7 @@ Authorization: Bearer <access_token>
 (No body required)
 ```
 
-### Success Response (200 OK)
+### Success Response (200 OK) - Single Address Order
 ```json
 {
   "order_id": 1,
@@ -411,20 +445,146 @@ Authorization: Bearer <access_token>
   "status_history": [
     {
       "status": "order_confirmed",
-      "previous_status": "pending_payment",
-      "notes": "Payment verified successfully",
-      "changed_by": "1",
-      "created_at": "2025-11-24T10:05:00"
-    },
-    {
-      "status": "pending_payment",
       "previous_status": null,
-      "notes": "Order created",
+      "notes": "Order created from cart",
       "changed_by": "1",
-      "created_at": "2025-11-24T10:00:00"
+      "created_at": "2025-11-24T10:00:00",
+      "order_item_id": null
     }
   ],
-  "estimated_completion": null
+  "estimated_completion": null,
+  "address_tracking": [
+    {
+      "address_id": 5,
+      "address_label": "Home",
+      "address_details": {
+        "address_label": "Home",
+        "street_address": "123 Main St",
+        "locality": "Whitefield",
+        "city": "Bangalore",
+        "state": "Karnataka",
+        "postal_code": "560066"
+      },
+      "members": [
+        {
+          "member_id": 1,
+          "member_name": "John Doe",
+          "order_item_id": 1,
+          "order_status": "order_confirmed"
+        }
+      ],
+      "current_status": "order_confirmed",
+      "status_history": [
+        {
+          "status": "order_confirmed",
+          "previous_status": null,
+          "notes": "Order item created for member John Doe at address Home",
+          "changed_by": "1",
+          "created_at": "2025-11-24T10:00:00",
+          "order_item_id": 1,
+          "member_name": "John Doe"
+        }
+      ],
+      "estimated_completion": null
+    }
+  ]
+}
+```
+
+### Success Response (200 OK) - Multiple Addresses (Couple/Family Pack)
+```json
+{
+  "order_id": 2,
+  "order_number": "ORD-2025-11-24-002",
+  "current_status": "scheduled",
+  "status_history": [
+    {
+      "status": "order_confirmed",
+      "previous_status": null,
+      "notes": "Order created from cart",
+      "changed_by": "1",
+      "created_at": "2025-11-24T10:00:00",
+      "order_item_id": null
+    }
+  ],
+  "estimated_completion": "2025-12-01T10:00:00",
+  "address_tracking": [
+    {
+      "address_id": 5,
+      "address_label": "Home",
+      "address_details": {
+        "address_label": "Home",
+        "street_address": "123 Main St",
+        "locality": "Whitefield",
+        "city": "Bangalore",
+        "state": "Karnataka",
+        "postal_code": "560066"
+      },
+      "members": [
+        {
+          "member_id": 1,
+          "member_name": "John Doe",
+          "order_item_id": 3,
+          "order_status": "scheduled"
+        }
+      ],
+      "current_status": "scheduled",
+      "status_history": [
+        {
+          "status": "scheduled",
+          "previous_status": "order_confirmed",
+          "notes": "Sample collection scheduled for address Home",
+          "changed_by": "admin",
+          "created_at": "2025-11-25T09:00:00",
+          "order_item_id": 3,
+          "member_name": "John Doe"
+        },
+        {
+          "status": "order_confirmed",
+          "previous_status": null,
+          "notes": "Order item created for member John Doe at address Home",
+          "changed_by": "1",
+          "created_at": "2025-11-24T10:00:00",
+          "order_item_id": 3,
+          "member_name": "John Doe"
+        }
+      ],
+      "estimated_completion": "2025-12-01T10:00:00"
+    },
+    {
+      "address_id": 6,
+      "address_label": "Parents House",
+      "address_details": {
+        "address_label": "Parents House",
+        "street_address": "456 Park Ave",
+        "locality": "Koramangala",
+        "city": "Bangalore",
+        "state": "Karnataka",
+        "postal_code": "560095"
+      },
+      "members": [
+        {
+          "member_id": 2,
+          "member_name": "Jane Doe",
+          "order_item_id": 4,
+          "order_status": "order_confirmed"
+        }
+      ],
+      "current_status": "order_confirmed",
+      "status_history": [
+        {
+          "status": "order_confirmed",
+          "previous_status": null,
+          "notes": "Order item created for member Jane Doe at address Parents House",
+          "changed_by": "1",
+          "created_at": "2025-11-24T10:00:00",
+          "order_item_id": 4,
+          "member_name": "Jane Doe"
+        }
+      ],
+      "estimated_completion": null
+    }
+  ]
 }
 ```
 
@@ -462,6 +622,10 @@ Authorization: Bearer <access_token>
 - Returns current order status and complete status history
 - Status history shows all status changes with timestamps
 - Includes who changed the status and any notes
+- **Per-address tracking**: For couple/family packs with different addresses, `address_tracking` shows status per address
+- Each address group shows its members, current status, and status history
+- Order-level status is synced based on all item statuses
+- If all items have the same address, only one entry appears in `address_tracking`
 
 ---
 
@@ -483,12 +647,32 @@ Authorization: Bearer <access_token>
 |-----------|------|----------|-------------|---------|
 | order_id | integer | Yes | Order ID | 1 |
 
-### Request Body - Basic Status Update
+### Request Body - Basic Status Update (Entire Order)
 ```json
 {
   "order_id": 1,
   "status": "scheduled",
   "notes": "Sample collection scheduled for next week"
+}
+```
+
+### Request Body - Status Update for Specific Address
+```json
+{
+  "order_id": 1,
+  "status": "scheduled",
+  "notes": "Sample collection scheduled for address Home",
+  "address_id": 5
+}
+```
+
+### Request Body - Status Update for Specific Order Item
+```json
+{
+  "order_id": 1,
+  "status": "sample_collected",
+  "notes": "Sample collected from John Doe",
+  "order_item_id": 3
 }
 ```
 
@@ -515,6 +699,14 @@ Authorization: Bearer <access_token>
 | technician_name | string | No | Technician name | "Dr. Smith" |
 | technician_contact | string | No | Technician contact | "9876543210" |
 | lab_name | string | No | Lab name | "ABC Lab" |
+| order_item_id | integer | No | Update status for specific order item only | 3 |
+| address_id | integer | No | Update status for all items with this address | 5 |
+
+### Status Update Behavior
+- **No `order_item_id` or `address_id`**: Updates entire order and all items
+- **With `order_item_id`**: Updates only that specific order item
+- **With `address_id`**: Updates all order items with that address (useful for couple/family packs with same address)
+- Order-level status is automatically synced based on item statuses
 
 ### Valid Order Statuses
 - `pending_payment` - Order created, payment pending
@@ -582,6 +774,9 @@ Authorization: Bearer <access_token>
 - Use valid status values from the list above
 - Typically used by admin/lab technicians
 - Scheduled date should be in ISO format
+- **Per-address tracking**: For couple/family packs with different addresses, you can update status per address using `address_id` or per item using `order_item_id`
+- When updating by `address_id`, all items at that address are updated together
+- Order-level status is automatically synced to reflect the most common item status
 
 ---
 

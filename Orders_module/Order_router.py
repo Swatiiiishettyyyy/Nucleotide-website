@@ -4,6 +4,7 @@ Order router - handles order creation, payment, and tracking.
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from typing import List
+from collections import defaultdict
 import uuid
 import logging
 
@@ -124,7 +125,7 @@ def create_order(
     
     except ValueError as e:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except Exception as e:
         db.rollback()
         logger.error(f"Error creating order: {e}", exc_info=True)
@@ -212,7 +213,7 @@ def verify_payment(
     
     except ValueError as e:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except Exception as e:
         db.rollback()
         logger.error(f"Error verifying payment: {e}", exc_info=True)
@@ -233,21 +234,73 @@ def get_orders(
     
     result = []
     for order in orders:
-        order_items = [
-            {
-                "order_item_id": item.id,
-                "product_id": item.product_id,
-                "product_name": item.product.Name if item.product else "Unknown",
-                "member_id": item.member_id,
-                "member_name": item.member.name if item.member else "Unknown",
-                "address_id": item.address_id,
-                "address_label": item.address.address_label if item.address else None,
-                "quantity": item.quantity,
-                "unit_price": item.unit_price,
-                "total_price": item.total_price
-            }
-            for item in order.items
-        ]
+        order_items = []
+        for item in order.items:
+            # Use snapshot data if available, fallback to original tables
+            snapshot = item.snapshot if item.snapshot else None
+            
+            if snapshot:
+                # Use snapshot data (from time of order confirmation)
+                product_data = snapshot.product_data or {}
+                member_data = snapshot.member_data or {}
+                address_data = snapshot.address_data or {}
+                
+                address_details = {
+                    "address_label": address_data.get("address_label"),
+                    "street_address": address_data.get("street_address"),
+                    "landmark": address_data.get("landmark"),
+                    "locality": address_data.get("locality"),
+                    "city": address_data.get("city"),
+                    "state": address_data.get("state"),
+                    "postal_code": address_data.get("postal_code"),
+                    "country": address_data.get("country")
+                }
+                
+                order_items.append({
+                    "order_item_id": item.id,
+                    "product_id": product_data.get("ProductId", item.product_id),
+                    "product_name": product_data.get("Name", "Unknown"),
+                    "member_id": member_data.get("id", item.member_id),
+                    "member_name": member_data.get("name", "Unknown"),
+                    "address_id": address_data.get("id", item.address_id),
+                    "address_label": address_data.get("address_label"),
+                    "address_details": address_details,
+                    "quantity": item.quantity,
+                    "unit_price": item.unit_price,
+                    "total_price": item.total_price,
+                    "order_status": item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status),
+                    "status_updated_at": item.status_updated_at.isoformat() if item.status_updated_at else None
+                })
+            else:
+                # Fallback to original tables (for backwards compatibility)
+                address_details = None
+                if item.address:
+                    address_details = {
+                        "address_label": item.address.address_label,
+                        "street_address": item.address.street_address,
+                        "landmark": item.address.landmark,
+                        "locality": item.address.locality,
+                        "city": item.address.city,
+                        "state": item.address.state,
+                        "postal_code": item.address.postal_code,
+                        "country": item.address.country
+                    }
+                
+                order_items.append({
+                    "order_item_id": item.id,
+                    "product_id": item.product_id,
+                    "product_name": item.product.Name if item.product else "Unknown",
+                    "member_id": item.member_id,
+                    "member_name": item.member.name if item.member else "Unknown",
+                    "address_id": item.address_id,
+                    "address_label": item.address.address_label if item.address else None,
+                    "address_details": address_details,
+                    "quantity": item.quantity,
+                    "unit_price": item.unit_price,
+                    "total_price": item.total_price,
+                    "order_status": item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status),
+                    "status_updated_at": item.status_updated_at.isoformat() if item.status_updated_at else None
+                })
         
         result.append({
             "order_id": order.id,
@@ -281,21 +334,73 @@ def get_order(
             detail="Order not found"
         )
     
-    order_items = [
-        {
-            "order_item_id": item.id,
-            "product_id": item.product_id,
-            "product_name": item.product.Name if item.product else "Unknown",
-            "member_id": item.member_id,
-            "member_name": item.member.name if item.member else "Unknown",
-            "address_id": item.address_id,
-            "address_label": item.address.address_label if item.address else None,
-            "quantity": item.quantity,
-            "unit_price": item.unit_price,
-            "total_price": item.total_price
-        }
-        for item in order.items
-    ]
+    order_items = []
+    for item in order.items:
+        # Use snapshot data if available, fallback to original tables
+        snapshot = item.snapshot if item.snapshot else None
+        
+        if snapshot:
+            # Use snapshot data (from time of order confirmation)
+            product_data = snapshot.product_data or {}
+            member_data = snapshot.member_data or {}
+            address_data = snapshot.address_data or {}
+            
+            address_details = {
+                "address_label": address_data.get("address_label"),
+                "street_address": address_data.get("street_address"),
+                "landmark": address_data.get("landmark"),
+                "locality": address_data.get("locality"),
+                "city": address_data.get("city"),
+                "state": address_data.get("state"),
+                "postal_code": address_data.get("postal_code"),
+                "country": address_data.get("country")
+            }
+            
+            order_items.append({
+                "order_item_id": item.id,
+                "product_id": product_data.get("ProductId", item.product_id),
+                "product_name": product_data.get("Name", "Unknown"),
+                "member_id": member_data.get("id", item.member_id),
+                "member_name": member_data.get("name", "Unknown"),
+                "address_id": address_data.get("id", item.address_id),
+                "address_label": address_data.get("address_label"),
+                "address_details": address_details,
+                "quantity": item.quantity,
+                "unit_price": item.unit_price,
+                "total_price": item.total_price,
+                "order_status": item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status),
+                "status_updated_at": item.status_updated_at.isoformat() if item.status_updated_at else None
+            })
+        else:
+            # Fallback to original tables (for backwards compatibility)
+            address_details = None
+            if item.address:
+                address_details = {
+                    "address_label": item.address.address_label,
+                    "street_address": item.address.street_address,
+                    "landmark": item.address.landmark,
+                    "locality": item.address.locality,
+                    "city": item.address.city,
+                    "state": item.address.state,
+                    "postal_code": item.address.postal_code,
+                    "country": item.address.country
+                }
+            
+            order_items.append({
+                "order_item_id": item.id,
+                "product_id": item.product_id,
+                "product_name": item.product.Name if item.product else "Unknown",
+                "member_id": item.member_id,
+                "member_name": item.member.name if item.member else "Unknown",
+                "address_id": item.address_id,
+                "address_label": item.address.address_label if item.address else None,
+                "address_details": address_details,
+                "quantity": item.quantity,
+                "unit_price": item.unit_price,
+                "total_price": item.total_price,
+                "order_status": item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status),
+                "status_updated_at": item.status_updated_at.isoformat() if item.status_updated_at else None
+            })
     
     return {
         "order_id": order.id,
@@ -320,6 +425,7 @@ def get_order_tracking(
 ):
     """
     Get order tracking information with status history.
+    Returns per-address tracking for orders with multiple addresses (couple/family packs).
     """
     order = get_order_by_id(db, order_id, user_id=current_user.id)
     
@@ -329,24 +435,137 @@ def get_order_tracking(
             detail="Order not found"
         )
     
-    # Get status history
-    status_history_data = [
+    # Get order-level status history (where order_item_id is None)
+    # Safely access order_item_id - it may not exist in older database schemas
+    order_status_history = [
         {
             "status": hist.status.value,
             "previous_status": hist.previous_status.value if hist.previous_status else None,
             "notes": hist.notes,
             "changed_by": hist.changed_by,
-            "created_at": hist.created_at.isoformat() if hist.created_at else None
+            "created_at": hist.created_at.isoformat() if hist.created_at else None,
+            "order_item_id": getattr(hist, 'order_item_id', None)
         }
-        for hist in order.status_history
+        for hist in order.status_history if getattr(hist, 'order_item_id', None) is None
     ]
+    
+    # Group order items by address for per-address tracking
+    address_groups = defaultdict(lambda: {"items": [], "address_data": None, "address_id": None})
+    
+    for item in order.items:
+        # Use snapshot data if available
+        snapshot = item.snapshot if item.snapshot else None
+        # Get address_id from snapshot or item (handle NULL case)
+        if snapshot and snapshot.address_data:
+            address_id = snapshot.address_data.get("id") or item.address_id
+        else:
+            address_id = item.address_id
+        
+        # Group by address_id (can be None if address was deleted)
+        address_groups[address_id]["items"].append((item, snapshot))
+        if not address_groups[address_id]["address_data"]:
+            if snapshot and snapshot.address_data:
+                address_groups[address_id]["address_data"] = snapshot.address_data
+                address_groups[address_id]["address_id"] = address_id
+            elif item.address:
+                # Fallback to original address
+                address_groups[address_id]["address_data"] = {
+                    "id": item.address.id,
+                    "address_label": item.address.address_label,
+                    "street_address": item.address.street_address,
+                    "landmark": item.address.landmark,
+                    "locality": item.address.locality,
+                    "city": item.address.city,
+                    "state": item.address.state,
+                    "postal_code": item.address.postal_code,
+                    "country": item.address.country
+                }
+                address_groups[address_id]["address_id"] = address_id
+    
+    # Build per-address tracking data
+    address_tracking_list = []
+    for address_id, group_data in address_groups.items():
+        address_data = group_data["address_data"]
+        items_with_snapshots = group_data["items"]
+        
+        # Get status history for items at this address
+        item_ids = [item.id for item, _ in items_with_snapshots]
+        item_status_history = []
+        
+        # Build member name lookup from snapshots
+        member_name_map = {}
+        for item, snapshot in items_with_snapshots:
+            if snapshot and snapshot.member_data:
+                member_name_map[item.id] = snapshot.member_data.get("name", "Unknown")
+            elif item.member:
+                member_name_map[item.id] = item.member.name
+        
+        for hist in order.status_history:
+            hist_item_id = getattr(hist, 'order_item_id', None)
+            if hist_item_id in item_ids:
+                item_status_history.append({
+                    "status": hist.status.value,
+                    "previous_status": hist.previous_status.value if hist.previous_status else None,
+                    "notes": hist.notes,
+                    "changed_by": hist.changed_by,
+                    "created_at": hist.created_at.isoformat() if hist.created_at else None,
+                    "order_item_id": hist_item_id,
+                    "member_name": member_name_map.get(hist_item_id)
+                })
+        
+        # Get current status (should be same for all items at this address, but take the first)
+        current_item_status = items_with_snapshots[0][0].order_status.value if items_with_snapshots else order.order_status.value
+        
+        # Build members list for this address using snapshot data
+        members_list = []
+        for item, snapshot in items_with_snapshots:
+            if snapshot and snapshot.member_data:
+                members_list.append({
+                    "member_id": snapshot.member_data.get("id", item.member_id),
+                    "member_name": snapshot.member_data.get("name", "Unknown"),
+                    "order_item_id": item.id,
+                    "order_status": item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status)
+                })
+            else:
+                # Fallback to original member
+                members_list.append({
+                    "member_id": item.member_id,
+                    "member_name": item.member.name if item.member else "Unknown",
+                    "order_item_id": item.id,
+                    "order_status": item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status)
+                })
+        
+        # Build address details from snapshot
+        address_details = None
+        if address_data:
+            address_details = {
+                "address_label": address_data.get("address_label"),
+                "street_address": address_data.get("street_address"),
+                "landmark": address_data.get("landmark"),
+                "locality": address_data.get("locality"),
+                "city": address_data.get("city"),
+                "state": address_data.get("state"),
+                "postal_code": address_data.get("postal_code"),
+                "country": address_data.get("country")
+            }
+        
+        address_tracking_list.append({
+            "address_id": address_id,
+            "address_label": address_data.get("address_label") if address_data else None,
+            "address_details": address_details,
+            "members": members_list,
+            "current_status": current_item_status,
+            "status_history": item_status_history,
+            "estimated_completion": order.scheduled_date.isoformat() if order.scheduled_date else None
+        })
     
     return {
         "order_id": order.id,
         "order_number": order.order_number,
         "current_status": order.order_status.value,
-        "status_history": status_history_data,
-        "estimated_completion": order.scheduled_date if order.scheduled_date else None
+        "status_history": order_status_history,
+        "estimated_completion": order.scheduled_date if order.scheduled_date else None,
+        "address_tracking": address_tracking_list
     }
 
 
@@ -381,7 +600,7 @@ def update_order_status_api(
                 detail="Order not found"
             )
         
-        # Update status
+        # Update status (supports per-item or per-address updates)
         order = update_order_status(
             db=db,
             order_id=order_id,
@@ -391,7 +610,9 @@ def update_order_status_api(
             scheduled_date=status_data.scheduled_date,
             technician_name=status_data.technician_name,
             technician_contact=status_data.technician_contact,
-            lab_name=status_data.lab_name
+            lab_name=status_data.lab_name,
+            order_item_id=status_data.order_item_id,
+            address_id=status_data.address_id
         )
         
         return {

@@ -1,10 +1,10 @@
 from pydantic import BaseModel, validator
-from typing import Optional, List
+from typing import Optional, List, Union
 
 class CartAdd(BaseModel):
     product_id: int
-    address_id: int  # Required - every cart item must have an address
-    member_ids: List[int]  # List of member IDs - for couple: 2 members, for family: up to 4 members
+    address_id: Union[int, List[int]]  # Single address (shared) or list of addresses (one per member)
+    member_ids: List[int]  # List of member IDs - for couple: 2 members, for family: 3-4 members (3 mandatory + 1 optional)
     quantity: int = 1
     
     @validator('member_ids')
@@ -14,6 +14,19 @@ class CartAdd(BaseModel):
         if len(v) > 4:
             raise ValueError('Maximum 4 members allowed per product')
         return v
+    
+    @validator('address_id')
+    def normalize_address_id(cls, v):
+        """Normalize address_id to always be a list for easier processing."""
+        if isinstance(v, int):
+            return [v]
+        if isinstance(v, list):
+            if not v:
+                raise ValueError('At least one address_id is required')
+            if len(v) > 4:
+                raise ValueError('Maximum 4 addresses allowed (one per member)')
+            return v
+        raise ValueError('address_id must be an integer or a list of integers')
 
 
 class CartUpdate(BaseModel):

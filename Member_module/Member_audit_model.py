@@ -15,10 +15,12 @@ class MemberAuditLog(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     member_id = Column(Integer, ForeignKey("members.id", ondelete="SET NULL"), nullable=True, index=True)
+    member_name = Column(String(255), nullable=True, index=True)  # Member name for clear identification
+    member_identifier = Column(String(100), nullable=True)  # Composite identifier: name + mobile for unique identification
     event_type = Column(String(20), nullable=False, index=True)  # CREATED, UPDATED, DELETED
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
-    old_data = Column(JSON, nullable=True)  # Previous member data before update
-    new_data = Column(JSON, nullable=True)  # New member data after update
+    old_data = Column(JSON, nullable=True)  # Previous member data before update (includes member_id)
+    new_data = Column(JSON, nullable=True)  # New member data after update (includes member_id)
     reason = Column(String(500), nullable=True)  # Optional reason
     ip_address = Column(String(50), nullable=True, index=True)
     user_agent = Column(String(500), nullable=True)

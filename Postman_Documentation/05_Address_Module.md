@@ -147,6 +147,13 @@ Authorization: Bearer <access_token>
 }
 ```
 
+#### 422 Unprocessable Entity - Location Not Serviceable
+```json
+{
+  "detail": "Order cannot be delivered to this location."
+}
+```
+
 ### Testing Steps
 1. Create a new POST request in Postman
 2. Set URL to: `http://localhost:8000/address/save`
@@ -167,6 +174,7 @@ Authorization: Bearer <access_token>
 - Use `address_id: 0` to create a new address
 - Use existing `address_id` to update an address
 - City, state, and locality are auto-filled from pincode if not provided. The save response includes `locality_options` so you can prompt the user to pick the exact area (e.g., Whitefield, Koramangala, etc.)
+- Addresses are accepted only if the city/locality exists in `Locations.xlsx`. Otherwise the API returns: `Order cannot be delivered to this location.`
 - Pincode must be exactly 6 digits
 - Address is required before adding items to cart
 

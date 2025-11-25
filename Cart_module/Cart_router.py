@@ -35,7 +35,9 @@ def add_to_cart(
     """
     Add item to cart (requires authentication).
     For couple products, creates 2 rows in cart_items table.
+    For family products, creates 3-4 rows (3 mandatory + 1 optional).
     Every cart item must be linked with member_id and address_id.
+    Addresses can be the same for all members or different for each member.
     """
     try:
         # Check if product exists
@@ -45,18 +47,39 @@ def add_to_cart(
 
         category_name = product.category.name if product.category else "this category"
         
-        # Validate address exists and belongs to user
-        address = db.query(Address).filter(
-            Address.id == item.address_id,
+        # Normalize address_id to list (schema validator already ensures it's a list)
+        address_ids = item.address_id if isinstance(item.address_id, list) else [item.address_id]
+        num_addresses = len(address_ids)
+        num_members = len(item.member_ids)
+        
+        # Validate address count: either 1 shared address or 1 per member
+        if num_addresses != 1 and num_addresses != num_members:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Address count mismatch. Provide either 1 shared address or {num_members} addresses "
+                    f"(one per member). Got {num_addresses} address(es) for {num_members} member(s)."
+                )
+            )
+        
+        # Validate all addresses exist and belong to user
+        addresses = db.query(Address).filter(
+            Address.id.in_(address_ids),
             Address.user_id == current_user.id
-        ).first()
-        if not address:
-            raise HTTPException(status_code=404, detail="Address not found or does not belong to you")
+        ).all()
+        
+        if len(addresses) != num_addresses:
+            found_ids = {addr.id for addr in addresses}
+            missing_ids = [aid for aid in address_ids if aid not in found_ids]
+            raise HTTPException(
+                status_code=422,
+                detail=f"Address(es) {missing_ids} not found or do not belong to you."
+            )
         
         # Validate member_ids are unique (no duplicates)
         if len(item.member_ids) != len(set(item.member_ids)):
             raise HTTPException(
-                status_code=400,
+                status_code=422,
                 detail="Duplicate member IDs are not allowed. Each member can only be added once per product."
             )
         
@@ -66,85 +89,117 @@ def add_to_cart(
             Member.user_id == current_user.id
         ).all()
         
-        if len(members) != len(item.member_ids):
-            raise HTTPException(status_code=404, detail="One or more members not found")
+        if len(members) != num_members:
+            raise HTTPException(
+                status_code=422,
+                detail="One or more member IDs not found for this user."
+            )
         
         # Check if any of these members are already in cart for another product
-        # within the same category
-        existing_cart_members = (
-            db.query(CartItem)
+        # within the same category (ignore address differences)
+        conflicting_members = (
+            db.query(CartItem, Product, Member)
             .join(Product, CartItem.product_id == Product.ProductId)
+            .join(Member, CartItem.member_id == Member.id)
             .filter(
                 CartItem.user_id == current_user.id,
                 CartItem.member_id.in_(item.member_ids),
                 Product.category_id == product.category_id,
                 CartItem.product_id != item.product_id
             )
-            .first()
+            .all()
         )
         
-        if existing_cart_members:
+        if conflicting_members:
+            conflicts = []
+            for cart_item, existing_product, member_obj in conflicting_members:
+                conflicts.append({
+                    "member_id": member_obj.id,
+                    "member_name": member_obj.name,
+                    "existing_product_id": existing_product.ProductId,
+                    "existing_product_name": existing_product.Name,
+                    "existing_plan_type": existing_product.plan_type.value if hasattr(existing_product.plan_type, "value") else str(existing_product.plan_type),
+                })
             raise HTTPException(
-                status_code=400,
-                detail=(
-                    "One or more members in this request already belong to another "
-                    f"product in the '{category_name}' category. "
-                    "A member cannot subscribe to multiple products in the same category."
-                )
+                status_code=422,
+                detail={
+                    "message": (
+                        f"Members already associated with another product in '{category_name}' category."
+                    ),
+                    "conflicts": conflicts
+                }
             )
         
-        # Check if same product with same members and address already exists in cart
-        # For couple/family products, check by group_id or by matching all member_ids
+        # Check if same product with same members already exists in cart
+        # (ignore address differences - addresses can be changed)
         existing_cart_items = db.query(CartItem).filter(
             CartItem.user_id == current_user.id,
-            CartItem.product_id == item.product_id,
-            CartItem.address_id == item.address_id
+            CartItem.product_id == item.product_id
         ).all()
         
         if existing_cart_items:
-            # Check if all member_ids match (for couple/family, check group)
-            existing_member_ids = set(ci.member_id for ci in existing_cart_items)
-            requested_member_ids = set(item.member_ids)
+            # Group by group_id to check member sets
+            from collections import defaultdict
+            grouped_existing = defaultdict(list)
+            for ci in existing_cart_items:
+                group_key = ci.group_id or f"single_{ci.id}"
+                grouped_existing[group_key].append(ci)
             
-            if existing_member_ids == requested_member_ids:
-                raise HTTPException(
-                    status_code=400,
-                    detail="This product with the same members and address is already in your cart."
-                )
+            requested_member_ids = set(item.member_ids)
+            for group_key, group_items in grouped_existing.items():
+                existing_member_ids = set(ci.member_id for ci in group_items)
+                if existing_member_ids == requested_member_ids:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="This product with the same members is already in your cart."
+                    )
         
         # Validate member count matches product plan type
-        if product.plan_type == PlanType.SINGLE and len(item.member_ids) != 1:
+        if product.plan_type == PlanType.SINGLE and num_members != 1:
             raise HTTPException(
-                status_code=400,
-                detail=f"Single plan requires exactly 1 member, got {len(item.member_ids)}"
+                status_code=422,
+                detail=f"Single plan requires exactly 1 member, got {num_members}."
             )
-        elif product.plan_type == PlanType.COUPLE and len(item.member_ids) != 2:
+        elif product.plan_type == PlanType.COUPLE and num_members != 2:
             raise HTTPException(
-                status_code=400,
-                detail=f"Couple plan requires exactly 2 members, got {len(item.member_ids)}"
+                status_code=422,
+                detail=f"Couple plan requires exactly 2 members, got {num_members}."
             )
-        elif product.plan_type == PlanType.FAMILY and len(item.member_ids) != 4:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Family plan requires exactly 4 members, got {len(item.member_ids)}"
-            )
+        elif product.plan_type == PlanType.FAMILY:
+            if num_members < 3 or num_members > 4:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Family plan requires 3-4 members (3 mandatory + 1 optional), got {num_members}."
+                )
         
         ip, user_agent = get_client_info(request)
         
         # Generate unique group_id using full UUID for better uniqueness
         group_id = f"{current_user.id}_{product.ProductId}_{uuid.uuid4().hex}"
         
+        # Map members to addresses
+        # If 1 address provided, use it for all members; otherwise use one address per member
+        member_address_map = {}
+        if num_addresses == 1:
+            # Single shared address for all members
+            shared_address_id = address_ids[0]
+            for member in members:
+                member_address_map[member.id] = shared_address_id
+        else:
+            # One address per member (in order)
+            for idx, member in enumerate(members):
+                member_address_map[member.id] = address_ids[idx]
+        
         created_cart_items = []
         
         try:
-            # For couple products: create 2 rows, one for each member
-            # For family products: create 4 rows, one for each member
-            # For single products: create 1 row
+            # Create cart items: one row per member with their assigned address
             for member in members:
+                assigned_address_id = member_address_map[member.id]
                 cart_item = CartItem(
                     user_id=current_user.id,
                     product_id=item.product_id,
-                    address_id=item.address_id,
+                    address_id=assigned_address_id,
                     member_id=member.id,
                     quantity=item.quantity,
                     group_id=group_id  # Link all items for this product purchase
@@ -166,6 +221,12 @@ def add_to_cart(
                 detail=f"Error adding items to cart: {str(e)}"
             )
         
+        # Build member-address mapping for response
+        member_address_response = [
+            {"member_id": mid, "address_id": aid}
+            for mid, aid in member_address_map.items()
+        ]
+        
         # Audit log
         correlation_id = str(uuid.uuid4())
         create_audit_log(
@@ -180,7 +241,8 @@ def add_to_cart(
                 "plan_type": product.plan_type.value,
                 "quantity": item.quantity,
                 "member_ids": item.member_ids,
-                "address_id": item.address_id,
+                "address_ids": address_ids,
+                "member_address_map": member_address_map,
                 "cart_items_created": len(created_cart_items),
                 "group_id": group_id
             },
@@ -197,14 +259,15 @@ def add_to_cart(
                 "cart_item_ids": [ci.id for ci in created_cart_items],
                 "cart_id": created_cart_items[0].id,  # Primary cart item ID
                 "product_id": product.ProductId,
-                "address_id": item.address_id,
+                "address_ids": address_ids,
                 "member_ids": item.member_ids,
+                "member_address_map": member_address_response,
                 "quantity": item.quantity,
                 "plan_type": product.plan_type.value,
                 "price": product.Price,
                 "special_price": product.SpecialPrice,
                 "total_amount": item.quantity * product.SpecialPrice,
-                "items_created": len(created_cart_items)  # 1 for single, 2 for couple, 4 for family
+                "items_created": len(created_cart_items)  # 1 for single, 2 for couple, 3-4 for family
             }
         }
     except HTTPException:
@@ -461,10 +524,20 @@ def view_cart(
         grouped_items[group_key].append(item)
 
     for group_key, items in grouped_items.items():
-        # Use first item as representative (all items in group have same product, quantity, address)
+        # Use first item as representative (all items in group have same product, quantity)
+        # Note: addresses may differ per member
         item = items[0]
         product = item.product
         member_ids = [i.member_id for i in items]
+        
+        # Build member-address mapping for this group
+        member_address_map = [
+            {"member_id": i.member_id, "address_id": i.address_id}
+            for i in items
+        ]
+        
+        # Get unique address IDs (may be 1 or multiple)
+        address_ids = list(set(i.address_id for i in items))
         
         # Calculate total (quantity * price) - price is already for the plan, not per member
         total = item.quantity * product.SpecialPrice
@@ -474,15 +547,17 @@ def view_cart(
             "cart_id": item.id,  # Primary cart item ID
             "cart_item_ids": [i.id for i in items],  # All cart item IDs in this group
             "product_id": product.ProductId,
-            "address_id": item.address_id,
+            "address_ids": address_ids,  # List of unique address IDs used
+            "address_id": address_ids[0] if len(address_ids) == 1 else None,  # Backward compatibility: single address if all same
             "member_ids": member_ids,
+            "member_address_map": member_address_map,  # Per-member address mapping
             "product_name": product.Name,
             "product_images": product.Images,
             "plan_type": product.plan_type.value if hasattr(product.plan_type, 'value') else str(product.plan_type),
             "price": product.Price,
             "special_price": product.SpecialPrice,
             "quantity": item.quantity,
-            "members_count": len(items),  # 1 for single, 2 for couple, 4 for family
+            "members_count": len(items),  # 1 for single, 2 for couple, 3-4 for family
             "total_amount": total,
             "group_id": item.group_id
         })

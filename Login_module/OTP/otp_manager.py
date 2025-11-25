@@ -71,7 +71,7 @@ def _otp_blocked_key(country_code: str, mobile: str) -> str:
     return f"otp_blocked:{country_code}:{mobile}"
 
 
-def generate_otp(length: int = 6) -> str:
+def generate_otp(length: int = 4) -> str:
     # numeric OTP
     return "".join(secrets.choice("0123456789") for _ in range(length))
 

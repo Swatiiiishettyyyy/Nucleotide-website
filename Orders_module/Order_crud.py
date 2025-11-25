@@ -167,7 +167,7 @@ def create_order_from_cart(
         db.add(snapshot)
         db.flush()
         
-        # Create order item
+        # Create order item with initial status
         order_item = OrderItem(
             order_id=order.id,
             product_id=product.ProductId,
@@ -176,9 +176,22 @@ def create_order_from_cart(
             snapshot_id=snapshot.id,
             quantity=cart_item.quantity,
             unit_price=product.SpecialPrice,
-            total_price=cart_item.quantity * product.SpecialPrice
+            total_price=cart_item.quantity * product.SpecialPrice,
+            order_status=OrderStatus.ORDER_CONFIRMED  # Initialize with order confirmed status
         )
         db.add(order_item)
+        db.flush()  # Get order_item.id for status history
+        
+        # Create initial status history for this order item
+        item_status_history = OrderStatusHistory(
+            order_id=order.id,
+            order_item_id=order_item.id,
+            status=OrderStatus.ORDER_CONFIRMED,
+            previous_status=None,
+            notes=f"Order item created for member {member.name} at address {address_obj.address_label or address_obj.id}",
+            changed_by=str(user_id)
+        )
+        db.add(item_status_history)
     
     # Create initial status history
     status_history = OrderStatusHistory(
@@ -244,45 +257,134 @@ def update_order_status(
     scheduled_date: Optional[datetime] = None,
     technician_name: Optional[str] = None,
     technician_contact: Optional[str] = None,
-    lab_name: Optional[str] = None
+    lab_name: Optional[str] = None,
+    order_item_id: Optional[int] = None,
+    address_id: Optional[int] = None
 ) -> Order:
     """
     Update order status and create status history entry.
+    If order_item_id or address_id is provided, updates only that specific item.
+    Otherwise, updates the entire order and all items with matching addresses.
     """
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise ValueError("Order not found")
     
-    previous_status = order.order_status
-    
-    # Update order status
-    order.order_status = new_status
-    order.status_updated_at = datetime.utcnow()
-    
-    # Update additional fields if provided
-    if scheduled_date:
-        order.scheduled_date = scheduled_date
-    if technician_name:
-        order.technician_name = technician_name
-    if technician_contact:
-        order.technician_contact = technician_contact
-    if lab_name:
-        order.lab_name = lab_name
-    
-    # Create status history entry
-    status_history = OrderStatusHistory(
-        order_id=order_id,
-        status=new_status,
-        previous_status=previous_status,
-        notes=notes,
-        changed_by=changed_by
-    )
-    db.add(status_history)
+    # If updating specific order item
+    if order_item_id:
+        order_item = db.query(OrderItem).filter(
+            OrderItem.id == order_item_id,
+            OrderItem.order_id == order_id
+        ).first()
+        if not order_item:
+            raise ValueError("Order item not found")
+        
+        previous_status = order_item.order_status
+        order_item.order_status = new_status
+        order_item.status_updated_at = datetime.utcnow()
+        
+        # Create status history entry for this item
+        status_history = OrderStatusHistory(
+            order_id=order_id,
+            order_item_id=order_item_id,
+            status=new_status,
+            previous_status=previous_status,
+            notes=notes or f"Status updated for order item {order_item_id}",
+            changed_by=changed_by
+        )
+        db.add(status_history)
+        
+        # Also update order-level status if all items have the same status
+        _sync_order_status(db, order)
+        
+    # If updating by address_id (all items with that address)
+    elif address_id:
+        order_items = db.query(OrderItem).filter(
+            OrderItem.order_id == order_id,
+            OrderItem.address_id == address_id
+        ).all()
+        
+        if not order_items:
+            raise ValueError(f"No order items found for address {address_id} in this order")
+        
+        for item in order_items:
+            previous_status = item.order_status
+            item.order_status = new_status
+            item.status_updated_at = datetime.utcnow()
+            
+            # Create status history entry for each item
+            status_history = OrderStatusHistory(
+                order_id=order_id,
+                order_item_id=item.id,
+                status=new_status,
+                previous_status=previous_status,
+                notes=notes or f"Status updated for address {address_id}",
+                changed_by=changed_by
+            )
+            db.add(status_history)
+        
+        # Also update order-level status if all items have the same status
+        _sync_order_status(db, order)
+        
+    # Update entire order (default behavior)
+    else:
+        previous_status = order.order_status
+        order.order_status = new_status
+        order.status_updated_at = datetime.utcnow()
+        
+        # Update all order items to match
+        for item in order.items:
+            item.order_status = new_status
+            item.status_updated_at = datetime.utcnow()
+        
+        # Update additional fields if provided
+        if scheduled_date:
+            order.scheduled_date = scheduled_date
+        if technician_name:
+            order.technician_name = technician_name
+        if technician_contact:
+            order.technician_contact = technician_contact
+        if lab_name:
+            order.lab_name = lab_name
+        
+        # Create status history entry for order
+        status_history = OrderStatusHistory(
+            order_id=order_id,
+            status=new_status,
+            previous_status=previous_status,
+            notes=notes,
+            changed_by=changed_by
+        )
+        db.add(status_history)
     
     db.commit()
     db.refresh(order)
     
     return order
+
+
+def _sync_order_status(db: Session, order: Order):
+    """
+    Sync order-level status based on order items.
+    If all items have the same status, update order status to match.
+    Otherwise, keep order status as the most common status or leave as is.
+    """
+    if not order.items:
+        return
+    
+    # Get all item statuses
+    item_statuses = [item.order_status for item in order.items]
+    
+    # If all items have the same status, update order status
+    if len(set(item_statuses)) == 1:
+        order.order_status = item_statuses[0]
+        order.status_updated_at = datetime.utcnow()
+    # Otherwise, set order status to the most common status
+    else:
+        from collections import Counter
+        most_common_status = Counter(item_statuses).most_common(1)[0][0]
+        order.order_status = most_common_status
+        order.status_updated_at = datetime.utcnow()
 
 
 def get_order_by_id(db: Session, order_id: int, user_id: Optional[int] = None) -> Optional[Order]:

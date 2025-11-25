@@ -186,6 +186,29 @@ def get_user_active_sessions(db: Session, user_id: int) -> list[DeviceSession]:
     )
 
 
+def count_user_active_sessions(db: Session, user_id: int) -> int:
+    """Count the number of active sessions for a user."""
+    return (
+        db.query(DeviceSession)
+        .filter(DeviceSession.user_id == user_id, DeviceSession.is_active == True)
+        .count()
+    )
+
+
+def get_user_active_sessions_count(db: Session, user_id: int, max_sessions: int = 4) -> dict:
+    """
+    Get active sessions count and status for a user.
+    Returns dict with count, max_sessions, and whether limit is reached.
+    """
+    count = count_user_active_sessions(db, user_id)
+    return {
+        "active_sessions": count,
+        "max_sessions": max_sessions,
+        "limit_reached": count >= max_sessions,
+        "remaining_slots": max(0, max_sessions - count)
+    }
+
+
 
 def cleanup_inactive_sessions(db: Session, hours_inactive: int = 24) -> int:
     cutoff = datetime.utcnow() - timedelta(hours=hours_inactive)

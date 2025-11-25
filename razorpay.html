@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<body>
+
+<button id="payBtn">Pay Now</button>
+
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script>
+document.getElementById('payBtn').onclick = function(e) {
+
+    var options = {
+        "key": "rzp_test_RjSe7yta7qY3qe",
+        "amount": "455000",
+        "currency": "INR",
+        "name": "My App",
+        "order_id": "order_RjrFFpymS4ED3L",
+        "handler": function (response){
+            console.log("Payment ID:", response.razorpay_payment_id);
+            console.log("Order ID:", response.razorpay_order_id);
+            console.log("Signature:", response.razorpay_signature);
+        }
+    };
+
+    var rzp1 = new Razorpay(options);
+    rzp1.open();
+    e.preventDefault();
+}
+</script>
+
+</body>
+</html>

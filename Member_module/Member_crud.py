@@ -108,8 +108,11 @@ def save_member(
         
         if existing:
             raise HTTPException(
-                status_code=400,
-                detail=f"Member '{req.name}' with relation '{req.relation}' already exists in {category_name} category. Cannot add duplicate."
+                status_code=422,
+                detail=(
+                    f"Member '{req.name}' with relation '{req.relation}' already exists "
+                    f"in the '{category_name}' category."
+                )
             )
         
         # If adding to family plan, check if member is already in personal/couple plan
@@ -122,9 +125,13 @@ def save_member(
             ).first()
             
             if conflicting_member:
+                plan = conflicting_member.associated_plan_type or "another plan"
                 raise HTTPException(
-                    status_code=400,
-                    detail=f"Member '{req.name}' is already associated with a personal/couple plan. Cannot add to family plan."
+                    status_code=422,
+                    detail=(
+                        f"Member '{req.name}' is already associated with your '{plan}' plan "
+                        f"in the '{category_name}' category. Remove them from that plan before adding to family."
+                    )
                 )
 
             current_family_members = _family_member_count(db, user.id, category_filter)
@@ -143,12 +150,58 @@ def save_member(
             ).first()
             
             if conflicting_member:
+                plan = conflicting_member.associated_plan_type or "family"
                 raise HTTPException(
-                    status_code=400,
-                    detail=f"Member '{req.name}' is already associated with a family plan. Cannot add to personal/couple plan."
+                    status_code=422,
+                    detail=(
+                        f"Member '{req.name}' is already associated with your '{plan}' plan "
+                        f"in the '{category_name}' category. Remove them before assigning to another plan."
+                    )
                 )
     
     old_data = None
+    
+    # If editing existing member, check if member is in cart
+    if req.member_id != 0:
+        from Cart_module.Cart_model import CartItem
+        from Product_module.Product_model import Product
+        
+        # Check if member is linked to any cart items
+        cart_items = (
+            db.query(CartItem, Product)
+            .join(Product, CartItem.product_id == Product.ProductId)
+            .filter(
+                CartItem.member_id == req.member_id,
+                CartItem.user_id == user.id
+            )
+            .all()
+        )
+        
+        if cart_items:
+            # Get product names and plan types for better error message
+            conflicts = []
+            for cart_item, product in cart_items:
+                conflicts.append({
+                    "product_id": product.ProductId,
+                    "product_name": product.Name,
+                    "plan_type": product.plan_type.value if hasattr(product.plan_type, 'value') else str(product.plan_type)
+                })
+            
+            # Group by product
+            from collections import defaultdict
+            product_conflicts = defaultdict(list)
+            for conflict in conflicts:
+                product_conflicts[conflict["product_name"]].append(conflict["plan_type"])
+            
+            conflict_details = ", ".join([
+                f"{name} ({'/'.join(set(types))})" 
+                for name, types in product_conflicts.items()
+            ])
+            
+            raise HTTPException(
+                status_code=422,
+                detail=f"Member '{req.name}' is associated with {len(cart_items)} cart item(s) for product(s): {conflict_details}. Please remove these items from your cart before editing the member."
+            )
     
     if req.member_id == 0:
         # Create new member
@@ -170,6 +223,7 @@ def save_member(
         
         # Audit log for creation
         new_data = {
+            "member_id": member.id,
             "name": req.name,
             "relation": req.relation,
             "age": req.age,
@@ -182,6 +236,8 @@ def save_member(
         audit = MemberAuditLog(
             user_id=user.id,
             member_id=member.id,
+            member_name=req.name,
+            member_identifier=f"{req.name} ({req.mobile})",
             event_type="CREATED",
             new_data=new_data,
             ip_address=ip_address,
@@ -198,12 +254,15 @@ def save_member(
         
         # Store old data before update
         old_data = {
+            "member_id": member.id,
             "name": member.name,
             "relation": str(member.relation.value) if hasattr(member.relation, 'value') else str(member.relation),
             "age": member.age,
             "gender": member.gender,
             "dob": member.dob.isoformat() if member.dob else None,
-            "mobile": member.mobile
+            "mobile": member.mobile,
+            "category": member.associated_category,
+            "plan_type": member.associated_plan_type
         }
         
         member.name = req.name
@@ -217,16 +276,21 @@ def save_member(
         
         # Audit log for update
         new_data = {
+            "member_id": member.id,
             "name": req.name,
             "relation": req.relation,
             "age": req.age,
             "gender": req.gender,
             "dob": req.dob.isoformat() if req.dob else None,
-            "mobile": req.mobile
+            "mobile": req.mobile,
+            "category": member.associated_category,
+            "plan_type": member.associated_plan_type
         }
         audit = MemberAuditLog(
             user_id=user.id,
             member_id=member.id,
+            member_name=req.name,
+            member_identifier=f"{req.name} ({req.mobile})",
             event_type="UPDATED",
             old_data=old_data,
             new_data=new_data,

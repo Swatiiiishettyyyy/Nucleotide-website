@@ -39,7 +39,8 @@ class Order(Base):
     id = Column(Integer, primary_key=True, index=True)
     order_number = Column(String(50), unique=True, nullable=False, index=True)  # Unique order number
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    address_id = Column(Integer, ForeignKey("addresses.id"), nullable=False, index=True)
+    # Primary address can be NULL if original address is deleted (we use snapshot for order details)
+    address_id = Column(Integer, ForeignKey("addresses.id", ondelete="SET NULL"), nullable=True, index=True)
     
     # Order totals
     subtotal = Column(Float, nullable=False)
@@ -81,14 +82,17 @@ class OrderItem(Base):
     """
     Order items - links orders to products and members.
     Each order item represents one product purchased for one member.
+    Each item has its own status for tracking per-address delivery.
     """
     __tablename__ = "order_items"
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
-    product_id = Column(Integer, ForeignKey("products.ProductId"), nullable=False)
-    member_id = Column(Integer, ForeignKey("members.id"), nullable=False, index=True)
-    address_id = Column(Integer, ForeignKey("addresses.id"), nullable=False)
+    # These foreign keys allow NULL because we use OrderSnapshot for data integrity
+    # If original product/member/address is deleted, FK becomes NULL but snapshot preserves data
+    product_id = Column(Integer, ForeignKey("products.ProductId", ondelete="SET NULL"), nullable=True)
+    member_id = Column(Integer, ForeignKey("members.id", ondelete="SET NULL"), nullable=True, index=True)
+    address_id = Column(Integer, ForeignKey("addresses.id", ondelete="SET NULL"), nullable=True)
     
     # Product snapshot at time of order (from snapshot table)
     snapshot_id = Column(Integer, ForeignKey("order_snapshots.id"), nullable=True)
@@ -96,6 +100,10 @@ class OrderItem(Base):
     quantity = Column(Integer, default=1)
     unit_price = Column(Float, nullable=False)  # Price at time of order
     total_price = Column(Float, nullable=False)  # quantity * unit_price
+    
+    # Per-item status tracking (for different addresses in couple/family packs)
+    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.ORDER_CONFIRMED, index=True)
+    status_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
@@ -143,6 +151,7 @@ class OrderStatusHistory(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    order_item_id = Column(Integer, ForeignKey("order_items.id", ondelete="CASCADE"), nullable=True, index=True)  # Null for order-level updates
     status = Column(Enum(OrderStatus), nullable=False, index=True)
     previous_status = Column(Enum(OrderStatus), nullable=True)
     notes = Column(Text, nullable=True)  # Additional notes about status change
@@ -151,5 +160,6 @@ class OrderStatusHistory(Base):
     
     # Relationships
     order = relationship("Order", backref="status_history")
+    order_item = relationship("OrderItem", backref="status_history")
 
 
