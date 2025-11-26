@@ -21,7 +21,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from starlette import status
-from database import Base, engine
+from database import engine
 from  Address_module.Address_router import router as address_router
 from Cart_module.Cart_router import router as cart_router
 from Login_module.OTP.OTP_router import router as otp_router
@@ -33,7 +33,7 @@ from Login_module.Device.scheduler import start_scheduler, shutdown_scheduler
 
 # Import order models so they're registered with SQLAlchemy Base
 from Orders_module.Order_model import Order, OrderItem, OrderSnapshot, OrderStatusHistory
-from database_migrations import run_startup_migrations
+from alembic_runner import run_migrations
 from Category_module.Category_router import router as category_router
 from Category_module.bootstrap import seed_default_categories
 from sqlalchemy.exc import OperationalError
@@ -42,20 +42,14 @@ logger = logging.getLogger(__name__)
 
 
 def initialize_database():
-    """Initialize database tables and run migrations. Handles connection errors gracefully."""
-    try:
-        logger.info("Initializing database tables...")
-        Base.metadata.create_all(bind=engine)
-        logger.info("Database tables initialized successfully")
-    except OperationalError as e:
-        logger.error(f"Failed to connect to database during table creation: {e}")
-        logger.warning("Application will continue, but database operations may fail until connection is restored")
-    except Exception as e:
-        logger.error(f"Unexpected error during table creation: {e}", exc_info=True)
-    
+    """
+    Initialize database by running Alembic migrations and seeding default data.
+    Handles connection errors gracefully.
+    """
+    # Run Alembic migrations (handles all schema creation and updates)
     try:
         logger.info("Running database migrations...")
-        run_startup_migrations(engine)
+        run_migrations()
         logger.info("Database migrations completed successfully")
     except OperationalError as e:
         logger.error(f"Failed to connect to database during migrations: {e}")
@@ -63,6 +57,7 @@ def initialize_database():
     except Exception as e:
         logger.error(f"Unexpected error during migrations: {e}", exc_info=True)
     
+    # Seed default categories
     try:
         logger.info("Seeding default categories...")
         seed_default_categories()
@@ -171,6 +166,66 @@ from Login_module.Device.Device_session_router import router as session_router
 app.include_router(session_router)
 
 
+
+# ============================================================
+# 6. ROOT ENDPOINT
+# ============================================================
+@app.get("/")
+def root():
+    """Root endpoint with API information"""
+    return {
+        "status": "success",
+        "message": "Nucleoseq Unified API",
+        "version": "3.0.0",
+        "endpoints": {
+            "auth": "/auth",
+            "profile": "/profile",
+            "products": "/products",
+            "categories": "/categories",
+            "cart": "/cart",
+            "address": "/address",
+            "member": "/member",
+            "orders": "/orders",
+            "audit": "/audit",
+            "sessions": "/sessions"
+        },
+        "docs": "/docs",
+        "redoc": "/redoc"
+    }
+
+
+
+# ============================================================
+# 7. HEALTH CHECK ENDPOINT
+# ============================================================
+@app.get("/health")
+def health_check():
+    """Health check endpoint for container orchestration"""
+    return {
+        "status": "healthy",
+        "service": "Nucleoseq Unified API"
+    }
+
+
+
+# ============================================================
+# 8. RUN APPLICATION
+# ============================================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+    print("\n" + "="*60)
+    print("Starting Nucleoseq Unified API Server")
+    print("="*60)
+    print("Server will be available at: http://0.0.0.0:8030")
+    print("API Documentation: http://0.0.0.0:8030/docs")
+    print("ReDoc Documentation: http://0.0.0.0:8030/redoc")
+    print("="*60 + "\n")
+    
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8030,
+        reload=False
+    )
+

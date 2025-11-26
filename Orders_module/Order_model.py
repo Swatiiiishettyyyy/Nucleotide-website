@@ -46,6 +46,8 @@ class Order(Base):
     subtotal = Column(Float, nullable=False)
     delivery_charge = Column(Float, default=0.0)
     discount = Column(Float, default=0.0)
+    coupon_code = Column(String(50), nullable=True, index=True)  # Applied coupon code
+    coupon_discount = Column(Float, default=0.0)  # Discount from coupon
     total_amount = Column(Float, nullable=False)  # Final amount paid
     
     # Payment details

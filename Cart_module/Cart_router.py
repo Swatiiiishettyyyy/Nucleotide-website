@@ -10,10 +10,16 @@ from Product_module.Product_model import Product, PlanType
 from Address_module.Address_model import Address
 from Member_module.Member_model import Member
 from Login_module.User.user_model import User
-from .Cart_schema import CartAdd, CartUpdate
+from .Cart_schema import CartAdd, CartUpdate, ApplyCouponRequest
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user
 from .Cart_audit_crud import create_audit_log
+from .coupon_service import (
+    apply_coupon_to_cart,
+    get_applied_coupon,
+    remove_coupon_from_cart,
+    validate_and_calculate_discount
+)
 
 router = APIRouter(prefix="/cart", tags=["Cart"])
 
@@ -562,12 +568,45 @@ def view_cart(
             "group_id": item.group_id
         })
 
-    grand_total = subtotal_amount + delivery_charge
+    # Get applied coupon if any
+    applied_coupon = get_applied_coupon(db, current_user.id)
+    coupon_amount = 0.0
+    coupon_code = None
+    
+    if applied_coupon:
+        # Re-validate coupon to ensure it's still valid
+        coupon, discount, error = validate_and_calculate_discount(
+            db, applied_coupon.coupon_code, current_user.id, subtotal_amount
+        )
+        if coupon and not error:
+            coupon_amount = discount
+            coupon_code = applied_coupon.coupon_code
+        else:
+            # Coupon is no longer valid, remove it
+            remove_coupon_from_cart(db, current_user.id)
+            coupon_amount = 0.0
+            coupon_code = None
+    
+    # Calculate discount amount (from product discounts, if any)
+    discount_amount = 0.0  # Can be calculated from product.Discount if needed
+    
+    # Calculate total savings
+    you_save = discount_amount + coupon_amount
+    
+    # Calculate grand total
+    grand_total = subtotal_amount + delivery_charge - coupon_amount - discount_amount
+    # Ensure grand total is not negative
+    grand_total = max(0.0, grand_total)
 
     summary = {
+        "cart_id": cart_items[0].id if cart_items else 0,
         "total_items": len(grouped_items),  # Number of product groups
         "total_cart_items": len(cart_items),  # Total individual cart items
         "subtotal_amount": subtotal_amount,
+        "discount_amount": discount_amount,
+        "coupon_amount": coupon_amount,
+        "coupon_code": coupon_code,
+        "you_save": you_save,
         "delivery_charge": delivery_charge,
         "grand_total": grand_total
     }
@@ -601,3 +640,158 @@ def view_cart(
             "cart_items": cart_item_details
         }
     }
+
+
+@router.post("/apply-coupon")
+def apply_coupon(
+    request_data: ApplyCouponRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Apply coupon code to cart (requires authentication).
+    Validates coupon and calculates discount amount.
+    Shows 'You Save' amount in response.
+    """
+    try:
+        # Get user's cart items to calculate subtotal
+        cart_items = db.query(CartItem).filter(
+            CartItem.user_id == current_user.id
+        ).all()
+        
+        if not cart_items:
+            raise HTTPException(
+                status_code=400,
+                detail="Cart is empty. Add items to cart before applying coupon."
+            )
+        
+        # Calculate subtotal
+        subtotal_amount = 0.0
+        grouped_items = {}
+        for item in cart_items:
+            group_key = item.group_id or f"single_{item.id}"
+            if group_key not in grouped_items:
+                grouped_items[group_key] = []
+            grouped_items[group_key].append(item)
+        
+        for group_key, items in grouped_items.items():
+            item = items[0]
+            product = item.product
+            subtotal_amount += item.quantity * product.SpecialPrice
+        
+        # Remove any previously applied coupon
+        remove_coupon_from_cart(db, current_user.id)
+        
+        # Apply new coupon
+        success, discount_amount, message, coupon = apply_coupon_to_cart(
+            db, current_user.id, request_data.coupon_code, subtotal_amount
+        )
+        
+        if not success:
+            raise HTTPException(status_code=400, detail=message)
+        
+        # Update all cart items with coupon code
+        for item in cart_items:
+            item.coupon_code = coupon.coupon_code
+        db.commit()
+        
+        # Calculate delivery charge and grand total
+        delivery_charge = 50.0
+        grand_total = subtotal_amount + delivery_charge - discount_amount
+        grand_total = max(0.0, grand_total)
+        
+        # Audit log
+        ip, user_agent = get_client_info(request)
+        correlation_id = str(uuid.uuid4())
+        create_audit_log(
+            db=db,
+            user_id=current_user.id,
+            action="APPLY_COUPON",
+            entity_type="CART",
+            details={
+                "coupon_code": coupon.coupon_code,
+                "discount_amount": discount_amount,
+                "subtotal": subtotal_amount,
+                "grand_total": grand_total
+            },
+            ip_address=ip,
+            user_agent=user_agent,
+            username=current_user.name or current_user.mobile,
+            correlation_id=correlation_id
+        )
+        
+        return {
+            "status": "success",
+            "message": message,
+            "data": {
+                "coupon_code": coupon.coupon_code,
+                "coupon_description": coupon.description,
+                "discount_type": coupon.discount_type.value,
+                "discount_value": coupon.discount_value,
+                "discount_amount": discount_amount,
+                "you_save": discount_amount,
+                "subtotal_amount": subtotal_amount,
+                "delivery_charge": delivery_charge,
+                "grand_total": grand_total
+            }
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error applying coupon: {str(e)}")
+
+
+@router.delete("/remove-coupon")
+def remove_coupon(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Remove applied coupon from cart (requires authentication).
+    """
+    try:
+        # Remove coupon application
+        removed = remove_coupon_from_cart(db, current_user.id)
+        
+        if not removed:
+            return {
+                "status": "success",
+                "message": "No coupon was applied to your cart."
+            }
+        
+        # Remove coupon code from cart items
+        cart_items = db.query(CartItem).filter(
+            CartItem.user_id == current_user.id,
+            CartItem.coupon_code.isnot(None)
+        ).all()
+        
+        for item in cart_items:
+            item.coupon_code = None
+        db.commit()
+        
+        # Audit log
+        ip, user_agent = get_client_info(request)
+        correlation_id = str(uuid.uuid4())
+        create_audit_log(
+            db=db,
+            user_id=current_user.id,
+            action="REMOVE_COUPON",
+            entity_type="CART",
+            details={},
+            ip_address=ip,
+            user_agent=user_agent,
+            username=current_user.name or current_user.mobile,
+            correlation_id=correlation_id
+        )
+        
+        return {
+            "status": "success",
+            "message": "Coupon removed successfully."
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error removing coupon: {str(e)}")

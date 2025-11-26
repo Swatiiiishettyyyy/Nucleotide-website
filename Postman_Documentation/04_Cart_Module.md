@@ -6,7 +6,7 @@ http://localhost:8000/cart
 ```
 
 ## Overview
-This module handles shopping cart operations. Users can add products to cart, update quantities, delete items, view cart, and clear the entire cart. Cart items are linked to members and addresses. For couple and family plans, members can have either the same address or different addresses.
+This module handles shopping cart operations. Users can add products to cart, update quantities, delete items, view cart, clear the entire cart, and apply coupon codes for discounts. Cart items are linked to members and addresses. For couple and family plans, members can have either the same address or different addresses. Coupons can be applied to the cart to get discounts, and the system shows "You Save" amount in the cart summary.
 
 ---
 
@@ -484,7 +484,7 @@ Authorization: Bearer <access_token>
 (No body required)
 ```
 
-### Success Response (200 OK) - With Items
+### Success Response (200 OK) - With Items (No Coupon)
 ```json
 {
   "status": "success",
@@ -493,9 +493,14 @@ Authorization: Bearer <access_token>
     "user_id": 1,
     "username": "John Doe",
     "cart_summary": {
+      "cart_id": 1,
       "total_items": 2,
       "total_cart_items": 3,
       "subtotal_amount": 21000.00,
+      "discount_amount": 0.00,
+      "coupon_amount": 0.00,
+      "coupon_code": null,
+      "you_save": 0.00,
       "delivery_charge": 50.00,
       "grand_total": 21050.00
     },
@@ -574,14 +579,258 @@ Authorization: Bearer <access_token>
 ### Prerequisites
 - Valid access token
 
+### Success Response (200 OK) - With Items (With Coupon Applied)
+```json
+{
+  "status": "success",
+  "message": "Cart data fetched successfully.",
+  "data": {
+    "user_id": 1,
+    "username": "John Doe",
+    "cart_summary": {
+      "cart_id": 1,
+      "total_items": 2,
+      "total_cart_items": 3,
+      "subtotal_amount": 21000.00,
+      "discount_amount": 0.00,
+      "coupon_amount": 1000.00,
+      "coupon_code": "SAVE10",
+      "you_save": 1000.00,
+      "delivery_charge": 50.00,
+      "grand_total": 20050.00
+    },
+    "cart_items": [
+      {
+        "cart_id": 1,
+        "cart_item_ids": [1, 2],
+        "product_id": 2,
+        "address_ids": [1],
+        "address_id": 1,
+        "member_ids": [1, 2],
+        "member_address_map": [
+          {"member_id": 1, "address_id": 1},
+          {"member_id": 2, "address_id": 1}
+        ],
+        "product_name": "DNA Test Kit - Couple",
+        "product_images": "https://example.com/image.jpg",
+        "plan_type": "couple",
+        "price": 9000.00,
+        "special_price": 8000.00,
+        "quantity": 1,
+        "members_count": 2,
+        "total_amount": 8000.00,
+        "group_id": "1_2_abc123"
+      }
+    ]
+  }
+}
+```
+
 ### Notes
 - Returns empty cart if no items exist
 - Items are grouped by group_id for couple/family products
-- Summary includes subtotal, delivery charge, and grand total
+- Summary includes subtotal, discount amount, coupon amount, delivery charge, and grand total
 - Delivery charge is fixed at 50.00
+- `coupon_amount` shows the discount from applied coupon (0.00 if no coupon)
+- `coupon_code` shows the applied coupon code (null if no coupon)
+- `you_save` shows total savings (discount + coupon)
+- `grand_total` = subtotal + delivery_charge - coupon_amount - discount_amount
 - `address_ids` contains unique address IDs used in the group
 - `address_id` (singular) is provided for backward compatibility when all members share the same address
 - `member_address_map` shows the address assigned to each member
+
+---
+
+## Endpoint 6: Apply Coupon
+
+### Details
+- **Method:** `POST`
+- **Endpoint:** `/cart/apply-coupon`
+- **Description:** Apply a coupon code to the cart. Validates the coupon, calculates discount amount, and shows "You Save" amount. Only one coupon can be applied at a time. Applying a new coupon replaces any previously applied coupon.
+
+### Headers
+```
+Content-Type: application/json
+Authorization: Bearer <access_token>
+```
+
+### Request Body
+```json
+{
+  "coupon_code": "SAVE10"
+}
+```
+
+### Request Body Parameters
+| Parameter | Type | Required | Description | Example |
+|-----------|------|----------|-------------|---------|
+| coupon_code | string | Yes | Coupon code to apply (case-insensitive, will be converted to uppercase) | "SAVE10" |
+
+### Success Response (200 OK)
+```json
+{
+  "status": "success",
+  "message": "Coupon 'SAVE10' applied successfully",
+  "data": {
+    "coupon_code": "SAVE10",
+    "coupon_description": "10% off on orders above ₹1000",
+    "discount_type": "percentage",
+    "discount_value": 10.0,
+    "discount_amount": 1000.00,
+    "you_save": 1000.00,
+    "subtotal_amount": 10000.00,
+    "delivery_charge": 50.00,
+    "grand_total": 9050.00
+  }
+}
+```
+
+### Error Responses
+
+#### 400 Bad Request - Empty Cart
+```json
+{
+  "detail": "Cart is empty. Add items to cart before applying coupon."
+}
+```
+
+#### 400 Bad Request - Invalid Coupon Code
+```json
+{
+  "detail": "Invalid coupon code"
+}
+```
+
+#### 400 Bad Request - Coupon Not Active
+```json
+{
+  "detail": "Coupon is not active"
+}
+```
+
+#### 400 Bad Request - Coupon Expired
+```json
+{
+  "detail": "Coupon has expired"
+}
+```
+
+#### 400 Bad Request - Coupon Not Yet Valid
+```json
+{
+  "detail": "Coupon is not yet valid"
+}
+```
+
+#### 400 Bad Request - Minimum Order Amount Not Met
+```json
+{
+  "detail": "Minimum order amount of ₹5000 required"
+}
+```
+
+#### 400 Bad Request - Usage Limit Reached
+```json
+{
+  "detail": "Coupon usage limit reached"
+}
+```
+
+#### 400 Bad Request - User Already Used Coupon
+```json
+{
+  "detail": "You have already used this coupon"
+}
+```
+
+### Testing Steps
+1. Ensure you have items in cart (use "Add to Cart" endpoint)
+2. Create a new POST request in Postman
+3. Set URL to: `http://localhost:8000/cart/apply-coupon`
+4. Set Headers:
+   - `Content-Type: application/json`
+   - `Authorization: Bearer <your_access_token>`
+5. In Body tab, select "raw" and "JSON"
+6. Paste the request body with coupon code
+7. Click "Send"
+8. Verify the response shows discount amount and "You Save" amount
+9. View cart to see updated grand total with coupon discount
+
+### Prerequisites
+- Valid access token
+- Cart must have items (subtotal > 0)
+- Valid coupon code must exist in the system
+
+### Notes
+- Only one coupon can be applied at a time
+- Applying a new coupon replaces any previously applied coupon
+- Coupon is validated for:
+  - Validity period (valid_from to valid_until)
+  - Status (must be active)
+  - Minimum order amount
+  - Usage limits (total and per-user)
+- Discount amount is calculated based on coupon type:
+  - **Percentage**: (subtotal × discount_value) / 100 (capped by max_discount_amount if set)
+  - **Fixed**: Fixed discount amount (cannot exceed subtotal)
+- Coupon code is case-insensitive (automatically converted to uppercase)
+- "You Save" shows the total discount amount from the coupon
+
+---
+
+## Endpoint 7: Remove Coupon
+
+### Details
+- **Method:** `DELETE`
+- **Endpoint:** `/cart/remove-coupon`
+- **Description:** Remove the applied coupon from the cart. This will recalculate the grand total without the coupon discount.
+
+### Headers
+```
+Authorization: Bearer <access_token>
+```
+
+### Request Body
+```
+(No body required)
+```
+
+### Success Response (200 OK) - Coupon Removed
+```json
+{
+  "status": "success",
+  "message": "Coupon removed successfully."
+}
+```
+
+### Success Response (200 OK) - No Coupon Applied
+```json
+{
+  "status": "success",
+  "message": "No coupon was applied to your cart."
+}
+```
+
+### Error Responses
+No specific error responses (returns success even if no coupon was applied)
+
+### Testing Steps
+1. Ensure you have a coupon applied (use "Apply Coupon" endpoint)
+2. Create a new DELETE request in Postman
+3. Set URL to: `http://localhost:8000/cart/remove-coupon`
+4. Set Headers:
+   - `Authorization: Bearer <your_access_token>`
+5. Click "Send"
+6. Verify the response confirms coupon removal
+7. View cart to see updated grand total without coupon discount
+
+### Prerequisites
+- Valid access token
+
+### Notes
+- Removes the currently applied coupon from the cart
+- Grand total is recalculated without coupon discount
+- Returns success even if no coupon was applied
+- This action cannot be undone (you can re-apply the same coupon if valid)
 
 ---
 
@@ -640,11 +889,28 @@ Authorization: Bearer <access_token>
     - Request: `GET /cart/view`
     - Verify: Item is no longer in cart
 
-12. **Clear Cart**
+12. **Apply Coupon**
+    - Request: `POST /cart/apply-coupon`
+    - Body: `{"coupon_code": "SAVE10"}`
+    - Verify: Coupon applied, discount amount shown, "You Save" displayed
+
+13. **View Cart with Coupon**
+    - Request: `GET /cart/view`
+    - Verify: Cart summary shows coupon_code, coupon_amount, you_save, and updated grand_total
+
+14. **Remove Coupon**
+    - Request: `DELETE /cart/remove-coupon`
+    - Verify: Coupon removed successfully
+
+15. **View Cart without Coupon**
+    - Request: `GET /cart/view`
+    - Verify: Cart summary shows coupon_code as null, coupon_amount as 0.00, and original grand_total
+
+16. **Clear Cart**
     - Request: `DELETE /cart/clear`
     - Verify: All items removed
 
-13. **View Cart**
+17. **View Cart**
     - Request: `GET /cart/view`
     - Verify: Cart is empty
 
@@ -661,6 +927,7 @@ address_id: (set after creating address)
 member_id_1: (set after creating member)
 member_id_2: (set after creating member)
 cart_item_id: (set after adding to cart)
+coupon_code: (set coupon code to test, e.g., "SAVE10")
 ```
 
 ### Example URLs
@@ -668,6 +935,15 @@ cart_item_id: (set after adding to cart)
 {{base_url}}/cart/add
 {{base_url}}/cart/update/{{cart_item_id}}
 {{base_url}}/cart/view
+{{base_url}}/cart/apply-coupon
+{{base_url}}/cart/remove-coupon
+```
+
+### Example Request Body for Apply Coupon
+```json
+{
+  "coupon_code": "{{coupon_code}}"
+}
 ```
 
 ---
@@ -700,4 +976,19 @@ cart_item_id: (set after adding to cart)
 
 ### Issue: "Cart item not found"
 - **Solution:** Ensure the cart_item_id exists and belongs to you. Use "View Cart" to get valid cart_item_ids.
+
+### Issue: "Invalid coupon code"
+- **Solution:** Check that the coupon code exists in the system. Coupon codes are case-insensitive.
+
+### Issue: "Coupon has expired" or "Coupon is not yet valid"
+- **Solution:** Check the coupon's validity period. Coupons have a valid_from and valid_until date.
+
+### Issue: "Minimum order amount of ₹X required"
+- **Solution:** Add more items to your cart to meet the minimum order amount required by the coupon.
+
+### Issue: "You have already used this coupon"
+- **Solution:** The coupon has a per-user usage limit. You cannot use the same coupon again if you've reached the limit.
+
+### Issue: "Coupon usage limit reached"
+- **Solution:** The coupon has reached its total usage limit across all users. Try a different coupon.
 

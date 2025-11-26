@@ -6,7 +6,7 @@ http://localhost:8000/orders
 ```
 
 ## Overview
-This module handles order creation, payment verification, order tracking, and status management. Orders are created from cart items and require Razorpay payment integration.
+This module handles order creation, payment verification, order tracking, and status management. Orders are created from cart items and require Razorpay payment integration. If a coupon is applied to the cart, the coupon discount is automatically included in the order total. The coupon is removed from the cart after successful payment verification.
 
 ---
 
@@ -37,7 +37,7 @@ Authorization: Bearer <access_token>
 | address_id | integer | No | Optional shipping address ID. When omitted, the address from the selected cart items is used. | 1 |
 | cart_item_ids | array | Yes | List of cart item IDs to order | [1, 2, 3] |
 
-### Success Response (200 OK)
+### Success Response (200 OK) - Without Coupon
 ```json
 {
   "razorpay_order_id": "order_MN1234567890",
@@ -47,6 +47,18 @@ Authorization: Bearer <access_token>
   "order_number": "ORD-2025-11-24-001"
 }
 ```
+
+### Success Response (200 OK) - With Coupon Applied
+```json
+{
+  "razorpay_order_id": "order_MN1234567890",
+  "amount": 15050.00,
+  "currency": "INR",
+  "order_id": 1,
+  "order_number": "ORD-2025-11-24-001"
+}
+```
+*Note: Amount is reduced by coupon discount (₹1000.00 in this example)*
 
 ### Error Responses
 
@@ -94,9 +106,12 @@ Authorization: Bearer <access_token>
 - Creates a Razorpay order for payment
 - Order is created with status "order_confirmed" (after payment)
 - Cart items are not removed until payment is verified
-- Amount includes delivery charge (50.00)
+- **Coupon discount is automatically included** if a coupon is applied to the cart
+- Amount calculation: `subtotal + delivery_charge - coupon_discount - discount`
+- Amount includes delivery charge (50.00) and excludes coupon discount if applied
 - Each order item keeps its own address from the cart; the top-level `address_id` is used as the primary shipping address (defaults to the cart item's address when only one exists)
 - **For couple/family packs with different addresses**: Each order item has its own status tracking, allowing independent tracking per address
+- **Coupon is removed from cart** after successful payment verification
 
 ---
 
@@ -138,9 +153,15 @@ Authorization: Bearer <access_token>
   "message": "Payment verified successfully. Order confirmed.",
   "order_id": 1,
   "order_number": "ORD-2025-11-24-001",
-  "payment_status": "paid"
+  "payment_status": "completed"
 }
 ```
+
+### Notes
+- Cart items are removed after successful payment verification
+- **Applied coupon is removed from cart** after successful payment verification
+- Order payment status is updated to "completed"
+- Order is now confirmed and ready for processing
 
 ### Error Responses
 
@@ -220,7 +241,7 @@ Authorization: Bearer <access_token>
 (No body required)
 ```
 
-### Success Response (200 OK) - With Orders
+### Success Response (200 OK) - With Orders (No Coupon)
 ```json
 [
   {
@@ -228,8 +249,13 @@ Authorization: Bearer <access_token>
     "order_number": "ORD-2025-11-24-001",
     "user_id": 1,
     "address_id": 1,
+    "subtotal": 16000.00,
+    "discount": 0.00,
+    "coupon_code": null,
+    "coupon_discount": 0.00,
+    "delivery_charge": 50.00,
     "total_amount": 16050.00,
-    "payment_status": "paid",
+    "payment_status": "completed",
     "order_status": "order_confirmed",
     "razorpay_order_id": "order_MN1234567890",
     "created_at": "2025-11-24T10:00:00",
@@ -339,15 +365,20 @@ Authorization: Bearer <access_token>
 (No body required)
 ```
 
-### Success Response (200 OK)
+### Success Response (200 OK) - Without Coupon
 ```json
 {
   "order_id": 1,
   "order_number": "ORD-2025-11-24-001",
   "user_id": 1,
   "address_id": 1,
+  "subtotal": 16000.00,
+  "discount": 0.00,
+  "coupon_code": null,
+  "coupon_discount": 0.00,
+  "delivery_charge": 50.00,
   "total_amount": 16050.00,
-  "payment_status": "paid",
+  "payment_status": "completed",
   "order_status": "order_confirmed",
   "razorpay_order_id": "order_MN1234567890",
   "created_at": "2025-11-24T10:00:00",
@@ -411,6 +442,8 @@ Authorization: Bearer <access_token>
 ### Notes
 - Returns detailed information about a specific order
 - Includes all order items with product and member details
+- Order response includes `subtotal`, `discount`, `coupon_code`, `coupon_discount`, and `delivery_charge` fields
+- If a coupon was applied when order was created, `coupon_code` and `coupon_discount` will show the applied coupon details
 
 ---
 

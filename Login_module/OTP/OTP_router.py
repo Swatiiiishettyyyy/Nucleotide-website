@@ -202,45 +202,72 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
         otp_manager.delete_otp(req.country_code, req.mobile)
 
         # Get or create user
-        user = get_user_by_mobile(db, req.mobile)
-        if not user:
-            user = create_user(db, mobile=req.mobile)
+        try:
+            user = get_user_by_mobile(db, req.mobile)
+            if not user:
+                user = create_user(db, mobile=req.mobile)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error getting/creating user: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database error: Unable to get or create user. {str(e)}"
+            )
 
         # Create audit log for successful verification
-        OTP_crud.create_otp_audit_log(
-            db=db,
-            event_type="VERIFIED",
-            user_id=user.id,
-            device_id=req.device_id,
-            phone_number=phone_number,
-            reason=f"OTP verified successfully. IP: {client_ip}",
-            ip_address=client_ip,
-            user_agent=user_agent,
-            correlation_id=correlation_id
-        )
+        try:
+            OTP_crud.create_otp_audit_log(
+                db=db,
+                event_type="VERIFIED",
+                user_id=user.id,
+                device_id=req.device_id,
+                phone_number=phone_number,
+                reason=f"OTP verified successfully. IP: {client_ip}",
+                ip_address=client_ip,
+                user_agent=user_agent,
+                correlation_id=correlation_id
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create audit log: {e}")
 
         # Device & session
         ip = client_ip
         user_agent = request.headers.get("user-agent")
 
-        session = create_device_session(
-            db=db,
-            user_id=user.id,
-            device_id=req.device_id,
-            device_platform=req.device_platform or "unknown",
-            device_details=req.device_details,
-            ip=ip,
-            user_agent=user_agent,
-            expires_in_seconds=ACCESS_TOKEN_EXPIRE_SECONDS,
-            max_active_sessions=MAX_ACTIVE_SESSIONS,
-            correlation_id=correlation_id
-        )
+        try:
+            session = create_device_session(
+                db=db,
+                user_id=user.id,
+                device_id=req.device_id,
+                device_platform=req.device_platform or "unknown",
+                device_details=req.device_details,
+                ip=ip,
+                user_agent=user_agent,
+                expires_in_seconds=ACCESS_TOKEN_EXPIRE_SECONDS,
+                max_active_sessions=MAX_ACTIVE_SESSIONS,
+                correlation_id=correlation_id
+            )
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error creating device session: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database error: Unable to create session. {str(e)}"
+            )
 
-        token = security.create_access_token({
-            "sub": str(user.id),
-            "session_id": str(session.id),
-            "device_platform": session.device_platform
-        }, expires_delta=ACCESS_TOKEN_EXPIRE_SECONDS)
+        try:
+            token = security.create_access_token({
+                "sub": str(user.id),
+                "session_id": str(session.id),
+                "device_platform": session.device_platform
+            }, expires_delta=ACCESS_TOKEN_EXPIRE_SECONDS)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error creating access token: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error generating access token. {str(e)}"
+            )
 
         logger.info(f"OTP verified successfully for user {user.id} from IP {client_ip}")
 
@@ -259,12 +286,15 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
             message="OTP verified successfully.",
             data=data
         )
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Error during OTP verification: {e}", exc_info=True)
+        logger.error(f"Unexpected error during OTP verification: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred during verification. Please try again."
+            detail=f"An unexpected error occurred during verification: {str(e)}"
         )
 
 

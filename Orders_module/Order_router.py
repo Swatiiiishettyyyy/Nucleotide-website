@@ -72,7 +72,8 @@ def create_order(
                 detail="One or more cart items not found"
             )
         
-        # Calculate total amount
+        # Calculate total amount (will be recalculated in create_order_from_cart with coupon)
+        # This is just for Razorpay order creation - actual order will have correct totals
         subtotal = 0.0
         delivery_charge = 50.0
         grouped_items = {}
@@ -88,7 +89,13 @@ def create_order(
             product = item.product
             subtotal += item.quantity * product.SpecialPrice
         
-        total_amount = subtotal + delivery_charge
+        # Get coupon discount for Razorpay order amount
+        from Cart_module.coupon_service import get_applied_coupon
+        applied_coupon = get_applied_coupon(db, current_user.id)
+        coupon_discount = applied_coupon.discount_amount if applied_coupon else 0.0
+        
+        total_amount = subtotal + delivery_charge - coupon_discount
+        total_amount = max(0.0, total_amount)  # Ensure not negative
         
         # Derive primary address id (requested or from first cart item)
         primary_address_id = request_data.address_id or (cart_items[0].address_id if cart_items else None)
@@ -199,6 +206,10 @@ def verify_payment(
                     # Single item, delete it
                     db.delete(cart_item)
         
+        # Remove applied coupon after successful payment
+        from Cart_module.coupon_service import remove_coupon_from_cart
+        remove_coupon_from_cart(db, current_user.id)
+        
         db.commit()
         
         logger.info(f"Payment verified and order {order.order_number} completed for user {current_user.id}")
@@ -307,6 +318,11 @@ def get_orders(
             "order_number": order.order_number,
             "user_id": order.user_id,
             "address_id": order.address_id,
+            "subtotal": order.subtotal,
+            "discount": order.discount,
+            "coupon_code": order.coupon_code,
+            "coupon_discount": order.coupon_discount,
+            "delivery_charge": order.delivery_charge,
             "total_amount": order.total_amount,
             "payment_status": order.payment_status.value,
             "order_status": order.order_status.value,
@@ -407,6 +423,11 @@ def get_order(
         "order_number": order.order_number,
         "user_id": order.user_id,
         "address_id": order.address_id,
+        "subtotal": order.subtotal,
+        "discount": order.discount,
+        "coupon_code": order.coupon_code,
+        "coupon_discount": order.coupon_discount,
+        "delivery_charge": order.delivery_charge,
         "total_amount": order.total_amount,
         "payment_status": order.payment_status.value,
         "order_status": order.order_status.value,

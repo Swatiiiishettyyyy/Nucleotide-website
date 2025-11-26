@@ -74,11 +74,24 @@ class CartSummary(BaseModel):
     total_items: int
     subtotal_amount: float
     discount_amount: float
+    coupon_amount: float = 0.0  # Discount from coupon
+    coupon_code: Optional[str] = None  # Applied coupon code
+    you_save: float = 0.0  # Total savings (discount + coupon)
     delivery_charge: float
     grand_total: float
 
     class Config:
         orm_mode = True
+
+
+class ApplyCouponRequest(BaseModel):
+    coupon_code: str
+    
+    @validator('coupon_code')
+    def validate_coupon_code(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Coupon code is required')
+        return v.strip().upper()
 
 
 class CartData(BaseModel):

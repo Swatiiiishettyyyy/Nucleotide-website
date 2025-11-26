@@ -11,6 +11,7 @@ from .Order_model import (
     OrderStatus, PaymentStatus, PaymentMethod
 )
 from Cart_module.Cart_model import CartItem
+from Cart_module.coupon_service import get_applied_coupon
 from Product_module.Product_model import Product
 from Member_module.Member_model import Member
 from Address_module.Address_model import Address
@@ -86,6 +87,8 @@ def create_order_from_cart(
     subtotal = 0.0
     delivery_charge = 50.0  # Fixed delivery charge
     discount = 0.0
+    coupon_discount = 0.0
+    coupon_code = None
     
     # Group cart items by group_id to calculate totals correctly
     grouped_items = {}
@@ -102,7 +105,17 @@ def create_order_from_cart(
         # Only count once per product group
         subtotal += item.quantity * product.SpecialPrice
     
-    total_amount = subtotal + delivery_charge - discount
+    # Get applied coupon from cart
+    applied_coupon = get_applied_coupon(db, user_id)
+    if applied_coupon:
+        coupon_discount = applied_coupon.discount_amount
+        coupon_code = applied_coupon.coupon_code
+        logger.info(f"Order will include coupon '{coupon_code}' with discount of ₹{coupon_discount}")
+    
+    # Calculate total amount (subtotal + delivery - discount - coupon_discount)
+    total_amount = subtotal + delivery_charge - discount - coupon_discount
+    # Ensure total is not negative
+    total_amount = max(0.0, total_amount)
     
     # Create order
     order = Order(
@@ -112,6 +125,8 @@ def create_order_from_cart(
         subtotal=subtotal,
         delivery_charge=delivery_charge,
         discount=discount,
+        coupon_code=coupon_code,
+        coupon_discount=coupon_discount,
         total_amount=total_amount,
         payment_method=PaymentMethod.RAZORPAY,
         payment_status=PaymentStatus.PENDING,

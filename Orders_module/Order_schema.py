@@ -38,6 +38,11 @@ class OrderResponse(BaseModel):
     order_number: str
     user_id: int
     address_id: Optional[int] = None  # Can be NULL if address was deleted (snapshot preserves data)
+    subtotal: Optional[float] = None
+    discount: Optional[float] = None
+    coupon_code: Optional[str] = None
+    coupon_discount: Optional[float] = None
+    delivery_charge: Optional[float] = None
     total_amount: float
     payment_status: str
     order_status: str
