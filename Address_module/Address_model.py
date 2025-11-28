@@ -10,14 +10,14 @@ class Address(Base):
 
     # Removed: first_name, last_name, email, mobile (as per requirements)
 
-    address_label = Column(String(50))
-    street_address = Column(String(255))
-    landmark = Column(String(255))
-    locality = Column(String(150))
-    city = Column(String(100))
-    state = Column(String(100))
-    postal_code = Column(String(20), nullable=False, index=True)  # Pincode - required for auto-generation
-    country = Column(String(100), default="India")
+    address_label = Column(String(50), nullable=False)
+    street_address = Column(String(255), nullable=False)
+    landmark = Column(String(255), nullable=False)
+    locality = Column(String(150), nullable=False)
+    city = Column(String(100), nullable=False)
+    state = Column(String(100), nullable=False)
+    postal_code = Column(String(20), nullable=False, index=True)  # Pincode - required
+    country = Column(String(100), nullable=False, default="India")
 
     save_for_future = Column(Boolean, default=True)
 

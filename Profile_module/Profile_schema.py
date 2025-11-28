@@ -3,25 +3,23 @@ from typing import Optional
 
 
 class EditProfileRequest(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=255, example="John Doe")
-    email: Optional[EmailStr] = Field(None, example="john.doe@example.com")
-    mobile: Optional[str] = Field(None, min_length=10, max_length=15, example="9876543210")
+    name: str = Field(..., min_length=1, max_length=255, example="John Doe")
+    email: EmailStr = Field(..., example="john.doe@example.com")
+    mobile: str = Field(..., min_length=10, max_length=15, example="9876543210")
 
     @validator('mobile')
     def validate_mobile(cls, v):
-        if v is not None:
-            # Remove any spaces or special characters
-            cleaned = ''.join(filter(str.isdigit, v))
-            if len(cleaned) < 10 or len(cleaned) > 15:
-                raise ValueError('Mobile number must be between 10 and 15 digits')
-            return cleaned
-        return v
-
+        # Remove any spaces or special characters
+        cleaned = ''.join(filter(str.isdigit, v))
+        if len(cleaned) < 10 or len(cleaned) > 15:
+            raise ValueError('Mobile number must be between 10 and 15 digits')
+        return cleaned
+    
     @validator('name')
     def validate_name(cls, v):
-        if v is not None and v.strip() == '':
+        if v.strip() == '':
             raise ValueError('Name cannot be empty or just whitespace')
-        return v.strip() if v else v
+        return v.strip()
 
     class Config:
         json_schema_extra = {

@@ -1,36 +1,34 @@
-from pydantic import BaseModel, validator
-from typing import Optional, List, Union
+from pydantic import BaseModel, Field, validator
+from typing import Optional, List, Union, Dict
+from datetime import datetime
+
+class MemberAddressMapping(BaseModel):
+    """Mapping of member to address"""
+    member_id: int = Field(..., description="Member ID", gt=0)
+    address_id: int = Field(..., description="Address ID for this member", gt=0)
 
 class CartAdd(BaseModel):
-    product_id: int
-    address_id: Union[int, List[int]]  # Single address (shared) or list of addresses (one per member)
-    member_ids: List[int]  # List of member IDs - for couple: 2 members, for family: 3-4 members (3 mandatory + 1 optional)
-    quantity: int = 1
+    product_id: int = Field(..., description="Product ID to add to cart", gt=0)
+    member_address_map: List[MemberAddressMapping] = Field(..., description="List of member-address mappings. Each member must be explicitly mapped to an address.", min_items=1, max_items=4)
+    quantity: int = Field(..., description="Quantity", ge=1)
     
-    @validator('member_ids')
-    def validate_member_ids(cls, v):
+    @validator('member_address_map')
+    def validate_member_address_map(cls, v):
         if not v or len(v) == 0:
-            raise ValueError('At least one member_id is required')
+            raise ValueError('At least one member-address mapping is required')
         if len(v) > 4:
             raise ValueError('Maximum 4 members allowed per product')
+        
+        # Check for duplicate member_ids
+        member_ids = [mapping.member_id for mapping in v]
+        if len(member_ids) != len(set(member_ids)):
+            raise ValueError('Duplicate member IDs are not allowed. Each member can only be added once per product.')
+        
         return v
-    
-    @validator('address_id')
-    def normalize_address_id(cls, v):
-        """Normalize address_id to always be a list for easier processing."""
-        if isinstance(v, int):
-            return [v]
-        if isinstance(v, list):
-            if not v:
-                raise ValueError('At least one address_id is required')
-            if len(v) > 4:
-                raise ValueError('Maximum 4 addresses allowed (one per member)')
-            return v
-        raise ValueError('address_id must be an integer or a list of integers')
 
 
 class CartUpdate(BaseModel):
-    quantity: int
+    quantity: int = Field(..., description="New quantity (must be >= 1)", ge=1)
     
     @validator('quantity')
     def validate_quantity(cls, v):
@@ -85,7 +83,7 @@ class CartSummary(BaseModel):
 
 
 class ApplyCouponRequest(BaseModel):
-    coupon_code: str
+    coupon_code: str = Field(..., description="Coupon code to apply", min_length=1, max_length=50)
     
     @validator('coupon_code')
     def validate_coupon_code(cls, v):
@@ -109,3 +107,40 @@ class CartResponse(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+class CouponCreate(BaseModel):
+    coupon_code: str = Field(..., description="Coupon code (will be converted to uppercase)", min_length=1, max_length=50)
+    description: Optional[str] = Field(None, description="Coupon description", max_length=500)
+    # Note: user_id removed - all coupons are applicable to all users
+    discount_type: str = Field(..., description="Discount type: 'percentage' or 'fixed'")
+    discount_value: float = Field(..., description="Discount value (percentage 0-100 or fixed amount)", gt=0)
+    min_order_amount: float = Field(0.0, description="Minimum order amount to apply coupon", ge=0)
+    max_discount_amount: Optional[float] = Field(None, description="Maximum discount cap (for percentage coupons)", ge=0)
+    max_uses: Optional[int] = Field(None, description="Total uses allowed (None = unlimited, not required)", ge=1)
+    valid_from: datetime = Field(..., description="Coupon valid from date (ISO format)")
+    valid_until: datetime = Field(..., description="Coupon valid until date (ISO format)")
+    status: str = Field("active", description="Coupon status: 'active', 'inactive', or 'expired'")
+    
+    @validator('coupon_code')
+    def normalize_coupon_code(cls, v):
+        return v.strip().upper()
+    
+    @validator('discount_type')
+    def validate_discount_type(cls, v):
+        if v.lower() not in ['percentage', 'fixed']:
+            raise ValueError('discount_type must be "percentage" or "fixed"')
+        return v.lower()
+    
+    @validator('discount_value')
+    def validate_discount_value(cls, v, values):
+        discount_type = values.get('discount_type', '').lower()
+        if discount_type == 'percentage' and (v < 0 or v > 100):
+            raise ValueError('Percentage discount must be between 0 and 100')
+        return v
+    
+    @validator('status')
+    def validate_status(cls, v):
+        if v.lower() not in ['active', 'inactive', 'expired']:
+            raise ValueError('status must be "active", "inactive", or "expired"')
+        return v.lower()

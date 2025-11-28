@@ -119,11 +119,9 @@ Authorization: Bearer <access_token>
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| name | string | No* | User's full name | "John Doe" |
-| email | string | No* | User's email address | "john@example.com" |
-| mobile | string | No* | User's mobile number | "9876543210" |
-
-*At least one field must be provided
+| name | string | **Yes** | User's full name | "John Doe" |
+| email | string | **Yes** | User's email address | "john@example.com" |
+| mobile | string | **Yes** | User's mobile number | "9876543210" |
 
 ### Success Response (200 OK)
 ```json
@@ -263,3 +261,4 @@ user_id: (set after verify-otp)
 - **Solution:** Ensure you have a valid access token in the Authorization header with format: `Bearer <token>`.
 
 
+ 

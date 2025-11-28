@@ -34,9 +34,9 @@ Content-Type: application/json
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| country_code | string | Yes | Country code with + prefix | "+91" |
-| mobile | string | Yes | Mobile number (10-15 digits) | "9876543210" |
-| purpose | string | No | Purpose of OTP (default: "login") | "login" |
+| country_code | string | **Yes** | Country code with + prefix (1-5 characters) | "+91" |
+| mobile | string | **Yes** | Mobile number (10-15 digits) | "9876543210" |
+| purpose | string | **Yes** | Purpose of OTP (max 50 characters) | "login" |
 
 ### Success Response (200 OK)
 ```json
@@ -127,12 +127,12 @@ Content-Type: application/json
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| country_code | string | Yes | Country code with + prefix | "+91" |
-| mobile | string | Yes | Mobile number (10-15 digits) | "9876543210" |
-| otp | string | Yes | OTP received (4-8 digits) | "123456" |
-| device_id | string | Yes | Unique device identifier | "device-uuid-12345" |
-| device_platform | string | No | Platform: web/mobile/ios | "web" |
-| device_details | string | No | JSON string with device info | "{\"browser\":\"Chrome\"}" |
+| country_code | string | **Yes** | Country code with + prefix (1-5 characters) | "+91" |
+| mobile | string | **Yes** | Mobile number (10-15 digits) | "9876543210" |
+| otp | string | **Yes** | OTP received (4-8 digits) | "123456" |
+| device_id | string | **Yes** | Unique device identifier (1-255 characters) | "device-uuid-12345" |
+| device_platform | string | **Yes** | Platform: web/mobile/ios (max 50 characters) | "web" |
+| device_details | string | **Yes** | JSON string with device info (max 1000 characters) | "{\"browser\":\"Chrome\"}" |
 
 ### Success Response (200 OK)
 ```json

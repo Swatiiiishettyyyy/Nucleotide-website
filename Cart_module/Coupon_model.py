@@ -30,6 +30,9 @@ class Coupon(Base):
     coupon_code = Column(String(50), unique=True, nullable=False, index=True)  # Unique coupon code
     description = Column(String(500), nullable=True)  # Coupon description
     
+    # Note: user_id removed - all coupons are now applicable to all users
+    # Usage limits are tracked via max_uses and cart_coupons table
+    
     # Discount details
     discount_type = Column(Enum(CouponType), nullable=False, default=CouponType.PERCENTAGE)
     discount_value = Column(Float, nullable=False)  # Percentage (0-100) or fixed amount
@@ -41,8 +44,8 @@ class Coupon(Base):
     max_discount_amount = Column(Float, nullable=True)  # Optional cap on discount
     
     # Usage limits
-    max_uses = Column(Integer, nullable=True)  # Total uses allowed (None = unlimited)
-    max_uses_per_user = Column(Integer, default=1, nullable=False)  # Uses per user
+    max_uses = Column(Integer, nullable=True)  # Total uses allowed (None = unlimited, not required)
+    # max_uses_per_user removed - not needed
     
     # Validity period
     valid_from = Column(DateTime(timezone=True), nullable=False)

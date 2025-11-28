@@ -15,6 +15,11 @@ except ImportError:  # pragma: no cover
 LOCATIONS_FILE = Path(__file__).resolve().parents[1] / "Locations.xlsx"
 
 
+def _clear_location_cache():
+    """Clear the cache for serviceable locations (useful for testing/reloading)"""
+    _load_serviceable_locations.cache_clear()
+
+
 @lru_cache(maxsize=1)
 def _load_serviceable_locations() -> Set[str]:
     """Load allowed locations (cities/localities) from Locations.xlsx."""
@@ -59,22 +64,53 @@ def _load_serviceable_locations() -> Set[str]:
 
 
 def is_serviceable_location(city: Optional[str], locality: Optional[str]) -> bool:
-    """Return True if locality or city is present in the Locations.xlsx list."""
+    """
+    Return True if city (from pincode lookup) or locality is present in the Locations.xlsx list.
+    Priority: City is checked first (from pincode lookup), then locality as fallback.
+    """
     allowed = _load_serviceable_locations()
     if not allowed:
         # If file missing or empty, be conservative and reject.
+        logger.warning("Locations.xlsx is missing or empty. Rejecting all locations.")
         return False
 
     def normalize(value: Optional[str]) -> Optional[str]:
-        return value.strip().lower() if isinstance(value, str) and value.strip() else None
+        if not value:
+            return None
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        return normalized if normalized else None
 
-    normalized_locality = normalize(locality)
     normalized_city = normalize(city)
+    normalized_locality = normalize(locality)
 
-    if normalized_locality and normalized_locality in allowed:
-        return True
-    if normalized_city and normalized_city in allowed:
-        return True
+    # Log for debugging
+    logger.info(f"Validating location - City: '{city}' (normalized: '{normalized_city}'), Locality: '{locality}' (normalized: '{normalized_locality}')")
+    logger.info(f"Total serviceable locations loaded: {len(allowed)}")
+
+    # Priority 1: Check city first (from pincode lookup)
+    if normalized_city:
+        if normalized_city in allowed:
+            logger.info(f"City '{city}' (normalized: '{normalized_city}') found in serviceable locations.")
+            return True
+        else:
+            logger.warning(f"City '{city}' (normalized: '{normalized_city}') NOT found in serviceable locations.")
+            # Check if there's a similar city name (for debugging)
+            similar = [loc for loc in allowed if normalized_city in loc or loc in normalized_city]
+            if similar:
+                logger.info(f"Similar city names found in Excel: {similar[:5]}")
+    
+    # Priority 2: Check locality as fallback
+    if normalized_locality:
+        if normalized_locality in allowed:
+            logger.info(f"Locality '{locality}' (normalized: '{normalized_locality}') found in serviceable locations.")
+            return True
+        else:
+            logger.warning(f"Locality '{locality}' (normalized: '{normalized_locality}') NOT found in serviceable locations.")
+    
+    # Neither city nor locality found in serviceable locations
+    logger.warning(f"Location validation failed - City: '{city}' (normalized: '{normalized_city}'), Locality: '{locality}' (normalized: '{normalized_locality}')")
     return False
 
 

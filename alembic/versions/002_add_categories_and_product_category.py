@@ -7,6 +7,7 @@ Create Date: 2024-01-02 00:00:00.000000
 Tags: categories, products
 """
 from typing import Sequence, Union
+import logging
 
 from alembic import op
 import sqlalchemy as sa
@@ -38,6 +39,23 @@ def upgrade() -> None:
         )
         op.create_index(op.f('ix_categories_id'), 'categories', ['id'], unique=False)
         op.create_index(op.f('ix_categories_name'), 'categories', ['name'], unique=True)
+    
+    # Create products table if it doesn't exist
+    if 'products' not in inspector.get_table_names():
+        # Import Product model to get table structure
+        import sys
+        from pathlib import Path
+        BASE_DIR = Path(__file__).resolve().parent.parent.parent
+        if str(BASE_DIR) not in sys.path:
+            sys.path.insert(0, str(BASE_DIR))
+        
+        from Product_module.Product_model import Product
+        from database import Base
+        
+        # Create products table using Base.metadata
+        Product.__table__.create(bind=connection, checkfirst=True)
+        logger = logging.getLogger(__name__)
+        logger.info("Created products table")
     
     # Add category_id to products table if it doesn't exist
     if 'products' in inspector.get_table_names():

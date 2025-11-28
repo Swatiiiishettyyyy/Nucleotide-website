@@ -67,13 +67,13 @@ Authorization: Bearer <access_token>
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| member_id | integer | Yes | Member ID (0 for new, existing ID for update) | 0 or 1 |
-| name | string | Yes | Member's full name | "John Doe" |
-| relation | string | Yes | Relation to user (self, spouse, child, parent, etc.) | "self" |
-| age | integer | No | Member's age (0-150) | 30 |
-| gender | string | No | Gender: M, F, MALE, FEMALE, OTHER | "M" |
-| dob | date (YYYY-MM-DD) | No | Date of birth. Cannot be in the future. | "1995-07-15" |
-| mobile | string | No | Member's mobile number (10 digits) | "9876543210" |
+| member_id | integer | **Yes** | Member ID (0 for new, existing ID for update, must be >= 0) | 0 or 1 |
+| name | string | **Yes** | Member's full name (1-100 characters) | "John Doe" |
+| relation | string | **Yes** | Relation to user (self, spouse, child, parent, sibling, other) | "self" |
+| age | integer | **Yes** | Member's age (0-150) | 30 |
+| gender | string | **Yes** | Gender: M, F, MALE, FEMALE, OTHER (max 20 characters) | "M" |
+| dob | date (YYYY-MM-DD) | **Yes** | Date of birth. Cannot be in the future. | "1995-07-15" |
+| mobile | string | **Yes** | Member's mobile number (10 digits) | "9876543210" |
 
 ### Success Response (200 OK)
 ```json

@@ -1,16 +1,16 @@
 from datetime import date
 from typing import List, Optional
 
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, Field, validator
 
 class MemberRequest(BaseModel):
-    member_id: int
-    name: str
-    relation: str
-    age: Optional[int] = None
-    gender: Optional[str] = None  # M, F, Other
-    dob: Optional[date] = None
-    mobile: Optional[str] = None
+    member_id: int = Field(..., description="Member ID (for updates, use 0 for new members)", ge=0)
+    name: str = Field(..., description="Member name", min_length=1, max_length=100)
+    relation: str = Field(..., description="Relation type (self/spouse/child/parent/sibling/other)", min_length=1)
+    age: int = Field(..., description="Member age", ge=0, le=150)
+    gender: str = Field(..., description="Gender (M/F/Other)", max_length=20)
+    dob: date = Field(..., description="Date of birth")
+    mobile: str = Field(..., description="Mobile number (10 digits)", min_length=10, max_length=10)
     
     @validator('age')
     def validate_age(cls, v):

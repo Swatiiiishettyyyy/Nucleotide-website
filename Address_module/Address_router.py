@@ -28,7 +28,7 @@ def save_address_api(
 ):
     # Generate correlation ID for request tracing
     correlation_id = str(uuid.uuid4())
-    address, locality_options = save_address(db, user, req, request=request, correlation_id=correlation_id)
+    address = save_address(db, user, req, request=request, correlation_id=correlation_id)
     if not address:
         raise HTTPException(status_code=404, detail="Address not found for editing")
 
@@ -48,8 +48,7 @@ def save_address_api(
             "postal_code": address.postal_code,
             "country": address.country,
             "save_for_future": address.save_for_future
-        },
-        "locality_options": locality_options
+        }
     }
 
 # Get all addresses of user

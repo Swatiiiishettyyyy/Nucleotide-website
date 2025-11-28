@@ -23,11 +23,11 @@ class Member(Base):
     name = Column(String(100), nullable=False)
     relation = Column(Enum(RelationType), nullable=False, default=RelationType.SELF)
     
-    # New fields: age, gender, mobile
-    age = Column(IntCol, nullable=True)
-    gender = Column(String(20), nullable=True)  # M, F, Other
-    dob = Column(Date, nullable=True)
-    mobile = Column(String(20), nullable=True)
+    # Required fields: age, gender, dob, mobile
+    age = Column(IntCol, nullable=False)
+    gender = Column(String(20), nullable=False)  # M, F, Other
+    dob = Column(Date, nullable=False)
+    mobile = Column(String(20), nullable=False)
     
     # Track which category/plan this member is associated with
     # This helps prevent duplicate entries in same category

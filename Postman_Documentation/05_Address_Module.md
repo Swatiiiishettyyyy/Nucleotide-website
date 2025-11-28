@@ -74,16 +74,16 @@ Authorization: Bearer <access_token>
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| address_id | integer | Yes | Address ID (0 for new, existing ID for update) | 0 or 1 |
-| address_label | string | Yes | Label for address (Home, Office, etc.) | "Home" |
-| street_address | string | Yes | Street address | "123 Main Street" |
-| landmark | string | No | Nearby landmark | "Near Park" |
-| locality | string | No | Specific area/region (auto-filled; pick from pincode options) | "Whitefield" |
-| city | string | No | City (auto-filled from pincode if not provided) | "Mumbai" |
-| state | string | No | State (auto-filled from pincode if not provided) | "Maharashtra" |
-| postal_code | string | Yes | 6-digit pincode | "400001" |
-| country | string | No | Country (default: "India") | "India" |
-| save_for_future | boolean | No | Save address for future use (default: true) | true |
+| address_id | integer | **Yes** | Address ID (0 for new, existing ID for update, must be >= 0) | 0 or 1 |
+| address_label | string | **Yes** | Label for address (Home, Office, etc., 1-50 characters) | "Home" |
+| street_address | string | **Yes** | Street address (1-255 characters) | "123 Main Street" |
+| landmark | string | **Yes** | Nearby landmark (max 255 characters) | "Near Park" |
+| locality | string | **Yes** | Specific area/region (max 150 characters) | "Whitefield" |
+| city | string | **Yes** | City (max 100 characters) | "Mumbai" |
+| state | string | **Yes** | State (max 100 characters) | "Maharashtra" |
+| postal_code | string | **Yes** | 6-digit pincode (exactly 6 digits) | "400001" |
+| country | string | **Yes** | Country (max 100 characters) | "India" |
+| save_for_future | boolean | **Yes** | Save address for future use | true |
 
 ### Success Response (200 OK)
 ```json

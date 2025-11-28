@@ -15,17 +15,17 @@ class LocalityOption(BaseModel):
 
 
 class AddressRequest(BaseModel):
-    address_id: int
+    address_id: int = Field(..., description="Address ID (use 0 for new address)", ge=0)
     # Removed: first_name, last_name, email, mobile (as per requirements)
-    address_label: str
-    street_address: str
-    landmark: Optional[str] = None
-    locality: Optional[str] = None  # Optional - will be auto-filled or selected from list
-    city: Optional[str] = None  # Optional - will be auto-filled from pincode if not provided
-    state: Optional[str] = None  # Optional - will be auto-filled from pincode if not provided
-    postal_code: str  # Pincode - required
-    country: Optional[str] = "India"
-    save_for_future: bool = True
+    address_label: str = Field(..., description="Address label (e.g., 'Home', 'Office')", min_length=1, max_length=50)
+    street_address: str = Field(..., description="Street address", min_length=1, max_length=255)
+    landmark: str = Field(..., description="Landmark", max_length=255)
+    locality: str = Field(..., description="Locality", max_length=150)
+    city: str = Field(..., description="City", max_length=100)
+    state: str = Field(..., description="State", max_length=100)
+    postal_code: str = Field(..., description="Postal code (pincode) - 6 digits", min_length=6, max_length=6)
+    country: str = Field(..., description="Country", max_length=100)
+    save_for_future: bool = Field(..., description="Save address for future use")
     
     @validator('postal_code')
     def validate_postal_code(cls, v):
@@ -36,17 +36,22 @@ class AddressRequest(BaseModel):
         return v
     
     def auto_fill_city_state(self):
-        """Auto-fill city/state/locality and return available locality options."""
-        city, state, locality, locality_options = validate_and_auto_fill_address(
-            self.postal_code,
-            self.city,
-            self.state,
-            self.locality
-        )
-        self.city = city or self.city
-        self.state = state or self.state
-        self.locality = locality or self.locality
-        return locality_options
+        """Auto-fill city/state/country from pincode. Locality is NOT auto-filled."""
+        # Always lookup pincode to get city, state, and country
+        # This ensures we auto-fill even if user provided empty strings
+        from .pincode_service import get_pincode_details
+        pincode_city, pincode_state, _ = get_pincode_details(self.postal_code)
+        
+        # Use pincode lookup values, but allow user-provided values to override if they exist
+        if pincode_city:
+            self.city = pincode_city
+        if pincode_state:
+            self.state = pincode_state
+        
+        # Country always defaults to India for Indian pincodes
+        self.country = "India"
+        
+        # Locality is NOT auto-filled - user must provide it manually
 
 
 class AddressData(BaseModel):
@@ -68,7 +73,6 @@ class AddressResponse(BaseModel):
     status: str
     message: str
     data: AddressData
-    locality_options: Optional[List[LocalityOption]] = None
 
 
 class AddressListResponse(BaseModel):

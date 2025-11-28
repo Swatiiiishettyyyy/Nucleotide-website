@@ -1,8 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func
 from typing import Optional, List
 import uuid
+import logging
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 from database import SessionLocal
 from .Cart_model import CartItem
@@ -10,7 +14,7 @@ from Product_module.Product_model import Product, PlanType
 from Address_module.Address_model import Address
 from Member_module.Member_model import Member
 from Login_module.User.user_model import User
-from .Cart_schema import CartAdd, CartUpdate, ApplyCouponRequest
+from .Cart_schema import CartAdd, CartUpdate, ApplyCouponRequest, CouponCreate
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user
 from .Cart_audit_crud import create_audit_log
@@ -18,8 +22,11 @@ from .coupon_service import (
     apply_coupon_to_cart,
     get_applied_coupon,
     remove_coupon_from_cart,
-    validate_and_calculate_discount
+    validate_and_calculate_discount,
+    is_coupon_usage_limit_reached,
+    get_coupon_usage_count
 )
+from .Coupon_model import Coupon, CouponType, CouponStatus
 
 router = APIRouter(prefix="/cart", tags=["Cart"])
 
@@ -53,45 +60,30 @@ def add_to_cart(
 
         category_name = product.category.name if product.category else "this category"
         
-        # Normalize address_id to list (schema validator already ensures it's a list)
-        address_ids = item.address_id if isinstance(item.address_id, list) else [item.address_id]
-        num_addresses = len(address_ids)
-        num_members = len(item.member_ids)
-        
-        # Validate address count: either 1 shared address or 1 per member
-        if num_addresses != 1 and num_addresses != num_members:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Address count mismatch. Provide either 1 shared address or {num_members} addresses "
-                    f"(one per member). Got {num_addresses} address(es) for {num_members} member(s)."
-                )
-            )
+        # Extract member_ids and address_ids from member_address_map
+        member_ids = [mapping.member_id for mapping in item.member_address_map]
+        address_ids = [mapping.address_id for mapping in item.member_address_map]
+        num_members = len(member_ids)
+        num_addresses = len(set(address_ids))  # Unique address count
         
         # Validate all addresses exist and belong to user
+        unique_address_ids = list(set(address_ids))
         addresses = db.query(Address).filter(
-            Address.id.in_(address_ids),
+            Address.id.in_(unique_address_ids),
             Address.user_id == current_user.id
         ).all()
         
-        if len(addresses) != num_addresses:
+        if len(addresses) != len(unique_address_ids):
             found_ids = {addr.id for addr in addresses}
-            missing_ids = [aid for aid in address_ids if aid not in found_ids]
+            missing_ids = [aid for aid in unique_address_ids if aid not in found_ids]
             raise HTTPException(
                 status_code=422,
                 detail=f"Address(es) {missing_ids} not found or do not belong to you."
             )
         
-        # Validate member_ids are unique (no duplicates)
-        if len(item.member_ids) != len(set(item.member_ids)):
-            raise HTTPException(
-                status_code=422,
-                detail="Duplicate member IDs are not allowed. Each member can only be added once per product."
-            )
-        
         # Validate members exist and belong to user
         members = db.query(Member).filter(
-            Member.id.in_(item.member_ids),
+            Member.id.in_(member_ids),
             Member.user_id == current_user.id
         ).all()
         
@@ -109,7 +101,7 @@ def add_to_cart(
             .join(Member, CartItem.member_id == Member.id)
             .filter(
                 CartItem.user_id == current_user.id,
-                CartItem.member_id.in_(item.member_ids),
+                CartItem.member_id.in_(member_ids),
                 Product.category_id == product.category_id,
                 CartItem.product_id != item.product_id
             )
@@ -151,7 +143,7 @@ def add_to_cart(
                 group_key = ci.group_id or f"single_{ci.id}"
                 grouped_existing[group_key].append(ci)
             
-            requested_member_ids = set(item.member_ids)
+            requested_member_ids = set(member_ids)
             for group_key, group_items in grouped_existing.items():
                 existing_member_ids = set(ci.member_id for ci in group_items)
                 if existing_member_ids == requested_member_ids:
@@ -183,30 +175,27 @@ def add_to_cart(
         # Generate unique group_id using full UUID for better uniqueness
         group_id = f"{current_user.id}_{product.ProductId}_{uuid.uuid4().hex}"
         
-        # Map members to addresses
-        # If 1 address provided, use it for all members; otherwise use one address per member
-        member_address_map = {}
-        if num_addresses == 1:
-            # Single shared address for all members
-            shared_address_id = address_ids[0]
-            for member in members:
-                member_address_map[member.id] = shared_address_id
-        else:
-            # One address per member (in order)
-            for idx, member in enumerate(members):
-                member_address_map[member.id] = address_ids[idx]
+        # Build member_address_map from request (already validated)
+        member_address_map = {
+            mapping.member_id: mapping.address_id 
+            for mapping in item.member_address_map
+        }
+        
+        # Create a lookup for members by ID
+        members_by_id = {member.id: member for member in members}
         
         created_cart_items = []
         
         try:
             # Create cart items: one row per member with their assigned address
-            for member in members:
-                assigned_address_id = member_address_map[member.id]
+            # Process in the order specified in member_address_map
+            for mapping in item.member_address_map:
+                member = members_by_id[mapping.member_id]
                 cart_item = CartItem(
                     user_id=current_user.id,
                     product_id=item.product_id,
-                    address_id=assigned_address_id,
-                    member_id=member.id,
+                    address_id=mapping.address_id,
+                    member_id=mapping.member_id,
                     quantity=item.quantity,
                     group_id=group_id  # Link all items for this product purchase
                 )
@@ -227,11 +216,14 @@ def add_to_cart(
                 detail=f"Error adding items to cart: {str(e)}"
             )
         
-        # Build member-address mapping for response
+        # Build member-address mapping for response (preserve order from request)
         member_address_response = [
-            {"member_id": mid, "address_id": aid}
-            for mid, aid in member_address_map.items()
+            {"member_id": mapping.member_id, "address_id": mapping.address_id}
+            for mapping in item.member_address_map
         ]
+        
+        # Extract unique address IDs for response
+        unique_address_ids = list(set(address_ids))
         
         # Audit log
         correlation_id = str(uuid.uuid4())
@@ -246,8 +238,8 @@ def add_to_cart(
                 "product_id": product.ProductId,
                 "plan_type": product.plan_type.value,
                 "quantity": item.quantity,
-                "member_ids": item.member_ids,
-                "address_ids": address_ids,
+                "member_ids": member_ids,
+                "address_ids": unique_address_ids,
                 "member_address_map": member_address_map,
                 "cart_items_created": len(created_cart_items),
                 "group_id": group_id
@@ -265,8 +257,8 @@ def add_to_cart(
                 "cart_item_ids": [ci.id for ci in created_cart_items],
                 "cart_id": created_cart_items[0].id,  # Primary cart item ID
                 "product_id": product.ProductId,
-                "address_ids": address_ids,
-                "member_ids": item.member_ids,
+                "address_ids": unique_address_ids,
+                "member_ids": member_ids,
                 "member_address_map": member_address_response,
                 "quantity": item.quantity,
                 "plan_type": product.plan_type.value,
@@ -491,7 +483,11 @@ def view_cart(
     Groups items by group_id for couple/family products.
     """
     
-    cart_items = db.query(CartItem).filter(
+    cart_items = db.query(CartItem).options(
+        joinedload(CartItem.member),
+        joinedload(CartItem.address),
+        joinedload(CartItem.product)
+    ).filter(
         CartItem.user_id == current_user.id
     ).order_by(CartItem.group_id, CartItem.created_at).all()
     
@@ -536,11 +532,38 @@ def view_cart(
         product = item.product
         member_ids = [i.member_id for i in items]
         
-        # Build member-address mapping for this group
-        member_address_map = [
-            {"member_id": i.member_id, "address_id": i.address_id}
-            for i in items
-        ]
+        # Build member-address mapping with full details for this group
+        member_address_map = []
+        for i in items:
+            member = i.member
+            address = i.address
+            
+            member_details = {
+                "member_id": member.id if member else i.member_id,
+                "name": member.name if member else "Unknown",
+                "relation": member.relation.value if member and hasattr(member.relation, 'value') else (str(member.relation) if member else None),
+                "age": member.age if member else None,
+                "gender": member.gender if member else None,
+                "dob": member.dob.isoformat() if member and member.dob else None,
+                "mobile": member.mobile if member else None
+            }
+            
+            address_details = {
+                "address_id": address.id if address else i.address_id,
+                "address_label": address.address_label if address else None,
+                "street_address": address.street_address if address else None,
+                "landmark": address.landmark if address else None,
+                "locality": address.locality if address else None,
+                "city": address.city if address else None,
+                "state": address.state if address else None,
+                "postal_code": address.postal_code if address else None,
+                "country": address.country if address else None
+            }
+            
+            member_address_map.append({
+                "member": member_details,
+                "address": address_details
+            })
         
         # Get unique address IDs (may be 1 or multiple)
         address_ids = list(set(i.address_id for i in items))
@@ -548,15 +571,16 @@ def view_cart(
         # Calculate total (quantity * price) - price is already for the plan, not per member
         total = item.quantity * product.SpecialPrice
         subtotal_amount += total
+        
+        # Calculate discount per item (difference between price and special_price)
+        discount_per_item = product.Price - product.SpecialPrice
 
         cart_item_details.append({
-            "cart_id": item.id,  # Primary cart item ID
             "cart_item_ids": [i.id for i in items],  # All cart item IDs in this group
             "product_id": product.ProductId,
             "address_ids": address_ids,  # List of unique address IDs used
-            "address_id": address_ids[0] if len(address_ids) == 1 else None,  # Backward compatibility: single address if all same
             "member_ids": member_ids,
-            "member_address_map": member_address_map,  # Per-member address mapping
+            "member_address_map": member_address_map,  # Per-member address mapping with full details
             "product_name": product.Name,
             "product_images": product.Images,
             "plan_type": product.plan_type.value if hasattr(product.plan_type, 'value') else str(product.plan_type),
@@ -564,6 +588,7 @@ def view_cart(
             "special_price": product.SpecialPrice,
             "quantity": item.quantity,
             "members_count": len(items),  # 1 for single, 2 for couple, 3-4 for family
+            "discount_per_item": discount_per_item,
             "total_amount": total,
             "group_id": item.group_id
         })
@@ -574,21 +599,52 @@ def view_cart(
     coupon_code = None
     
     if applied_coupon:
-        # Re-validate coupon to ensure it's still valid
-        coupon, discount, error = validate_and_calculate_discount(
+        # Re-validate and recalculate discount (cart total might have changed)
+        coupon, calculated_discount, error_message = validate_and_calculate_discount(
             db, applied_coupon.coupon_code, current_user.id, subtotal_amount
         )
-        if coupon and not error:
-            coupon_amount = discount
+        
+        if coupon and not error_message:
+            # Coupon is valid - use the recalculated discount
+            coupon_amount = calculated_discount
             coupon_code = applied_coupon.coupon_code
+            
+            # Update the stored discount amount if it changed significantly
+            if abs(applied_coupon.discount_amount - calculated_discount) > 0.01:
+                applied_coupon.discount_amount = calculated_discount
+                db.commit()
+                logger.info(f"Updated coupon discount from {applied_coupon.discount_amount} to {calculated_discount} for user {current_user.id}")
         else:
-            # Coupon is no longer valid, remove it
-            remove_coupon_from_cart(db, current_user.id)
-            coupon_amount = 0.0
-            coupon_code = None
+            # Validation failed - log the error but keep using the stored discount
+            # This ensures the coupon shows in cart even if validation temporarily fails
+            # (e.g., cart total changed, but coupon is still technically valid)
+            logger.warning(f"Coupon validation warning for '{applied_coupon.coupon_code}': {error_message}. Using stored discount.")
+            coupon_amount = applied_coupon.discount_amount
+            coupon_code = applied_coupon.coupon_code
+            
+            # Only remove if coupon is truly invalid (expired, deleted, inactive)
+            if error_message and any(keyword in error_message for keyword in ["expired", "not active", "Invalid coupon code"]):
+                logger.warning(f"Removing invalid coupon '{applied_coupon.coupon_code}'. Error: {error_message}")
+                remove_coupon_from_cart(db, current_user.id)
+                coupon_amount = 0.0
+                coupon_code = None
+    else:
+        # No coupon applied - coupons are tracked in cart_coupons table
+        # No need to check cart items for coupon codes anymore
+        pass
     
-    # Calculate discount amount (from product discounts, if any)
-    discount_amount = 0.0  # Can be calculated from product.Discount if needed
+    # Calculate discount amount (from product discounts - per product group, not per cart item row)
+    # For couple/family products, there are multiple cart item rows but discount applies once per product
+    total_product_discount = 0
+    processed_groups = set()
+    for item in cart_items:
+        group_key = item.group_id or f"single_{item.id}"
+        if group_key not in processed_groups:
+            # Calculate discount once per product group
+            discount_per_item = item.product.Price - item.product.SpecialPrice
+            total_product_discount += discount_per_item * item.quantity
+            processed_groups.add(group_key)
+    discount_amount = total_product_discount
     
     # Calculate total savings
     you_save = discount_amount + coupon_amount
@@ -683,7 +739,7 @@ def apply_coupon(
         # Remove any previously applied coupon
         remove_coupon_from_cart(db, current_user.id)
         
-        # Apply new coupon
+        # Apply new coupon (tracked in cart_coupons table, not in cart_items)
         success, discount_amount, message, coupon = apply_coupon_to_cart(
             db, current_user.id, request_data.coupon_code, subtotal_amount
         )
@@ -691,10 +747,7 @@ def apply_coupon(
         if not success:
             raise HTTPException(status_code=400, detail=message)
         
-        # Update all cart items with coupon code
-        for item in cart_items:
-            item.coupon_code = coupon.coupon_code
-        db.commit()
+        # Coupon is now tracked in cart_coupons table, no need to update cart_items
         
         # Calculate delivery charge and grand total
         delivery_charge = 50.0
@@ -763,15 +816,8 @@ def remove_coupon(
                 "message": "No coupon was applied to your cart."
             }
         
-        # Remove coupon code from cart items
-        cart_items = db.query(CartItem).filter(
-            CartItem.user_id == current_user.id,
-            CartItem.coupon_code.isnot(None)
-        ).all()
-        
-        for item in cart_items:
-            item.coupon_code = None
-        db.commit()
+        # Coupon removal is handled by remove_coupon_from_cart which removes from cart_coupons table
+        # No need to update cart_items anymore
         
         # Audit log
         ip, user_agent = get_client_info(request)
@@ -795,3 +841,136 @@ def remove_coupon(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error removing coupon: {str(e)}")
+
+
+@router.get("/list-coupons")
+def list_coupons(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    List all available coupons that users can apply.
+    Only shows coupons that:
+    - Are active
+    - Are within validity period
+    - Have not reached their max_uses limit
+    """
+    try:
+        coupons = db.query(Coupon).filter(
+            Coupon.status == CouponStatus.ACTIVE
+        ).all()
+        
+        coupon_list = []
+        now = datetime.utcnow()
+        
+        for coupon in coupons:
+            # Check if coupon is within validity period
+            is_within_validity = (
+                (not coupon.valid_from or now >= coupon.valid_from) and
+                (not coupon.valid_until or now <= coupon.valid_until)
+            )
+            
+            if not is_within_validity:
+                continue  # Skip expired or not yet valid coupons
+            
+            # Check if coupon has reached its usage limit
+            if is_coupon_usage_limit_reached(db, coupon):
+                continue  # Skip coupons that have reached max_uses limit
+            
+            # Get current usage count for display
+            current_uses = get_coupon_usage_count(db, coupon.id)
+            
+            coupon_list.append({
+                "id": coupon.id,
+                "coupon_code": coupon.coupon_code,
+                "description": coupon.description,
+                "status": coupon.status.value,
+                "discount_type": coupon.discount_type.value,
+                "discount_value": coupon.discount_value,
+                "min_order_amount": coupon.min_order_amount,
+                "max_discount_amount": coupon.max_discount_amount,
+                "max_uses": coupon.max_uses,
+                "current_uses": current_uses,  # Show how many times it's been used
+                "remaining_uses": coupon.max_uses - current_uses if coupon.max_uses else None,
+                "valid_from": coupon.valid_from.isoformat() if coupon.valid_from else None,
+                "valid_until": coupon.valid_until.isoformat() if coupon.valid_until else None,
+                "created_at": coupon.created_at.isoformat() if coupon.created_at else None
+            })
+        
+        return {
+            "status": "success",
+            "message": f"Found {len(coupon_list)} available coupon(s)",
+            "data": {
+                "total_coupons": len(coupon_list),
+                "coupons": coupon_list
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing coupons: {str(e)}")
+
+
+@router.post("/create-coupon")
+def create_coupon(
+    coupon_data: CouponCreate,
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new coupon (no authentication required).
+    This allows adding coupons to the database.
+    """
+    try:
+        # Check if coupon code already exists
+        existing_coupon = db.query(Coupon).filter(
+            func.upper(Coupon.coupon_code) == coupon_data.coupon_code.upper()
+        ).first()
+        
+        if existing_coupon:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Coupon code '{coupon_data.coupon_code}' already exists"
+            )
+        
+        # Create new coupon
+        new_coupon = Coupon(
+            coupon_code=coupon_data.coupon_code.upper().strip(),
+            description=coupon_data.description,
+            # user_id removed - all coupons are applicable to all users
+            discount_type=CouponType(coupon_data.discount_type),
+            discount_value=coupon_data.discount_value,
+            min_order_amount=coupon_data.min_order_amount,
+            max_discount_amount=coupon_data.max_discount_amount,
+            max_uses=coupon_data.max_uses,  # Optional, not required
+            valid_from=coupon_data.valid_from,
+            valid_until=coupon_data.valid_until,
+            status=CouponStatus(coupon_data.status)
+        )
+        
+        db.add(new_coupon)
+        db.commit()
+        db.refresh(new_coupon)
+        
+        return {
+            "status": "success",
+            "message": f"Coupon '{new_coupon.coupon_code}' created successfully",
+            "data": {
+                "id": new_coupon.id,
+                "coupon_code": new_coupon.coupon_code,
+                "description": new_coupon.description,
+                "discount_type": new_coupon.discount_type.value,
+                "discount_value": new_coupon.discount_value,
+                # user_id removed - all coupons are applicable to all users
+                "min_order_amount": new_coupon.min_order_amount,
+                "max_discount_amount": new_coupon.max_discount_amount,
+                "max_uses": new_coupon.max_uses,
+                "valid_from": new_coupon.valid_from.isoformat() if new_coupon.valid_from else None,
+                "valid_until": new_coupon.valid_until.isoformat() if new_coupon.valid_until else None,
+                "status": new_coupon.status.value
+            }
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating coupon: {str(e)}")
+

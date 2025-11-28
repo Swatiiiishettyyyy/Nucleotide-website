@@ -15,7 +15,7 @@ This module handles order creation, payment verification, order tracking, and st
 ### Details
 - **Method:** `POST`
 - **Endpoint:** `/orders/create`
-- **Description:** Create order from cart items. Creates Razorpay order for payment. No COD option - payment must be completed online.
+- **Description:** Create order from all cart items for the user. Creates Razorpay order for payment. No COD option - payment must be completed online. All cart items in the user's cart will be included in the order.
 
 ### Headers
 ```
@@ -26,53 +26,69 @@ Authorization: Bearer <access_token>
 ### Request Body
 ```json
 {
-  "address_id": null,
-  "cart_item_ids": [1, 2, 3]
+  "user_id": 4,
+  "cart_id": 1
 }
 ```
 
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| address_id | integer | No | Optional shipping address ID. When omitted, the address from the selected cart items is used. | 1 |
-| cart_item_ids | array | Yes | List of cart item IDs to order | [1, 2, 3] |
+| user_id | integer | **Yes** | User ID (must match authenticated user from token) | 4 |
+| cart_id | integer | **Yes** | Cart ID (primary cart item ID - used as reference. All cart items for the user will be included in the order) | 1 |
 
-### Success Response (200 OK) - Without Coupon
+### Important Notes:
+- **user_id** must match the authenticated user from the authorization token
+- **cart_id** is used as a reference to validate the cart exists
+- **All cart items** for the authenticated user will be included in the order (not just the cart_id)
+- **Address handling**: The system automatically uses the first address from cart items as the primary address
+- **Multiple addresses**: If cart items use different addresses, each order item retains its own address from the cart item
+
+### Success Response (200 OK)
 ```json
 {
-  "razorpay_order_id": "order_MN1234567890",
-  "amount": 16050.00,
-  "currency": "INR",
   "order_id": 1,
-  "order_number": "ORD-2025-11-24-001"
+  "order_number": "ORD123456",
+  "razorpay_order_id": "order_MN1234567890",
+  "amount": 27550,
+  "currency": "INR"
 }
 ```
 
-### Success Response (200 OK) - With Coupon Applied
-```json
-{
-  "razorpay_order_id": "order_MN1234567890",
-  "amount": 15050.00,
-  "currency": "INR",
-  "order_id": 1,
-  "order_number": "ORD-2025-11-24-001"
-}
-```
-*Note: Amount is reduced by coupon discount (₹1000.00 in this example)*
+**Response Fields:**
+- `order_id`: Database order ID
+- `order_number`: Unique order number (e.g., "ORD123456")
+- `razorpay_order_id`: Razorpay order ID for payment
+- `amount`: Total amount to pay (includes subtotal + delivery - discounts - coupon)
+- `currency`: Currency code (always "INR")
 
 ### Error Responses
 
-#### 404 Not Found - Cart Items Not Found
+#### 403 Forbidden - User ID Mismatch
 ```json
 {
-  "detail": "One or more cart items not found"
+  "detail": "User ID in request does not match authenticated user"
 }
 ```
 
-#### 422 Unprocessable Entity - Invalid Request
+#### 404 Not Found - Cart Item Not Found
 ```json
 {
-  "detail": "Cart is empty or invalid"
+  "detail": "Cart item not found or does not belong to you"
+}
+```
+
+#### 400 Bad Request - Empty Cart
+```json
+{
+  "detail": "Cart is empty. Add items to cart before creating order."
+}
+```
+
+#### 422 Unprocessable Entity - Invalid Address
+```json
+{
+  "detail": "Cart items must have valid address IDs"
 }
 ```
 
@@ -86,31 +102,105 @@ Authorization: Bearer <access_token>
 ### Testing Steps
 1. Prerequisites:
    - Valid access token
-   - Items in cart (use Cart module)
-   - (Optional) address_id if you want to override the addresses stored on cart items
+   - Items in cart (use Cart module - `GET /cart/view`)
+   - Get `cart_id` from cart view response (use any cart_item_id from your cart)
 2. Create a new POST request in Postman
 3. Set URL to: `http://localhost:8000/orders/create`
 4. Set Headers:
    - `Content-Type: application/json`
    - `Authorization: Bearer <your_access_token>`
 5. In Body tab, select "raw" and "JSON"
-6. Paste the request body with cart_item_ids from your cart
+6. Paste the request body:
+   ```json
+   {
+     "user_id": 4,  // Must match authenticated user from token
+     "cart_id": 1   // Any cart_item_id from your cart (used as reference)
+   }
+   ```
 7. Click "Send"
 8. **IMPORTANT:** Save `razorpay_order_id` and `order_id` from response for payment verification
 
+### Frontend Integration Guide:
+
+**Simple Example:**
+```javascript
+// Get cart to find cart_id, then create order
+const createOrder = async (userId, cartId) => {
+  const response = await fetch('/orders/create', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      user_id: userId,  // Must match authenticated user
+      cart_id: cartId   // Any cart_item_id from user's cart
+    })
+  });
+  return response.json();
+};
+
+// Usage:
+// 1. Get cart: GET /cart/view
+// 2. Use any cart_item_id from response as cart_id
+// 3. Create order with user_id and cart_id
+const order = await createOrder(4, 1);
+// Response: { order_id, order_number, razorpay_order_id, amount, currency }
+```
+
+**Complete Flow:**
+```javascript
+// 1. Get user's cart
+const cartResponse = await fetch('/cart/view', {
+  headers: { 'Authorization': `Bearer ${token}` }
+});
+const cartData = await cartResponse.json();
+
+// 2. Get user_id from authenticated user (or from cart response)
+const userId = cartData.data.user_id;
+
+// 3. Get cart_id (use first cart_item_id from any item)
+const cartId = cartData.data.cart_items[0]?.cart_item_ids[0];
+
+// 4. Create order
+const orderResponse = await fetch('/orders/create', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${token}`
+  },
+  body: JSON.stringify({
+    user_id: userId,
+    cart_id: cartId
+  })
+});
+
+const order = await orderResponse.json();
+// Save order.razorpay_order_id and order.order_id for payment verification
+```
+
+### Key Points:
+1. **All cart items included** - The order includes ALL items in the user's cart (not just the cart_id)
+2. **cart_id is reference only** - Used to validate cart exists and belongs to user
+3. **Address handling** - System automatically uses first address from cart items as primary
+4. **Multiple addresses** - Each order item retains its own address from the cart item
+5. **Simple request** - Just need user_id and cart_id, no need to list all cart_item_ids
+
 ### Prerequisites
 - Valid access token
-- Items in cart (use Cart module "View Cart" to get cart_item_ids)
-- Optional address_id (use Address module) if you need to force a different shipping address
+- Items in cart (use Cart module "View Cart" to get cart_id)
+- User must be authenticated (user_id comes from token)
 
+### Notes
 - Creates a Razorpay order for payment
 - Order is created with status "order_confirmed" (after payment)
 - Cart items are not removed until payment is verified
 - **Coupon discount is automatically included** if a coupon is applied to the cart
 - Amount calculation: `subtotal + delivery_charge - coupon_discount - discount`
 - Amount includes delivery charge (50.00) and excludes coupon discount if applied
-- Each order item keeps its own address from the cart; the top-level `address_id` is used as the primary shipping address (defaults to the cart item's address when only one exists)
-- **For couple/family packs with different addresses**: Each order item has its own status tracking, allowing independent tracking per address
+- **All cart items** for the user are included in the order (not just the cart_id)
+- **Address handling**: System automatically uses first address from cart items as primary
+- **For couple/family packs with different addresses**: Each order item has its own address and status tracking
 - **Coupon is removed from cart** after successful payment verification
 
 ---
@@ -141,10 +231,10 @@ Authorization: Bearer <access_token>
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| order_id | integer | Yes | Order ID from create order response | 1 |
-| razorpay_order_id | string | Yes | Razorpay order ID from create order | "order_MN1234567890" |
-| razorpay_payment_id | string | Yes | Razorpay payment ID from payment gateway | "pay_MN1234567890" |
-| razorpay_signature | string | Yes | Razorpay signature for verification | "abc123def456..." |
+| order_id | integer | **Yes** | Order ID from create order response (must be > 0) | 1 |
+| razorpay_order_id | string | **Yes** | Razorpay order ID from create order (required, min 1 character) | "order_MN1234567890" |
+| razorpay_payment_id | string | **Yes** | Razorpay payment ID from payment gateway (required, min 1 character) | "pay_MN1234567890" |
+| razorpay_signature | string | **Yes** | Razorpay signature for verification (required, min 1 character) | "abc123def456..." |
 
 ### Success Response (200 OK)
 ```json
@@ -384,26 +474,70 @@ Authorization: Bearer <access_token>
   "created_at": "2025-11-24T10:00:00",
   "items": [
       {
-        "order_item_id": 1,
         "product_id": 2,
         "product_name": "DNA Test Kit - Couple",
-        "member_id": 1,
-        "member_name": "John Doe",
-        "address_id": 5,
-        "address_label": "Home",
-        "address_details": {
-          "address_label": "Home",
-          "street_address": "123 Main St",
-          "locality": "Whitefield",
-          "city": "Bangalore",
-          "state": "Karnataka",
-          "postal_code": "560066"
-        },
+        "member_ids": [1, 2],
+        "address_ids": [1],
+        "member_address_map": [
+          {
+            "member": {
+              "member_id": 1,
+              "name": "John Doe",
+              "relation": "self",
+              "age": 30,
+              "gender": "M",
+              "dob": "1993-01-15",
+              "mobile": "9876543210"
+            },
+            "address": {
+              "address_id": 1,
+              "address_label": "Home",
+              "street_address": "123 Main Street",
+              "landmark": "Near Park",
+              "locality": "Downtown",
+              "city": "Mumbai",
+              "state": "Maharashtra",
+              "postal_code": "400001",
+              "country": "India"
+            },
+            "order_item_id": 1,
+            "quantity": 1,
+            "unit_price": 8000.00,
+            "total_price": 8000.00,
+            "order_status": "order_confirmed",
+            "status_updated_at": "2025-11-24T10:00:00"
+          },
+          {
+            "member": {
+              "member_id": 2,
+              "name": "Jane Doe",
+              "relation": "spouse",
+              "age": 28,
+              "gender": "F",
+              "dob": "1995-03-20",
+              "mobile": "9876543211"
+            },
+            "address": {
+              "address_id": 1,
+              "address_label": "Home",
+              "street_address": "123 Main Street",
+              "landmark": "Near Park",
+              "locality": "Downtown",
+              "city": "Mumbai",
+              "state": "Maharashtra",
+              "postal_code": "400001",
+              "country": "India"
+            },
+            "order_item_id": 2,
+            "quantity": 1,
+            "unit_price": 8000.00,
+            "total_price": 8000.00,
+            "order_status": "order_confirmed",
+            "status_updated_at": "2025-11-24T10:00:00"
+          }
+        ],
         "quantity": 1,
-        "unit_price": 8000.00,
-        "total_price": 8000.00,
-        "order_status": "order_confirmed",
-        "status_updated_at": "2025-11-24T10:00:00"
+        "total_amount": 16000.00
       }
   ]
 }
@@ -725,15 +859,15 @@ Authorization: Bearer <access_token>
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| order_id | integer | Yes | Order ID | 1 |
-| status | string | Yes | New status (see valid statuses below) | "scheduled" |
-| notes | string | No | Additional notes | "Sample collection scheduled" |
-| scheduled_date | datetime | No | Scheduled date/time | "2025-12-01T10:00:00" |
-| technician_name | string | No | Technician name | "Dr. Smith" |
-| technician_contact | string | No | Technician contact | "9876543210" |
-| lab_name | string | No | Lab name | "ABC Lab" |
-| order_item_id | integer | No | Update status for specific order item only | 3 |
-| address_id | integer | No | Update status for all items with this address | 5 |
+| order_id | integer | **Yes** | Order ID (must be > 0) | 1 |
+| status | string | **Yes** | New status (see valid statuses below, min 1 character) | "scheduled" |
+| notes | string | **Yes** | Additional notes about status change | "Sample collection scheduled" |
+| scheduled_date | datetime | **Yes** | Scheduled date/time for technician visit | "2025-12-01T10:00:00" |
+| technician_name | string | **Yes** | Technician name (max 100 characters) | "Dr. Smith" |
+| technician_contact | string | **Yes** | Technician contact number (max 20 characters) | "9876543210" |
+| lab_name | string | **Yes** | Lab name (max 200 characters) | "ABC Lab" |
+| order_item_id | integer | **Yes** | Update status for specific order item (must be > 0) | 3 |
+| address_id | integer | **Yes** | Update status for all items with this address (must be > 0) | 5 |
 
 ### Status Update Behavior
 - **No `order_item_id` or `address_id`**: Updates entire order and all items
@@ -821,11 +955,11 @@ Authorization: Bearer <access_token>
    - Create address: `POST /address/save`
    - Create members: `POST /member/save` (based on product plan type)
    - Add products to cart: `POST /cart/add`
-   - View cart: `GET /cart/view` (save cart_item_ids)
+   - View cart: `GET /cart/view` (save cart_id from any cart_item_ids)
 
 2. **Create Order**
    - Request: `POST /orders/create`
-   - Body: `{"address_id": 1, "cart_item_ids": [1, 2]}`
+   - Body: `{"user_id": 4, "cart_id": 1}`
    - Save: `razorpay_order_id` and `order_id`
 
 3. **Verify Payment** (After Razorpay payment)
@@ -880,7 +1014,7 @@ razorpay_order_id: (set after creating order)
 ## Common Issues and Solutions
 
 ### Issue: "One or more cart items not found"
-- **Solution:** Ensure cart_item_ids exist and belong to you. Use "View Cart" to get valid cart_item_ids.
+- **Solution:** Ensure cart has items. Use "View Cart" to get valid cart_id. Ensure user_id matches authenticated user.
 
 ### Issue: "Invalid payment signature"
 - **Solution:** Ensure you're using the correct signature from Razorpay. Signature must match the payment details.

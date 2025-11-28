@@ -31,10 +31,10 @@ class Product(Base):
     SpecialPrice = Column(Float, nullable=False)      # Earlier sale_price
 
     ShortDescription = Column(String(500), nullable=False)
-    Discount = Column(String(50), nullable=True)
+    Discount = Column(String(50), nullable=False)
 
-    Description = Column(String(2000), nullable=True)
-    Images = Column(JSON, nullable=True)   # List of image URLs
+    Description = Column(String(2000), nullable=False)
+    Images = Column(JSON, nullable=False)   # List of image URLs
     
     # New fields for plan type and category
     plan_type = Column(Enum(PlanType), nullable=False, default=PlanType.SINGLE, index=True)

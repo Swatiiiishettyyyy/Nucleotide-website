@@ -220,28 +220,32 @@ def validate_and_auto_fill_address(
     city: Optional[str] = None,
     state: Optional[str] = None,
     locality: Optional[str] = None
-) -> Tuple[Optional[str], Optional[str], Optional[str], List[Dict[str, Any]]]:
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
-    Validate pincode and auto-fill city/state if not provided.
+    Validate pincode and auto-fill city/state/country if not provided.
     If city/state are already provided, they take precedence.
-    Returns (city, state, locality, locality_options).
+    Locality is NOT auto-filled - user must provide it manually.
+    Country defaults to "India" for Indian pincodes.
+    Returns (city, state, country).
     """
-    if city and state and locality:
-        # Already provided, return as-is
-        return city, state, locality, []
+    if city and state:
+        # Already provided, return as-is with country
+        country = "India"  # Default for Indian pincodes
+        return city, state, country
     
-    # Try to get from pincode
-    auto_city, auto_state, locality_options = get_pincode_details(pincode)
-    auto_locality = locality or (locality_options[0]["name"] if locality_options else None)
+    # Try to get from pincode (only city and state, not locality)
+    auto_city, auto_state, _ = get_pincode_details(pincode)
     
     # Use provided values if available, otherwise use auto-filled
     final_city = city or auto_city
     final_state = state or auto_state
-    final_locality = locality or auto_locality
+    
+    # Country defaults to "India" for Indian pincodes (all Indian pincodes are from India)
+    country = "India"
     
     # If still None, log warning but don't fail - allow manual entry
     if not final_city or not final_state:
         logger.warning(f"Could not auto-fill city/state for pincode {pincode}. User may need to enter manually.")
     
-    return final_city, final_state, final_locality, locality_options
+    return final_city, final_state, country
 

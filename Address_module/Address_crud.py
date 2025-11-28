@@ -11,8 +11,35 @@ from .location_validator import is_serviceable_location
 logger = logging.getLogger(__name__)
 
 def save_address(db: Session, user, req, request: Optional[Request] = None, correlation_id: Optional[str] = None):
-    # Auto-fill city/state/locality from pincode (if not provided)
-    locality_options = req.auto_fill_city_state() or []
+    # Store original city/state before auto-fill to check if user provided them
+    original_city = req.city
+    original_state = req.state
+    
+    # Always lookup pincode to get the actual city (regardless of what user provided)
+    # This ensures we validate against the city from pincode lookup, not user input
+    from .pincode_service import get_pincode_details
+    pincode_city, pincode_state, _ = get_pincode_details(req.postal_code)
+    
+    # Auto-fill city/state/country from pincode (if not provided)
+    # Locality is NOT auto-filled - user must provide it manually
+    req.auto_fill_city_state()
+    
+    # Ensure country is always set (default to India for Indian pincodes)
+    if not req.country or req.country.strip() == "":
+        req.country = "India"
+    
+    # Ensure state is set from pincode lookup if available
+    if pincode_state and (not req.state or req.state.strip() == ""):
+        req.state = pincode_state
+    
+    # Log what we got from pincode lookup
+    logger.info(
+        f"Address validation - Pincode: {req.postal_code}, "
+        f"Pincode lookup city: '{pincode_city}', Pincode lookup state: '{pincode_state}', "
+        f"Original city provided: '{original_city}', Final city: '{req.city}', "
+        f"Final state: '{req.state}', Final country: '{req.country}', "
+        f"Locality: '{req.locality}'"
+    )
     
     # If still not filled, allow manual entry (don't block user)
     # But warn if pincode lookup failed
@@ -24,17 +51,62 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
         logger.warning(msg)
         raise HTTPException(status_code=422, detail=msg)
 
-    if not is_serviceable_location(req.city, req.locality):
+    # Validate that the city is in serviceable locations
+    # Validation works regardless of order (city before pincode or pincode before city)
+    # Try multiple validation approaches:
+    # 1. First, validate using city from pincode lookup (most accurate)
+    # 2. Validate using user-provided city (works even if entered before pincode)
+    # 3. Validate using final city (after auto-fill)
+    # 4. Also check locality as fallback
+    validation_passed = False
+    validation_method = None
+    
+    # Priority 1: Validate using city from pincode lookup (most accurate)
+    if pincode_city and is_serviceable_location(pincode_city, req.locality):
+        validation_passed = True
+        validation_method = "pincode_lookup_city"
+        logger.info(f"City validation passed using pincode lookup city: '{pincode_city}'")
+    
+    # Priority 2: Validate using user-provided city (works even if entered before pincode)
+    # This handles cases where user enters city first, then pincode
+    # We check this regardless of whether it matches pincode city, to handle all scenarios
+    if not validation_passed and original_city and original_city.strip():
+        if is_serviceable_location(original_city, req.locality):
+            validation_passed = True
+            validation_method = "user_provided_city"
+            logger.info(f"City validation passed using user-provided city: '{original_city}' (entered before/with pincode)")
+    
+    # Also check user-provided city even if pincode validation passed (for logging/consistency)
+    # This ensures we validate user input regardless of order
+    if validation_passed and original_city and original_city.strip() and original_city != pincode_city:
+        if is_serviceable_location(original_city, req.locality):
+            logger.info(f"User-provided city '{original_city}' also validated successfully (backup check)")
+    
+    # Priority 3: Validate using final city (after auto-fill) - handles edge cases
+    if not validation_passed and req.city and req.city.strip():
+        if is_serviceable_location(req.city, req.locality):
+            validation_passed = True
+            validation_method = "final_city"
+            logger.info(f"City validation passed using final city: '{req.city}'")
+    
+    # If all validations failed, reject the address
+    if not validation_passed:
         logger.warning(
-            "Address rejected for user %s: city=%s locality=%s not serviceable",
+            "Address rejected for user %s: city from pincode='%s', user-provided city='%s', final city='%s', locality='%s' not serviceable. Pincode: %s. "
+            "Validation checked all three city sources.",
             user.id,
+            pincode_city,
+            original_city,
             req.city,
             req.locality,
+            req.postal_code,
         )
         raise HTTPException(
             status_code=422,
-            detail="Order cannot be delivered to this location."
+            detail="Sample cannot be collected in your location."
         )
+    
+    logger.info(f"Address validation passed using method: {validation_method}")
     
     # Get IP and user agent
     ip_address = None
@@ -167,7 +239,7 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
     db.add(audit)
     db.commit()
 
-    return address, locality_options
+    return address
 
 def get_addresses_by_user(db, user):
     return db.query(Address).filter_by(user_id=user.id).all()

@@ -11,7 +11,7 @@ from .Order_model import (
     OrderStatus, PaymentStatus, PaymentMethod
 )
 from Cart_module.Cart_model import CartItem
-from Cart_module.coupon_service import get_applied_coupon
+from Cart_module.coupon_service import get_applied_coupon, validate_and_calculate_discount
 from Product_module.Product_model import Product
 from Member_module.Member_model import Member
 from Address_module.Address_model import Address
@@ -54,34 +54,54 @@ def create_order_from_cart(
     if not cart_items:
         raise ValueError("No cart items selected")
     
-    # Determine primary address for order header
-    unique_cart_address_ids = {item.address_id for item in cart_items}
-    primary_address_id = address_id
-    address = None
-
-    if primary_address_id:
-        address = db.query(Address).filter(
-            Address.id == primary_address_id,
-            Address.user_id == user_id
-        ).first()
-        if not address:
-            raise ValueError("Address not found or does not belong to you")
-    else:
-        if not unique_cart_address_ids:
-            raise ValueError("No addresses associated with selected cart items")
-        primary_address_id = next(iter(unique_cart_address_ids))
-        address = db.query(Address).filter(
-            Address.id == primary_address_id,
-            Address.user_id == user_id
-        ).first()
-        if not address:
-            raise ValueError("Primary address derived from cart items not found")
-        if len(unique_cart_address_ids) > 1:
-            logger.info(
-                "Order creation for user %s contains multiple addresses; using %s as primary",
-                user_id,
-                primary_address_id
+    # Get unique addresses from cart items
+    unique_cart_address_ids = {item.address_id for item in cart_items if item.address_id}
+    
+    if not unique_cart_address_ids:
+        raise ValueError("No addresses associated with selected cart items")
+    
+    # Determine primary address_id
+    primary_address_id = None
+    
+    if address_id:
+        # If address_id is provided, validate it
+        if address_id not in unique_cart_address_ids:
+            raise ValueError(
+                f"Address ID {address_id} is not associated with any of the selected cart items. "
+                f"Cart items use address IDs: {sorted(unique_cart_address_ids)}"
             )
+        primary_address_id = address_id
+    else:
+        # If address_id is not provided, use the first address from cart items
+        primary_address_id = next(iter(sorted(unique_cart_address_ids)))
+        logger.info(
+            f"Address ID not provided for order creation. Using first address from cart items: {primary_address_id}. "
+            f"All addresses in cart: {sorted(unique_cart_address_ids)}"
+        )
+    
+    # Verify the address belongs to the user and exists
+    address = db.query(Address).filter(
+        Address.id == primary_address_id,
+        Address.user_id == user_id
+    ).first()
+    
+    if not address:
+        raise ValueError(f"Address ID {primary_address_id} not found or does not belong to you")
+    
+    # Log if multiple addresses are involved (for tracking purposes)
+    if len(unique_cart_address_ids) > 1:
+        logger.info(
+            "Order creation for user %s contains multiple addresses (%s); using %s as primary",
+            user_id,
+            sorted(unique_cart_address_ids),
+            primary_address_id
+        )
+    else:
+        logger.info(
+            "Order creation for user %s uses single address %s for all items",
+            user_id,
+            primary_address_id
+        )
     
     # Calculate totals
     subtotal = 0.0
@@ -98,21 +118,41 @@ def create_order_from_cart(
             grouped_items[group_key] = []
         grouped_items[group_key].append(item)
     
-    # Calculate subtotal (price is per product, not per member)
+    # Calculate subtotal and discount (price is per product, not per member)
+    # For couple/family products, there are multiple cart item rows but discount applies once per product
+    # This matches the cart calculation logic exactly
     for group_key, items in grouped_items.items():
         item = items[0]  # Use first item as representative
         product = item.product
         # Only count once per product group
         subtotal += item.quantity * product.SpecialPrice
+        
+        # Calculate discount once per product group (same logic as cart view)
+        discount_per_item = product.Price - product.SpecialPrice
+        discount += discount_per_item * item.quantity
     
-    # Get applied coupon from cart
+    # Get applied coupon from cart and re-validate to ensure accuracy
+    # This matches the cart view logic - recalculate discount based on current subtotal
     applied_coupon = get_applied_coupon(db, user_id)
     if applied_coupon:
-        coupon_discount = applied_coupon.discount_amount
-        coupon_code = applied_coupon.coupon_code
-        logger.info(f"Order will include coupon '{coupon_code}' with discount of ₹{coupon_discount}")
+        # Re-validate and recalculate discount (cart total might have changed)
+        coupon, calculated_discount, error_message = validate_and_calculate_discount(
+            db, applied_coupon.coupon_code, user_id, subtotal
+        )
+        
+        if coupon and not error_message:
+            # Coupon is valid - use the recalculated discount
+            coupon_discount = calculated_discount
+            coupon_code = applied_coupon.coupon_code
+            logger.info(f"Order will include coupon '{coupon_code}' with discount of ₹{coupon_discount} (recalculated from subtotal ₹{subtotal})")
+        else:
+            # Validation failed - log warning but use stored discount as fallback
+            logger.warning(f"Coupon validation warning for '{applied_coupon.coupon_code}' during order creation: {error_message}. Using stored discount.")
+            coupon_discount = applied_coupon.discount_amount
+            coupon_code = applied_coupon.coupon_code
     
     # Calculate total amount (subtotal + delivery - discount - coupon_discount)
+    # This matches the cart calculation: grand_total = subtotal_amount + delivery_charge - coupon_amount - discount_amount
     total_amount = subtotal + delivery_charge - discount - coupon_discount
     # Ensure total is not negative
     total_amount = max(0.0, total_amount)
@@ -145,6 +185,7 @@ def create_order_from_cart(
         # Create snapshot
         snapshot = OrderSnapshot(
             order_id=order.id,
+            user_id=user_id,
             product_data={
                 "ProductId": product.ProductId,
                 "Name": product.Name,
@@ -177,7 +218,8 @@ def create_order_from_cart(
                 "state": address_obj.state,
                 "postal_code": address_obj.postal_code,
                 "country": address_obj.country
-            }
+            },
+            cart_item_data=None  # Not required, can be empty
         )
         db.add(snapshot)
         db.flush()
@@ -185,13 +227,13 @@ def create_order_from_cart(
         # Create order item with initial status
         order_item = OrderItem(
             order_id=order.id,
+            user_id=user_id,
             product_id=product.ProductId,
             member_id=member.id,
             address_id=cart_item.address_id,
             snapshot_id=snapshot.id,
             quantity=cart_item.quantity,
-            unit_price=product.SpecialPrice,
-            total_price=cart_item.quantity * product.SpecialPrice,
+            unit_price=product.SpecialPrice,  # Store SpecialPrice as unit_price
             order_status=OrderStatus.ORDER_CONFIRMED  # Initialize with order confirmed status
         )
         db.add(order_item)
@@ -269,18 +311,42 @@ def update_order_status(
     new_status: OrderStatus,
     changed_by: str,
     notes: Optional[str] = None,
+    order_item_id: Optional[int] = None,
+    address_id: Optional[int] = None,
     scheduled_date: Optional[datetime] = None,
     technician_name: Optional[str] = None,
-    technician_contact: Optional[str] = None,
-    lab_name: Optional[str] = None,
-    order_item_id: Optional[int] = None,
-    address_id: Optional[int] = None
+    technician_contact: Optional[str] = None
 ) -> Order:
     """
     Update order status and create status history entry.
     If order_item_id or address_id is provided, updates only that specific item.
     Otherwise, updates the entire order and all items with matching addresses.
+    
+    Technician and scheduling fields are optional and only applied when provided.
+    For statuses like 'report_ready', 'testing_in_progress', 'sample_received_by_lab',
+    technician details are not needed and will be cleared if not provided.
+    
+    Statuses that typically need technician info:
+    - scheduled: requires scheduled_date, technician_name, technician_contact
+    - schedule_confirmed_by_lab: may need technician info
+    - sample_collected: may need technician info
+    
+    Statuses that don't need technician info:
+    - order_confirmed, sample_received_by_lab, testing_in_progress, report_ready
     """
+    # Statuses where technician details are not relevant
+    # For these statuses, if technician fields are not provided, they will be cleared
+    # However, if explicitly provided, they will still be set (for flexibility)
+    STATUSES_WITHOUT_TECHNICIAN = {
+        OrderStatus.ORDER_CONFIRMED,
+        OrderStatus.SAMPLE_RECEIVED_BY_LAB,
+        OrderStatus.TESTING_IN_PROGRESS,
+        OrderStatus.REPORT_READY
+    }
+    
+    # If status doesn't need technician info and fields are not provided, clear them
+    # If fields ARE provided, use them regardless of status (for flexibility)
+    should_clear_technician = new_status in STATUSES_WITHOUT_TECHNICIAN
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise ValueError("Order not found")
@@ -298,6 +364,23 @@ def update_order_status(
         order_item.order_status = new_status
         order_item.status_updated_at = datetime.utcnow()
         
+        # Update technician and scheduling fields only if provided
+        # For statuses that don't need technician info, clear fields if not provided
+        if scheduled_date is not None:
+            order_item.scheduled_date = scheduled_date
+        elif should_clear_technician:
+            order_item.scheduled_date = None
+            
+        if technician_name is not None:
+            order_item.technician_name = technician_name
+        elif should_clear_technician:
+            order_item.technician_name = None
+            
+        if technician_contact is not None:
+            order_item.technician_contact = technician_contact
+        elif should_clear_technician:
+            order_item.technician_contact = None
+        
         # Create status history entry for this item
         status_history = OrderStatusHistory(
             order_id=order_id,
@@ -311,7 +394,7 @@ def update_order_status(
         
         # Also update order-level status if all items have the same status
         _sync_order_status(db, order)
-        
+    
     # If updating by address_id (all items with that address)
     elif address_id:
         order_items = db.query(OrderItem).filter(
@@ -327,6 +410,23 @@ def update_order_status(
             item.order_status = new_status
             item.status_updated_at = datetime.utcnow()
             
+            # Update technician and scheduling fields only if provided
+            # For statuses that don't need technician info, clear fields if not provided
+            if scheduled_date is not None:
+                item.scheduled_date = scheduled_date
+            elif should_clear_technician:
+                item.scheduled_date = None
+                
+            if technician_name is not None:
+                item.technician_name = technician_name
+            elif should_clear_technician:
+                item.technician_name = None
+                
+            if technician_contact is not None:
+                item.technician_contact = technician_contact
+            elif should_clear_technician:
+                item.technician_contact = None
+            
             # Create status history entry for each item
             status_history = OrderStatusHistory(
                 order_id=order_id,
@@ -340,7 +440,7 @@ def update_order_status(
         
         # Also update order-level status if all items have the same status
         _sync_order_status(db, order)
-        
+    
     # Update entire order (default behavior)
     else:
         previous_status = order.order_status
@@ -351,16 +451,23 @@ def update_order_status(
         for item in order.items:
             item.order_status = new_status
             item.status_updated_at = datetime.utcnow()
-        
-        # Update additional fields if provided
-        if scheduled_date:
-            order.scheduled_date = scheduled_date
-        if technician_name:
-            order.technician_name = technician_name
-        if technician_contact:
-            order.technician_contact = technician_contact
-        if lab_name:
-            order.lab_name = lab_name
+            
+            # Update technician and scheduling fields only if provided
+            # For statuses that don't need technician info, clear fields if not provided
+            if scheduled_date is not None:
+                item.scheduled_date = scheduled_date
+            elif should_clear_technician:
+                item.scheduled_date = None
+                
+            if technician_name is not None:
+                item.technician_name = technician_name
+            elif should_clear_technician:
+                item.technician_name = None
+                
+            if technician_contact is not None:
+                item.technician_contact = technician_contact
+            elif should_clear_technician:
+                item.technician_contact = None
         
         # Create status history entry for order
         status_history = OrderStatusHistory(

@@ -1,8 +1,8 @@
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, Field, validator
 
 
 class CategoryCreate(BaseModel):
-    name: str
+    name: str = Field(..., description="Category name", min_length=1, max_length=100)
 
     @validator("name")
     def validate_name(cls, value: str) -> str:

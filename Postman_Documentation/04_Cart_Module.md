@@ -23,12 +23,24 @@ Content-Type: application/json
 Authorization: Bearer <access_token>
 ```
 
-### Request Body - Single Plan Product (Single Address)
+### Request Body - Single Plan Product
 ```json
 {
   "product_id": 1,
-  "address_id": 1,
-  "member_ids": [1],
+  "member_address_map": [
+    {"member_id": 1, "address_id": 1}
+  ],
+  "quantity": 1
+}
+```
+
+### Request Body - Single Plan Product
+```json
+{
+  "product_id": 1,
+  "member_address_map": [
+    {"member_id": 1, "address_id": 1}
+  ],
   "quantity": 1
 }
 ```
@@ -37,8 +49,10 @@ Authorization: Bearer <access_token>
 ```json
 {
   "product_id": 2,
-  "address_id": 1,
-  "member_ids": [1, 2],
+  "member_address_map": [
+    {"member_id": 1, "address_id": 1},
+    {"member_id": 2, "address_id": 1}
+  ],
   "quantity": 1
 }
 ```
@@ -47,8 +61,10 @@ Authorization: Bearer <access_token>
 ```json
 {
   "product_id": 2,
-  "address_id": [1, 2],
-  "member_ids": [1, 2],
+  "member_address_map": [
+    {"member_id": 1, "address_id": 1},
+    {"member_id": 2, "address_id": 2}
+  ],
   "quantity": 1
 }
 ```
@@ -57,8 +73,12 @@ Authorization: Bearer <access_token>
 ```json
 {
   "product_id": 3,
-  "address_id": 1,
-  "member_ids": [1, 2, 3, 4],
+  "member_address_map": [
+    {"member_id": 1, "address_id": 1},
+    {"member_id": 2, "address_id": 1},
+    {"member_id": 3, "address_id": 1},
+    {"member_id": 4, "address_id": 1}
+  ],
   "quantity": 1
 }
 ```
@@ -67,8 +87,12 @@ Authorization: Bearer <access_token>
 ```json
 {
   "product_id": 3,
-  "address_id": [1, 2, 3, 4],
-  "member_ids": [1, 2, 3, 4],
+  "member_address_map": [
+    {"member_id": 1, "address_id": 1},
+    {"member_id": 2, "address_id": 2},
+    {"member_id": 3, "address_id": 3},
+    {"member_id": 4, "address_id": 4}
+  ],
   "quantity": 1
 }
 ```
@@ -77,18 +101,25 @@ Authorization: Bearer <access_token>
 ```json
 {
   "product_id": 3,
-  "address_id": 1,
-  "member_ids": [1, 2, 3],
+  "member_address_map": [
+    {"member_id": 1, "address_id": 1},
+    {"member_id": 2, "address_id": 1},
+    {"member_id": 3, "address_id": 1}
+  ],
   "quantity": 1
 }
 ```
 
-### Request Body - Family Plan Product (3 Mandatory + 1 Optional Member)
+### Request Body - Family Plan Product (3 Mandatory + 1 Optional Member with Mixed Addresses)
 ```json
 {
   "product_id": 3,
-  "address_id": [1, 1, 1, 2],
-  "member_ids": [1, 2, 3, 4],
+  "member_address_map": [
+    {"member_id": 1, "address_id": 1},
+    {"member_id": 2, "address_id": 1},
+    {"member_id": 3, "address_id": 1},
+    {"member_id": 4, "address_id": 2}
+  ],
   "quantity": 1
 }
 ```
@@ -96,10 +127,11 @@ Authorization: Bearer <access_token>
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| product_id | integer | Yes | Product ID to add | 1 |
-| address_id | integer or array | Yes | Shipping address ID(s). Single address (shared) or list of addresses (one per member). Must be 1 address or match member count. | 1 or [1, 2] |
-| member_ids | array | Yes | List of member IDs (1 for single, 2 for couple, 3-4 for family) | [1, 2] |
-| quantity | integer | Yes | Quantity (default: 1) | 1 |
+| product_id | integer | **Yes** | Product ID to add (must be > 0) | 1 |
+| member_address_map | array | **Yes** | List of member-address mappings. Each object contains `member_id` and `address_id`. Explicitly maps each member to their delivery address. | [{"member_id": 1, "address_id": 1}, {"member_id": 2, "address_id": 1}] |
+| quantity | integer | **Yes** | Quantity (must be >= 1) | 1 |
+
+**Note:** The `member_address_map` makes it explicit which member is delivered to which address, eliminating any ambiguity. Multiple members can share the same address_id, or each can have a different address.
 
 ### Success Response (200 OK) - Same Address
 ```json
@@ -296,7 +328,7 @@ Authorization: Bearer <access_token>
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| quantity | integer | Yes | New quantity (must be >= 1) | 2 |
+| quantity | integer | **Yes** | New quantity (must be >= 1) | 2 |
 
 ### Success Response (200 OK)
 ```json
@@ -506,11 +538,9 @@ Authorization: Bearer <access_token>
     },
     "cart_items": [
       {
-        "cart_id": 1,
         "cart_item_ids": [1, 2],
         "product_id": 2,
         "address_ids": [1],
-        "address_id": 1,
         "member_ids": [1, 2],
         "member_address_map": [
           {"member_id": 1, "address_id": 1},
@@ -523,15 +553,39 @@ Authorization: Bearer <access_token>
         "special_price": 8000.00,
         "quantity": 1,
         "members_count": 2,
+        "discount_per_item": 1000.00,
         "total_amount": 8000.00,
         "group_id": "1_2_abc123"
       },
       {
-        "cart_id": 3,
         "cart_item_ids": [3],
         "product_id": 1,
-        "address_id": 1,
+        "address_ids": [1],
         "member_ids": [3],
+        "member_address_map": [
+          {
+            "member": {
+              "member_id": 3,
+              "name": "Bob Smith",
+              "relation": "self",
+              "age": 35,
+              "gender": "M",
+              "dob": "1988-05-10",
+              "mobile": "9876543212"
+            },
+            "address": {
+              "address_id": 1,
+              "address_label": "Home",
+              "street_address": "456 Oak Avenue",
+              "landmark": "Near School",
+              "locality": "Suburb",
+              "city": "Delhi",
+              "state": "Delhi",
+              "postal_code": "110001",
+              "country": "India"
+            }
+          }
+        ],
         "product_name": "DNA Test Kit - Single",
         "product_images": "https://example.com/image2.jpg",
         "plan_type": "single",
@@ -539,6 +593,7 @@ Authorization: Bearer <access_token>
         "special_price": 4500.00,
         "quantity": 2,
         "members_count": 1,
+        "discount_per_item": 500.00,
         "total_amount": 9000.00,
         "group_id": null
       }
@@ -601,11 +656,9 @@ Authorization: Bearer <access_token>
     },
     "cart_items": [
       {
-        "cart_id": 1,
         "cart_item_ids": [1, 2],
         "product_id": 2,
         "address_ids": [1],
-        "address_id": 1,
         "member_ids": [1, 2],
         "member_address_map": [
           {"member_id": 1, "address_id": 1},
@@ -618,6 +671,7 @@ Authorization: Bearer <access_token>
         "special_price": 8000.00,
         "quantity": 1,
         "members_count": 2,
+        "discount_per_item": 1000.00,
         "total_amount": 8000.00,
         "group_id": "1_2_abc123"
       }
@@ -636,8 +690,10 @@ Authorization: Bearer <access_token>
 - `you_save` shows total savings (discount + coupon)
 - `grand_total` = subtotal + delivery_charge - coupon_amount - discount_amount
 - `address_ids` contains unique address IDs used in the group
-- `address_id` (singular) is provided for backward compatibility when all members share the same address
 - `member_address_map` shows the address assigned to each member
+- `discount_per_item` shows the discount per product (price - special_price)
+- `cart_item_ids` is a list of all cart item IDs in the group (for couple/family products)
+- `total_items` in summary is the number of product groups, `total_cart_items` is the total individual cart item rows
 
 ---
 
@@ -664,7 +720,7 @@ Authorization: Bearer <access_token>
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| coupon_code | string | Yes | Coupon code to apply (case-insensitive, will be converted to uppercase) | "SAVE10" |
+| coupon_code | string | **Yes** | Coupon code to apply (1-50 characters, case-insensitive, will be converted to uppercase) | "SAVE10" |
 
 ### Success Response (200 OK)
 ```json
@@ -834,6 +890,300 @@ No specific error responses (returns success even if no coupon was applied)
 
 ---
 
+## Endpoint 8: List Coupons
+
+### Details
+- **Method:** `GET`
+- **Endpoint:** `/cart/list-coupons`
+- **Description:** List all available coupons in the database. This is a debug endpoint that helps diagnose coupon validation issues.
+
+### Headers
+```
+Authorization: Bearer <access_token>
+```
+
+### Request Body
+```
+(No body required)
+```
+
+### Success Response (200 OK)
+```json
+{
+  "status": "success",
+  "message": "Found 3 coupon(s)",
+  "data": {
+    "total_coupons": 3,
+    "coupons": [
+      {
+        "id": 1,
+        "coupon_code": "SAVE10",
+        "description": "10% off on orders above ₹1000",
+        "status": "active",
+        "discount_type": "percentage",
+        "discount_value": 10.0,
+        "min_order_amount": 1000.0,
+        "max_discount_amount": 500.0,
+        "max_uses": null,
+        "max_uses_per_user": 1,
+        "valid_from": "2024-01-01T00:00:00",
+        "valid_until": "2024-12-31T23:59:59",
+        "is_currently_valid": true,
+        "created_at": "2024-01-01T00:00:00"
+      }
+    ]
+  }
+}
+```
+
+### Error Responses
+
+#### 500 Internal Server Error
+```json
+{
+  "detail": "Error listing coupons: <error_message>"
+}
+```
+
+### Testing Steps
+1. Create a new GET request in Postman
+2. Set URL to: `http://localhost:8000/cart/list-coupons`
+3. Set Headers:
+   - `Authorization: Bearer <your_access_token>`
+4. Click "Send"
+5. Verify the response contains all available coupons with their details
+
+### Prerequisites
+- Valid access token
+
+### Notes
+- This is a debug endpoint to help diagnose coupon validation issues
+- Returns all coupons in the database regardless of validity
+- `is_currently_valid` indicates if the coupon is currently valid based on status, valid_from, and valid_until dates
+- Useful for testing and troubleshooting coupon-related issues
+
+---
+
+## Endpoint 9: Create Coupon
+
+### Details
+- **Method:** `POST`
+- **Endpoint:** `/cart/create-coupon`
+- **Description:** Create a new coupon in the database. This allows adding coupons for testing or administrative purposes. No authentication required.
+
+### Headers
+```
+Content-Type: application/json
+```
+
+### Request Body
+```json
+{
+  "coupon_code": "SAVE20",
+  "description": "20% off on orders above ₹2000",
+  "user_id": null,
+  "discount_type": "percentage",
+  "discount_value": 20.0,
+  "min_order_amount": 2000.0,
+  "max_discount_amount": 1000.0,
+  "max_uses": 100,
+  "valid_from": "2024-01-01T00:00:00",
+  "valid_until": "2024-12-31T23:59:59",
+  "status": "active"
+}
+```
+
+### Request Body Parameters
+| Parameter | Type | Required | Description | Example |
+|-----------|------|----------|-------------|---------|
+| coupon_code | string | **Yes** | Coupon code (1-50 characters, will be converted to uppercase) | "SAVE20" |
+| description | string | No | Coupon description (max 500 characters) | "20% off on orders above ₹2000" |
+| user_id | integer | No | User ID if coupon is applicable to one user only (null = all users) | null or 1 |
+| discount_type | string | **Yes** | Discount type: "percentage" or "fixed" | "percentage" |
+| discount_value | float | **Yes** | Discount value (percentage 0-100 or fixed amount, must be > 0) | 20.0 |
+| min_order_amount | float | No | Minimum order amount to apply coupon (default: 0.0) | 2000.0 |
+| max_discount_amount | float | No | Maximum discount cap for percentage coupons (default: null) | 1000.0 |
+| max_uses | integer | No | Total uses allowed (null = unlimited, not required) | 100 |
+| valid_from | datetime | **Yes** | Coupon valid from date (ISO format) | "2024-01-01T00:00:00" |
+| valid_until | datetime | **Yes** | Coupon valid until date (ISO format) | "2024-12-31T23:59:59" |
+| status | string | No | Coupon status: "active", "inactive", or "expired" (default: "active") | "active" |
+
+### Success Response (200 OK)
+```json
+{
+  "status": "success",
+  "message": "Coupon 'SAVE20' created successfully",
+  "data": {
+    "id": 2,
+    "coupon_code": "SAVE20",
+    "description": "20% off on orders above ₹2000",
+    "discount_type": "percentage",
+    "discount_value": 20.0,
+    "user_id": null,
+    "min_order_amount": 2000.0,
+    "max_discount_amount": 1000.0,
+    "max_uses": 100,
+    "valid_from": "2024-01-01T00:00:00",
+    "valid_until": "2024-12-31T23:59:59",
+    "status": "active"
+  }
+}
+```
+
+### Error Responses
+
+#### 400 Bad Request - Coupon Code Already Exists
+```json
+{
+  "detail": "Coupon code 'SAVE20' already exists"
+}
+```
+
+#### 422 Unprocessable Entity - Invalid Discount Type
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "discount_type"],
+      "msg": "discount_type must be \"percentage\" or \"fixed\"",
+      "type": "value_error"
+    }
+  ]
+}
+```
+
+#### 422 Unprocessable Entity - Invalid Discount Value
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "discount_value"],
+      "msg": "Percentage discount must be between 0 and 100",
+      "type": "value_error"
+    }
+  ]
+}
+```
+
+#### 500 Internal Server Error
+```json
+{
+  "detail": "Error creating coupon: <error_message>"
+}
+```
+
+### Testing Steps
+1. Create a new POST request in Postman
+2. Set URL to: `http://localhost:8000/cart/create-coupon`
+3. Set Headers:
+   - `Content-Type: application/json`
+4. In Body tab, select "raw" and "JSON"
+5. Paste the request body with coupon details
+6. Click "Send"
+7. Verify the response shows the created coupon details
+
+### Prerequisites
+- No authentication required (but recommended for production)
+
+### Notes
+- Coupon code is automatically converted to uppercase
+- For percentage discounts, discount_value must be between 0 and 100
+- For fixed discounts, discount_value is the fixed amount
+- If user_id is null, coupon is applicable to all users
+- If user_id is set, coupon is only applicable to that specific user
+- max_uses is optional - if null, coupon has unlimited uses
+- Status can be "active", "inactive", or "expired"
+
+---
+
+## Endpoint 10: Create Test Coupon
+
+### Details
+- **Method:** `POST`
+- **Endpoint:** `/cart/create-test-coupon`
+- **Description:** Create a test coupon for testing purposes. This creates a predefined test coupon (TEST2024) that can be used for testing the coupon functionality.
+
+### Headers
+```
+(No headers required)
+```
+
+### Request Body
+```
+(No body required)
+```
+
+### Success Response (200 OK) - New Coupon Created
+```json
+{
+  "status": "success",
+  "message": "Test coupon 'TEST2024' created successfully",
+  "data": {
+    "id": 1,
+    "coupon_code": "TEST2024",
+    "description": "Test coupon for testing purposes - 10% off with max ₹500 discount",
+    "user_id": null,
+    "discount_type": "percentage",
+    "discount_value": 10.0,
+    "min_order_amount": 1000.0,
+    "max_discount_amount": 500.0,
+    "max_uses": null,
+    "valid_from": "2024-01-01T00:00:00",
+    "valid_until": "2025-01-01T00:00:00",
+    "status": "active"
+  }
+}
+```
+
+### Success Response (200 OK) - Coupon Already Exists
+```json
+{
+  "status": "success",
+  "message": "Test coupon 'TEST2024' already exists",
+  "data": {
+    "id": 1,
+    "coupon_code": "TEST2024",
+    "user_id": null,
+    "min_order_amount": 1000.0,
+    "max_discount_amount": 500.0,
+    "max_uses": null
+  }
+}
+```
+
+### Error Responses
+
+#### 500 Internal Server Error
+```json
+{
+  "detail": "Error creating test coupon: <error_message>"
+}
+```
+
+### Testing Steps
+1. Create a new POST request in Postman
+2. Set URL to: `http://localhost:8000/cart/create-test-coupon`
+3. Click "Send"
+4. Verify the response shows the test coupon details
+5. Use the coupon code "TEST2024" to test coupon functionality
+
+### Prerequisites
+- No authentication required
+
+### Notes
+- Creates a predefined test coupon with code "TEST2024"
+- Test coupon details:
+  - 10% discount (percentage type)
+  - Maximum discount cap: ₹500
+  - Minimum order amount: ₹1000
+  - Valid for 1 year from creation date
+  - Unlimited uses
+  - Applicable to all users
+- If the test coupon already exists, returns existing coupon details
+- Useful for quick testing of coupon functionality without creating custom coupons
+
+---
+
 ## Complete Testing Flow
 
 ### Step-by-Step Cart Testing
@@ -845,27 +1195,27 @@ No specific error responses (returns success even if no coupon was applied)
 
 2. **Add Single Plan Product to Cart**
    - Request: `POST /cart/add`
-   - Body: `{"product_id": 1, "address_id": 1, "member_ids": [1], "quantity": 1}`
+   - Body: `{"product_id": 1, "member_address_map": [{"member_id": 1, "address_id": 1}], "quantity": 1}`
    - Save: cart_id from response
 
 3. **Add Couple Plan Product to Cart (Same Address)**
    - Request: `POST /cart/add`
-   - Body: `{"product_id": 2, "address_id": 1, "member_ids": [1, 2], "quantity": 1}`
+   - Body: `{"product_id": 2, "member_address_map": [{"member_id": 1, "address_id": 1}, {"member_id": 2, "address_id": 1}], "quantity": 1}`
    - Save: cart_id from response
 
 4. **Add Couple Plan Product to Cart (Different Addresses)**
    - Request: `POST /cart/add`
-   - Body: `{"product_id": 2, "address_id": [1, 2], "member_ids": [1, 2], "quantity": 1}`
+   - Body: `{"product_id": 2, "member_address_map": [{"member_id": 1, "address_id": 1}, {"member_id": 2, "address_id": 2}], "quantity": 1}`
    - Save: cart_id from response
 
 5. **Add Family Plan Product to Cart (3 Members - Minimum)**
    - Request: `POST /cart/add`
-   - Body: `{"product_id": 3, "address_id": 1, "member_ids": [1, 2, 3], "quantity": 1}`
+   - Body: `{"product_id": 3, "member_address_map": [{"member_id": 1, "address_id": 1}, {"member_id": 2, "address_id": 1}, {"member_id": 3, "address_id": 1}], "quantity": 1}`
    - Save: cart_id from response
 
 6. **Add Family Plan Product to Cart (4 Members - Maximum)**
    - Request: `POST /cart/add`
-   - Body: `{"product_id": 3, "address_id": [1, 1, 1, 2], "member_ids": [1, 2, 3, 4], "quantity": 1}`
+   - Body: `{"product_id": 3, "member_address_map": [{"member_id": 1, "address_id": 1}, {"member_id": 2, "address_id": 1}, {"member_id": 3, "address_id": 1}, {"member_id": 4, "address_id": 2}], "quantity": 1}`
    - Save: cart_id from response
 
 7. **View Cart**

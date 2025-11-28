@@ -46,27 +46,21 @@ class Order(Base):
     subtotal = Column(Float, nullable=False)
     delivery_charge = Column(Float, default=0.0)
     discount = Column(Float, default=0.0)
-    coupon_code = Column(String(50), nullable=True, index=True)  # Applied coupon code
+    coupon_code = Column(String(50), nullable=True, index=True)  # Applied coupon code (None if no coupon)
     coupon_discount = Column(Float, default=0.0)  # Discount from coupon
     total_amount = Column(Float, nullable=False)  # Final amount paid
     
     # Payment details
     payment_method = Column(Enum(PaymentMethod), nullable=False, default=PaymentMethod.RAZORPAY)
     payment_status = Column(Enum(PaymentStatus), nullable=False, default=PaymentStatus.PENDING, index=True)
-    razorpay_order_id = Column(String(255), nullable=True, unique=True, index=True)  # Razorpay order ID
-    razorpay_payment_id = Column(String(255), nullable=True, unique=True, index=True)  # Razorpay payment ID
-    razorpay_signature = Column(String(255), nullable=True)  # Razorpay signature for verification
-    payment_date = Column(DateTime(timezone=True), nullable=True)
+    razorpay_order_id = Column(String(255), nullable=False, unique=True, index=True)  # Razorpay order ID
+    razorpay_payment_id = Column(String(255), nullable=True, unique=True, index=True)  # Razorpay payment ID (filled after payment completion)
+    razorpay_signature = Column(String(255), nullable=True)  # Razorpay signature for verification (filled after payment completion)
+    payment_date = Column(DateTime(timezone=True), nullable=True)  # Payment date (filled after payment completion)
     
     # Order status tracking
     order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.ORDER_CONFIRMED, index=True)
     status_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    
-    # Technician and lab information
-    scheduled_date = Column(DateTime(timezone=True), nullable=True)  # When technician will visit
-    technician_name = Column(String(100), nullable=True)
-    technician_contact = Column(String(20), nullable=True)
-    lab_name = Column(String(200), nullable=True)
     
     # Additional notes
     notes = Column(Text, nullable=True)
@@ -90,6 +84,7 @@ class OrderItem(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)  # User who placed the order
     # These foreign keys allow NULL because we use OrderSnapshot for data integrity
     # If original product/member/address is deleted, FK becomes NULL but snapshot preserves data
     product_id = Column(Integer, ForeignKey("products.ProductId", ondelete="SET NULL"), nullable=True)
@@ -97,20 +92,25 @@ class OrderItem(Base):
     address_id = Column(Integer, ForeignKey("addresses.id", ondelete="SET NULL"), nullable=True)
     
     # Product snapshot at time of order (from snapshot table)
-    snapshot_id = Column(Integer, ForeignKey("order_snapshots.id"), nullable=True)
+    snapshot_id = Column(Integer, ForeignKey("order_snapshots.id"), nullable=False)
     
     quantity = Column(Integer, default=1)
-    unit_price = Column(Float, nullable=False)  # Price at time of order
-    total_price = Column(Float, nullable=False)  # quantity * unit_price
+    unit_price = Column(Float, nullable=False)  # SpecialPrice at time of order (final price per unit)
     
     # Per-item status tracking (for different addresses in couple/family packs)
     order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.ORDER_CONFIRMED, index=True)
     status_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
+    # Technician and scheduling information (per item, since items can have different addresses)
+    scheduled_date = Column(DateTime(timezone=True), nullable=True)  # When technician will visit for this item
+    technician_name = Column(String(100), nullable=True)  # Technician assigned to this item
+    technician_contact = Column(String(20), nullable=True)  # Technician contact for this item
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships
     order = relationship("Order", backref="items")
+    user = relationship("User")
     product = relationship("Product")
     member = relationship("Member")
     address = relationship("Address")
@@ -126,6 +126,7 @@ class OrderSnapshot(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)  # User who placed the order
     
     # Snapshot of product details at order time
     product_data = Column(JSON, nullable=False)  # {ProductId, Name, Price, SpecialPrice, plan_type, category, etc.}
@@ -136,13 +137,14 @@ class OrderSnapshot(Base):
     # Snapshot of address details at order time
     address_data = Column(JSON, nullable=False)  # {id, address_label, street_address, city, state, postal_code, etc.}
     
-    # Snapshot of cart item details
-    cart_item_data = Column(JSON, nullable=True)  # Original cart item data if needed
+    # Snapshot of cart item details (not required, can be empty)
+    cart_item_data = Column(JSON, nullable=True)  # Original cart item data if needed (optional)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships
     order = relationship("Order", backref="snapshots")
+    user = relationship("User")
 
 
 class OrderStatusHistory(Base):
@@ -153,11 +155,11 @@ class OrderStatusHistory(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
-    order_item_id = Column(Integer, ForeignKey("order_items.id", ondelete="CASCADE"), nullable=True, index=True)  # Null for order-level updates
+    order_item_id = Column(Integer, ForeignKey("order_items.id", ondelete="CASCADE"), nullable=True, index=True)  # NULL for order-level status
     status = Column(Enum(OrderStatus), nullable=False, index=True)
-    previous_status = Column(Enum(OrderStatus), nullable=True)
-    notes = Column(Text, nullable=True)  # Additional notes about status change
-    changed_by = Column(String(100), nullable=True)  # Who changed the status (user_id or "system")
+    previous_status = Column(Enum(OrderStatus), nullable=True)  # NULL for initial status
+    notes = Column(Text, nullable=False)  # Additional notes about status change
+    changed_by = Column(String(100), nullable=False)  # Who changed the status (user_id or "system")
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
     
     # Relationships

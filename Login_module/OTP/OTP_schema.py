@@ -7,7 +7,7 @@ import re
 class SendOTPRequest(BaseModel):
     country_code: str = Field(..., example="+91", min_length=1, max_length=5)
     mobile: str = Field(..., example="9876543210", min_length=10, max_length=15)
-    purpose: Optional[str] = Field("login", example="login", max_length=50)
+    purpose: str = Field(..., example="login", max_length=50)
     
     @validator('country_code')
     def validate_country_code(cls, v):
@@ -27,8 +27,8 @@ class VerifyOTPRequest(BaseModel):
     mobile: str = Field(..., example="9876543210", min_length=10, max_length=15)
     otp: str = Field(..., example="123456", min_length=4, max_length=8)
     device_id: str = Field(..., example="device-uuid-or-imei", min_length=1, max_length=255)
-    device_platform: Optional[str] = Field(None, example="web", max_length=50)  # web/mobile/ios
-    device_details: Optional[str] = Field(None, example='{"browser":"Chrome", "version":"..."}', max_length=1000)
+    device_platform: str = Field(..., example="web", max_length=50)  # web/mobile/ios
+    device_details: str = Field(..., example='{"browser":"Chrome", "version":"..."}', max_length=1000)
     
     @validator('country_code')
     def validate_country_code(cls, v):

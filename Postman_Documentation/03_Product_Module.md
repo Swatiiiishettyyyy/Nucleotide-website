@@ -44,16 +44,16 @@ Content-Type: application/json
 ### Request Body Parameters
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| Name | string | Yes | Product name | "DNA Test Kit - Single" |
-| ShortDescription | string | Yes | Highlight that shows up in cards | "Starter plan for one member" |
-| Description | string | No | Long form description | "Complete DNA testing kit" |
-| Price | float | Yes | Original price | 5000.00 |
-| SpecialPrice | float | Yes | Discounted price | 4500.00 |
-| Discount | string | No | Display badge (eg. 10%) | "10%" |
-| Images | array[string] | No | List of image URLs | ["url1","url2"] |
-| plan_type | string | Yes | Plan type: single/couple/family | "single" |
-| max_members | integer | No | Overrides plan default (1/2/4) | 1 |
-| category_id | integer | No | Links the product to a category (defaults to Genetic Testing) | 1 |
+| Name | string | **Yes** | Product name (1-200 characters) | "DNA Test Kit - Single" |
+| Price | float | **Yes** | Original price (must be > 0) | 5000.00 |
+| SpecialPrice | float | **Yes** | Discounted price (must be > 0) | 4500.00 |
+| ShortDescription | string | **Yes** | Short description (1-500 characters) | "Starter plan for one member" |
+| Description | string | **Yes** | Long form description (max 2000 characters) | "Complete DNA testing kit" |
+| Discount | string | **Yes** | Display badge (eg. 10%, max 50 characters) | "10%" |
+| Images | array[string] | **Yes** | List of product image URLs (at least 1 image required) | ["url1","url2"] |
+| plan_type | string | **Yes** | Plan type: single/couple/family | "single" |
+| max_members | integer | **Yes** | Maximum members allowed (1-4) | 1 |
+| category_id | integer | **Yes** | Category ID (must be > 0) | 1 |
 
 ### Success Response (200 OK)
 ```json
