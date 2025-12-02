@@ -105,7 +105,7 @@ def create_order_from_cart(
     
     # Calculate totals
     subtotal = 0.0
-    delivery_charge = 50.0  # Fixed delivery charge
+    delivery_charge = 0.0  # Free delivery
     discount = 0.0
     coupon_discount = 0.0
     coupon_code = None
@@ -151,9 +151,11 @@ def create_order_from_cart(
             coupon_discount = applied_coupon.discount_amount
             coupon_code = applied_coupon.coupon_code
     
-    # Calculate total amount (subtotal + delivery - discount - coupon_discount)
-    # This matches the cart calculation: grand_total = subtotal_amount + delivery_charge - coupon_amount - discount_amount
-    total_amount = subtotal + delivery_charge - discount - coupon_discount
+    # Calculate total amount
+    # Note: subtotal already uses SpecialPrice (product discount is already applied)
+    # So we only subtract coupon_discount, not discount
+    # This matches the corrected cart calculation: grand_total = subtotal_amount + delivery_charge - coupon_amount
+    total_amount = subtotal + delivery_charge - coupon_discount
     # Ensure total is not negative
     total_amount = max(0.0, total_amount)
     

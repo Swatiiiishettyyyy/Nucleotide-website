@@ -12,7 +12,7 @@ class Address(Base):
 
     address_label = Column(String(50), nullable=False)
     street_address = Column(String(255), nullable=False)
-    landmark = Column(String(255), nullable=False)
+    landmark = Column(String(255), nullable=True)
     locality = Column(String(150), nullable=False)
     city = Column(String(100), nullable=False)
     state = Column(String(100), nullable=False)

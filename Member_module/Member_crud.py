@@ -1,7 +1,7 @@
-from .Member_model import Member, RelationType
+from .Member_model import Member
 from .Member_audit_model import MemberAuditLog
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from fastapi import HTTPException
 from typing import Any, Dict, Optional, Union
 
@@ -10,12 +10,28 @@ from Product_module.category_service import resolve_category
 _VALID_PLAN_TYPES = {"single", "couple", "family"}
 
 
-def _normalize_relation(relation: Optional[str]) -> RelationType:
-    """Convert incoming relation string to RelationType enum."""
-    if not relation:
-        return RelationType.OTHER
-    relation_key = relation.strip().upper()
-    return RelationType.__members__.get(relation_key, RelationType.OTHER)
+def _normalize_relation(relation: Optional[str]) -> str:
+    """Convert incoming relation string to normalized string. Accepts any string value.
+    No default value - relation must be provided by user.
+    Stores exactly what user enters (trimmed), never stores empty string or whitespace.
+    """
+    # Ensure relation is provided
+    if relation is None:
+        raise ValueError("Relation is required and cannot be empty")
+    
+    # Convert to string (in case it's not already)
+    relation_str = str(relation)
+    
+    # Trim the relation string
+    relation_trimmed = relation_str.strip()
+    
+    # Ensure it's not empty after trimming (catches empty strings and whitespace-only strings)
+    if not relation_trimmed:
+        raise ValueError("Relation cannot be empty or whitespace only")
+    
+    # Return the trimmed value - store exactly what user enters
+    # No enum restriction - user can enter any relation string
+    return relation_trimmed
 
 
 def _normalize_plan_type(plan_type: Optional[str]) -> Optional[str]:
@@ -80,8 +96,11 @@ def save_member(
     correlation_id: Optional[str] = None
 ):
     """
-    Save or update member.
+    Save or update member (create if member_id=0, update if member_id>0).
+    For new members: category_id and plan_type are required.
+    For existing members: category_id and plan_type are ignored (preserved from existing member).
     Validates that member is not already in a conflicting plan type.
+    Prevents editing if member is associated with cart items.
     """
     plan_type_normalized = _normalize_plan_type(plan_type)
     family_status: Optional[Dict[str, Any]] = None
@@ -93,7 +112,45 @@ def save_member(
         Member.associated_category == category_name
     )
 
-    relation_enum = _normalize_relation(req.relation)
+    # Get relation value from request - it's already validated and trimmed by schema validator
+    # The validator ensures it's not empty and trims it, so we can use it directly
+    # Store exactly what user enters (already trimmed by validator)
+    
+    # Get relation value directly from request object
+    # The Pydantic validator has already validated and trimmed it
+    if not hasattr(req, 'relation'):
+        raise ValueError("Relation field is missing from request object")
+    
+    # Get the relation value - validator should have already validated and trimmed it
+    relation_value = req.relation
+    
+    if relation_value is None:
+        raise ValueError("Relation is required and cannot be None")
+    
+    # Convert to string and ensure it's trimmed (validator should have done this)
+    relation_to_store = str(relation_value).strip()
+    
+    # CRITICAL: Final safety check - ensure relation is not empty
+    # This should never happen if validator is working, but we check anyway
+    if not relation_to_store:
+        # Get additional debug info
+        debug_info = f"req.relation={repr(req.relation)}, type={type(req.relation)}"
+        try:
+            if hasattr(req, 'dict'):
+                debug_info += f", dict={req.dict()}"
+        except:
+            pass
+        
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Relation cannot be empty. The validator should have prevented this. "
+                f"Debug info: {debug_info}. "
+                f"Please ensure you are sending a non-empty relation value in your request."
+            )
+        )
+    
+    # Store the relation exactly as entered (trimmed) - no enum restrictions, accepts any string value
 
     # Check for duplicate member in same category
     if req.member_id == 0:  # New member
@@ -102,7 +159,7 @@ def save_member(
         existing = db.query(Member).filter(
             Member.user_id == user.id,
             Member.name == req.name,
-            Member.relation == relation_enum,
+            Member.relation == relation_to_store,
             category_filter
         ).first()
         
@@ -205,10 +262,20 @@ def save_member(
     
     if req.member_id == 0:
         # Create new member
+        # CRITICAL: Ensure relation_to_store is not empty before creating member
+        if not relation_to_store or len(relation_to_store.strip()) == 0:
+            raise ValueError(
+                f"Cannot create member with empty relation. "
+                f"relation_to_store: '{relation_to_store}', "
+                f"req.relation: '{req.relation}'"
+            )
+        
+        # Create member with the relation value
+        # IMPORTANT: relation_to_store has been validated and is guaranteed to be non-empty
         member = Member(
             user_id=user.id,
             name=req.name,
-            relation=relation_enum,
+            relation=relation_to_store,  # Store the validated and trimmed relation value
             age=req.age,
             gender=req.gender,
             dob=req.dob,
@@ -218,8 +285,125 @@ def save_member(
             associated_plan_type=plan_type_normalized
         )
         db.add(member)
+        db.flush()  # Flush to get the ID without committing
+        
+        # CRITICAL: Verify the relation was set correctly BEFORE commit
+        if not member.relation or str(member.relation).strip() == "":
+            db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"CRITICAL ERROR: Relation was set to empty value in member object! "
+                    f"Expected: '{relation_to_store}', Got: '{member.relation}'. "
+                    f"This should never happen. Please check the database schema and constraints."
+                )
+            )
+        
         db.commit()
         db.refresh(member)
+        
+        # WORKAROUND: If relation is empty after commit, explicitly update it
+        # This handles cases where database triggers or defaults might be interfering
+        if not member.relation or str(member.relation).strip() == "":
+            # Check the database column type to understand the issue
+            column_info = None
+            is_enum = False
+            try:
+                # Try to get column information (MySQL/PostgreSQL)
+                if hasattr(db.bind, 'url') and 'mysql' in str(db.bind.url):
+                    column_info = db.execute(
+                        text("""
+                            SELECT COLUMN_TYPE, COLUMN_DEFAULT, IS_NULLABLE 
+                            FROM INFORMATION_SCHEMA.COLUMNS 
+                            WHERE TABLE_SCHEMA = DATABASE() 
+                            AND TABLE_NAME = 'members' 
+                            AND COLUMN_NAME = 'relation'
+                        """)
+                    ).fetchone()
+                    if column_info and 'enum' in str(column_info[0]).lower():
+                        is_enum = True
+                        # Try to fix it by altering the column to VARCHAR
+                        try:
+                            db.execute(text("ALTER TABLE members MODIFY COLUMN relation VARCHAR(50) NOT NULL"))
+                            db.commit()
+                        except Exception as alter_error:
+                            pass  # If alter fails, continue with update attempt
+                elif hasattr(db.bind, 'url') and 'postgresql' in str(db.bind.url):
+                    column_info = db.execute(
+                        text("""
+                            SELECT data_type, column_default, is_nullable 
+                            FROM information_schema.columns 
+                            WHERE table_name = 'members' 
+                            AND column_name = 'relation'
+                        """)
+                    ).fetchone()
+                    if column_info and 'enum' in str(column_info[0]).lower():
+                        is_enum = True
+                        # Try to fix it by altering the column to VARCHAR
+                        try:
+                            db.execute(text("ALTER TABLE members ALTER COLUMN relation TYPE VARCHAR(50)"))
+                            db.execute(text("ALTER TABLE members ALTER COLUMN relation SET NOT NULL"))
+                            db.commit()
+                        except Exception as alter_error:
+                            pass  # If alter fails, continue with update attempt
+            except Exception as e:
+                pass  # Ignore errors in diagnostic query
+            
+            # Try direct UPDATE with the value
+            db.execute(
+                text("UPDATE members SET relation = :relation WHERE id = :id"),
+                {"relation": relation_to_store, "id": member.id}
+            )
+            db.commit()
+            
+            # Verify by querying directly from database
+            db_result = db.execute(
+                text("SELECT relation FROM members WHERE id = :id"),
+                {"id": member.id}
+            ).fetchone()
+            
+            # Refresh the member object
+            db.refresh(member)
+            
+            # Check both the direct query and the refreshed object
+            db_value = db_result[0] if db_result and db_result[0] else None
+            obj_value = member.relation if member.relation else None
+            
+            if (not db_value or str(db_value).strip() == "") and (not obj_value or str(obj_value).strip() == ""):
+                # Get more diagnostic info
+                db_type = "Unknown"
+                if hasattr(db.bind, 'url'):
+                    db_type = str(db.bind.url).split('://')[0] if '://' in str(db.bind.url) else str(db.bind.url)
+                
+                error_msg = (
+                    f"CRITICAL ERROR: Unable to store relation value in database!\n"
+                    f"Expected: '{relation_to_store}'\n"
+                    f"Database value: '{db_value}'\n"
+                    f"Object value: '{obj_value}'\n"
+                    f"Database type: {db_type}\n"
+                )
+                
+                if column_info:
+                    error_msg += f"Column definition: {column_info}\n"
+                    if is_enum:
+                        error_msg += f"WARNING: Column is defined as ENUM type!\n"
+                
+                error_msg += (
+                    f"\nThis indicates a database-level issue. The 'relation' column may be defined as ENUM.\n\n"
+                    f"SOLUTION: Run this SQL to fix the column:\n"
+                )
+                
+                if 'mysql' in db_type.lower():
+                    error_msg += f"ALTER TABLE members MODIFY COLUMN relation VARCHAR(50) NOT NULL;\n"
+                elif 'postgresql' in db_type.lower():
+                    error_msg += (
+                        f"ALTER TABLE members ALTER COLUMN relation TYPE VARCHAR(50);\n"
+                        f"ALTER TABLE members ALTER COLUMN relation SET NOT NULL;\n"
+                    )
+                else:
+                    error_msg += f"ALTER TABLE members ALTER COLUMN relation VARCHAR(50) NOT NULL;\n"
+                
+                raise HTTPException(status_code=500, detail=error_msg)
         
         # Audit log for creation
         new_data = {
@@ -256,7 +440,7 @@ def save_member(
         old_data = {
             "member_id": member.id,
             "name": member.name,
-            "relation": str(member.relation.value) if hasattr(member.relation, 'value') else str(member.relation),
+            "relation": str(member.relation),  # Now a string, no need for .value check
             "age": member.age,
             "gender": member.gender,
             "dob": member.dob.isoformat() if member.dob else None,
@@ -265,35 +449,151 @@ def save_member(
             "plan_type": member.associated_plan_type
         }
         
+        # Update member fields (category and plan_type are preserved from existing member)
+        # Ensure relation_to_store is not empty before updating
+        if not relation_to_store or len(relation_to_store.strip()) == 0:
+            raise ValueError(f"Cannot update member with empty relation. Received: '{req.relation}'")
+        
         member.name = req.name
-        member.relation = relation_enum
+        member.relation = relation_to_store  # Store the validated and trimmed relation value
         member.age = req.age
         member.gender = req.gender
         member.dob = req.dob
         member.mobile = req.mobile
-        # Don't update category/plan_type on edit (to maintain integrity)
-        db.commit()
+        # Note: category_id and plan_type are not updated on edit to maintain data integrity
         
-        # Audit log for update
+        # Flush changes to database before commit to ensure they're tracked
+        db.flush()
+        db.commit()
+        db.refresh(member)  # Refresh to get latest values from database
+        
+        # WORKAROUND: If relation is empty after commit, explicitly update it
+        # This handles cases where database triggers or defaults might be interfering
+        if not member.relation or str(member.relation).strip() == "":
+            # Check the database column type to understand the issue
+            column_info = None
+            is_enum = False
+            try:
+                # Try to get column information (MySQL/PostgreSQL)
+                if hasattr(db.bind, 'url') and 'mysql' in str(db.bind.url):
+                    column_info = db.execute(
+                        text("""
+                            SELECT COLUMN_TYPE, COLUMN_DEFAULT, IS_NULLABLE 
+                            FROM INFORMATION_SCHEMA.COLUMNS 
+                            WHERE TABLE_SCHEMA = DATABASE() 
+                            AND TABLE_NAME = 'members' 
+                            AND COLUMN_NAME = 'relation'
+                        """)
+                    ).fetchone()
+                    if column_info and 'enum' in str(column_info[0]).lower():
+                        is_enum = True
+                        # Try to fix it by altering the column to VARCHAR
+                        try:
+                            db.execute(text("ALTER TABLE members MODIFY COLUMN relation VARCHAR(50) NOT NULL"))
+                            db.commit()
+                        except Exception as alter_error:
+                            pass  # If alter fails, continue with update attempt
+                elif hasattr(db.bind, 'url') and 'postgresql' in str(db.bind.url):
+                    column_info = db.execute(
+                        text("""
+                            SELECT data_type, column_default, is_nullable 
+                            FROM information_schema.columns 
+                            WHERE table_name = 'members' 
+                            AND column_name = 'relation'
+                        """)
+                    ).fetchone()
+                    if column_info and 'enum' in str(column_info[0]).lower():
+                        is_enum = True
+                        # Try to fix it by altering the column to VARCHAR
+                        try:
+                            db.execute(text("ALTER TABLE members ALTER COLUMN relation TYPE VARCHAR(50)"))
+                            db.execute(text("ALTER TABLE members ALTER COLUMN relation SET NOT NULL"))
+                            db.commit()
+                        except Exception as alter_error:
+                            pass  # If alter fails, continue with update attempt
+            except Exception as e:
+                pass  # Ignore errors in diagnostic query
+            
+            # Try direct UPDATE with the value
+            db.execute(
+                text("UPDATE members SET relation = :relation WHERE id = :id"),
+                {"relation": relation_to_store, "id": member.id}
+            )
+            db.commit()
+            
+            # Verify by querying directly from database
+            db_result = db.execute(
+                text("SELECT relation FROM members WHERE id = :id"),
+                {"id": member.id}
+            ).fetchone()
+            
+            # Refresh the member object
+            db.refresh(member)
+            
+            # Check both the direct query and the refreshed object
+            db_value = db_result[0] if db_result and db_result[0] else None
+            obj_value = member.relation if member.relation else None
+            
+            if (not db_value or str(db_value).strip() == "") and (not obj_value or str(obj_value).strip() == ""):
+                # Get more diagnostic info
+                db_type = "Unknown"
+                if hasattr(db.bind, 'url'):
+                    db_type = str(db.bind.url).split('://')[0] if '://' in str(db.bind.url) else str(db.bind.url)
+                
+                error_msg = (
+                    f"CRITICAL ERROR: Unable to update relation value in database!\n"
+                    f"Expected: '{relation_to_store}'\n"
+                    f"Database value: '{db_value}'\n"
+                    f"Object value: '{obj_value}'\n"
+                    f"Database type: {db_type}\n"
+                )
+                
+                if column_info:
+                    error_msg += f"Column definition: {column_info}\n"
+                    if is_enum:
+                        error_msg += f"WARNING: Column is defined as ENUM type!\n"
+                
+                error_msg += (
+                    f"\nThis indicates a database-level issue. The 'relation' column may be defined as ENUM.\n\n"
+                    f"SOLUTION: Run this SQL to fix the column:\n"
+                )
+                
+                if 'mysql' in db_type.lower():
+                    error_msg += f"ALTER TABLE members MODIFY COLUMN relation VARCHAR(50) NOT NULL;\n"
+                elif 'postgresql' in db_type.lower():
+                    error_msg += (
+                        f"ALTER TABLE members ALTER COLUMN relation TYPE VARCHAR(50);\n"
+                        f"ALTER TABLE members ALTER COLUMN relation SET NOT NULL;\n"
+                    )
+                else:
+                    error_msg += f"ALTER TABLE members ALTER COLUMN relation VARCHAR(50) NOT NULL;\n"
+                
+                raise HTTPException(status_code=500, detail=error_msg)
+        
+        # Audit log for update - use actual stored values from database
+        # Refresh member to ensure we have the latest values after any workarounds
+        db.refresh(member)
+        
         new_data = {
             "member_id": member.id,
-            "name": req.name,
-            "relation": req.relation,
-            "age": req.age,
-            "gender": req.gender,
-            "dob": req.dob.isoformat() if req.dob else None,
-            "mobile": req.mobile,
+            "name": member.name,  # Use actual stored value
+            "relation": str(member.relation),  # Use actual stored value (after any workarounds)
+            "age": member.age,  # Use actual stored value
+            "gender": member.gender,  # Use actual stored value
+            "dob": member.dob.isoformat() if member.dob else None,  # Use actual stored value
+            "mobile": member.mobile,  # Use actual stored value
             "category": member.associated_category,
             "plan_type": member.associated_plan_type
         }
+        
         audit = MemberAuditLog(
             user_id=user.id,
             member_id=member.id,
-            member_name=req.name,
-            member_identifier=f"{req.name} ({req.mobile})",
-            event_type="UPDATED",
-            old_data=old_data,
-            new_data=new_data,
+            member_name=member.name,  # Use actual stored value
+            member_identifier=f"{member.name} ({member.mobile})",  # Use actual stored values
+            event_type="UPDATED",  # Clear status indicating this is an edit
+            old_data=old_data,  # Previous values before update
+            new_data=new_data,  # New values after update - shows clear changes
             ip_address=ip_address,
             user_agent=user_agent,
             correlation_id=correlation_id

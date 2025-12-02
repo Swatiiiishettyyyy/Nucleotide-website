@@ -12,13 +12,12 @@ from .Address_schema import (
     AddressListResponse,
     AddressRequest,
     AddressResponse,
-    PincodeLookupResponse,
+    EditAddressRequest,
 )
-from .pincode_service import get_pincode_details
 
 router = APIRouter(prefix="/address", tags=["Address"])
 
-# Save or update address
+# Create new address
 @router.post("/save", response_model=AddressResponse)
 def save_address_api(
     req: AddressRequest,
@@ -26,6 +25,12 @@ def save_address_api(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
+    """
+    Create a new address (requires authentication).
+    Use address_id = 0 for new addresses.
+    City name is validated against Locations.xlsx file.
+    No pincode lookup or autofill - all fields must be provided manually.
+    """
     # Generate correlation ID for request tracing
     correlation_id = str(uuid.uuid4())
     address = save_address(db, user, req, request=request, correlation_id=correlation_id)
@@ -35,6 +40,86 @@ def save_address_api(
     return {
         "status": "success",
         "message": "Address saved successfully.",
+        "data": {
+            "address_id": address.id,
+            "user_id": user.id,
+            # Removed: first_name, last_name, email, mobile
+            "address_label": address.address_label,
+            "street_address": address.street_address,
+            "landmark": address.landmark,
+            "locality": address.locality,
+            "city": address.city,
+            "state": address.state,
+            "postal_code": address.postal_code,
+            "country": address.country,
+            "save_for_future": address.save_for_future
+        }
+    }
+
+# Update existing address
+@router.put("/edit/{address_id}", response_model=AddressResponse)
+def edit_address_api(
+    address_id: int,
+    req: EditAddressRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    """
+    Update an existing address (requires authentication).
+    
+    This endpoint autofills existing address details when address_id is provided.
+    You can send only the fields you want to change - missing fields will be autofilled from existing address.
+    
+    Workflow:
+    1. Send PUT request with address_id in path and only fields you want to change in body
+    2. Endpoint autofills missing fields from existing address
+    3. City name is validated against Locations.xlsx file before saving
+    4. Cannot edit address if it's associated with cart items.
+    
+    Example: To change only city, send: {"city": "New City"}
+    All other fields will be autofilled from existing address.
+    """
+    from .Address_model import Address
+    
+    # Fetch existing address for autofill
+    existing_address = db.query(Address).filter(
+        Address.id == address_id,
+        Address.user_id == user.id
+    ).first()
+    
+    if not existing_address:
+        raise HTTPException(status_code=404, detail="Address not found or does not belong to you")
+    
+    # Autofill: Merge existing address data with request data (request takes precedence)
+    # Convert request to dict, keeping only non-None values
+    req_dict = req.dict(exclude_unset=True, exclude_none=True)
+    
+    # Create complete AddressRequest with autofilled data
+    complete_req = AddressRequest(
+        address_id=address_id,
+        postal_code=req_dict.get('postal_code', existing_address.postal_code),
+        address_label=req_dict.get('address_label', existing_address.address_label),
+        street_address=req_dict.get('street_address', existing_address.street_address),
+        landmark=req_dict.get('landmark', existing_address.landmark or ''),
+        locality=req_dict.get('locality', existing_address.locality or ''),
+        city=req_dict.get('city', existing_address.city),
+        state=req_dict.get('state', existing_address.state),
+        country=req_dict.get('country', existing_address.country or 'India'),
+        save_for_future=req_dict.get('save_for_future', existing_address.save_for_future if existing_address.save_for_future is not None else True)
+    )
+    
+    # Generate correlation ID for request tracing
+    correlation_id = str(uuid.uuid4())
+    
+    # Save address (this will validate city name against excel sheet and update the address)
+    address = save_address(db, user, complete_req, request=request, correlation_id=correlation_id)
+    if not address:
+        raise HTTPException(status_code=404, detail="Address not found or does not belong to you")
+
+    return {
+        "status": "success",
+        "message": "Address updated successfully.",
         "data": {
             "address_id": address.id,
             "user_id": user.id,
@@ -78,31 +163,6 @@ def get_address_list(
         "status": "success",
         "message": "Address list fetched successfully.",
         "data": data
-    }
-
-
-@router.get("/pincode/{postal_code}", response_model=PincodeLookupResponse)
-def lookup_pincode(postal_code: str):
-    """Fetch city/state/locality options for a pincode."""
-    sanitized = postal_code.strip().replace(" ", "")
-    if len(sanitized) != 6 or not sanitized.isdigit():
-        raise HTTPException(status_code=400, detail="Postal code must be 6 digits")
-
-    city, state, localities = get_pincode_details(sanitized)
-    if not city or not state:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Could not find city/state for pincode {sanitized}.",
-        )
-
-    return {
-        "status": "success",
-        "message": "Pincode details fetched successfully.",
-        "data": {
-            "city": city,
-            "state": state,
-            "localities": localities,
-        },
     }
 
 # Delete address

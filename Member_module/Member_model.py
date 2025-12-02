@@ -1,17 +1,7 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, func, Enum, Date, Integer as IntCol
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, func, Date, Integer as IntCol
 from sqlalchemy.orm import relationship
 from database import Base
 from Product_module.Product_model import Category
-import enum
-
-
-class RelationType(str, enum.Enum):
-    SELF = "self"
-    SPOUSE = "spouse"
-    CHILD = "child"
-    PARENT = "parent"
-    SIBLING = "sibling"
-    OTHER = "other"
 
 
 class Member(Base):
@@ -21,7 +11,7 @@ class Member(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
     name = Column(String(100), nullable=False)
-    relation = Column(Enum(RelationType), nullable=False, default=RelationType.SELF)
+    relation = Column(String(50), nullable=False)  # Accepts any relation string value - no enum restriction
     
     # Required fields: age, gender, dob, mobile
     age = Column(IntCol, nullable=False)

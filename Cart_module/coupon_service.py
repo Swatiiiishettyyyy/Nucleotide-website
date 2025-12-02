@@ -84,7 +84,7 @@ def validate_and_calculate_discount(
     # Check minimum order amount
     if subtotal_amount < coupon.min_order_amount:
         logger.warning(f"Coupon '{coupon.coupon_code}' requires minimum order of ₹{coupon.min_order_amount}, but subtotal is ₹{subtotal_amount}")
-        return None, 0.0, f"Minimum order amount of ₹{coupon.min_order_amount} required. Your cart total is ₹{subtotal_amount}"
+        return None, 0.0, f"Minimum amount of ₹{coupon.min_order_amount} needed to apply this coupon. Your cart total is ₹{subtotal_amount}. Add items worth ₹{coupon.min_order_amount - subtotal_amount:.2f} more to apply this coupon."
     
     # Check total usage limit (max_uses is optional, not required)
     if coupon.max_uses is not None:

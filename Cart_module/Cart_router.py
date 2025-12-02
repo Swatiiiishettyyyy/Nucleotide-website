@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from typing import Optional, List
@@ -514,7 +514,7 @@ def view_cart(
         }
 
     subtotal_amount = 0
-    delivery_charge = 50
+    delivery_charge = 0
     cart_item_details = []
     
     # Group items by group_id to show couple/family products together
@@ -541,7 +541,7 @@ def view_cart(
             member_details = {
                 "member_id": member.id if member else i.member_id,
                 "name": member.name if member else "Unknown",
-                "relation": member.relation.value if member and hasattr(member.relation, 'value') else (str(member.relation) if member else None),
+                "relation": str(member.relation) if member else None,  # Now a string, no need for .value check
                 "age": member.age if member else None,
                 "gender": member.gender if member else None,
                 "dob": member.dob.isoformat() if member and member.dob else None,
@@ -623,7 +623,7 @@ def view_cart(
             coupon_code = applied_coupon.coupon_code
             
             # Only remove if coupon is truly invalid (expired, deleted, inactive)
-            if error_message and any(keyword in error_message for keyword in ["expired", "not active", "Invalid coupon code"]):
+            if error_message and any(keyword in error_message.lower() for keyword in ["expired", "has expired", "not active", "invalid coupon code"]):
                 logger.warning(f"Removing invalid coupon '{applied_coupon.coupon_code}'. Error: {error_message}")
                 remove_coupon_from_cart(db, current_user.id)
                 coupon_amount = 0.0
@@ -650,7 +650,9 @@ def view_cart(
     you_save = discount_amount + coupon_amount
     
     # Calculate grand total
-    grand_total = subtotal_amount + delivery_charge - coupon_amount - discount_amount
+    # Note: subtotal_amount already uses SpecialPrice (product discount is already applied)
+    # So we only subtract coupon_amount, not discount_amount
+    grand_total = subtotal_amount + delivery_charge - coupon_amount
     # Ensure grand total is not negative
     grand_total = max(0.0, grand_total)
 
@@ -722,7 +724,7 @@ def apply_coupon(
                 detail="Cart is empty. Add items to cart before applying coupon."
             )
         
-        # Calculate subtotal
+        # Calculate subtotal and product discount
         subtotal_amount = 0.0
         grouped_items = {}
         for item in cart_items:
@@ -736,11 +738,22 @@ def apply_coupon(
             product = item.product
             subtotal_amount += item.quantity * product.SpecialPrice
         
+        # Calculate product discount (from product discounts - per product group, not per cart item row)
+        total_product_discount = 0.0
+        processed_groups = set()
+        for item in cart_items:
+            group_key = item.group_id or f"single_{item.id}"
+            if group_key not in processed_groups:
+                # Calculate discount once per product group
+                discount_per_item = item.product.Price - item.product.SpecialPrice
+                total_product_discount += discount_per_item * item.quantity
+                processed_groups.add(group_key)
+        
         # Remove any previously applied coupon
         remove_coupon_from_cart(db, current_user.id)
         
         # Apply new coupon (tracked in cart_coupons table, not in cart_items)
-        success, discount_amount, message, coupon = apply_coupon_to_cart(
+        success, coupon_discount_amount, message, coupon = apply_coupon_to_cart(
             db, current_user.id, request_data.coupon_code, subtotal_amount
         )
         
@@ -749,10 +762,15 @@ def apply_coupon(
         
         # Coupon is now tracked in cart_coupons table, no need to update cart_items
         
-        # Calculate delivery charge and grand total
-        delivery_charge = 50.0
-        grand_total = subtotal_amount + delivery_charge - discount_amount
+        # Calculate delivery charge and grand total (matching cart view calculation)
+        # Note: subtotal_amount already uses SpecialPrice (product discount is already applied)
+        # So we only subtract coupon_discount_amount, not total_product_discount
+        delivery_charge = 0.0
+        grand_total = subtotal_amount + delivery_charge - coupon_discount_amount
         grand_total = max(0.0, grand_total)
+        
+        # Calculate total savings
+        you_save = total_product_discount + coupon_discount_amount
         
         # Audit log
         ip, user_agent = get_client_info(request)
@@ -764,7 +782,8 @@ def apply_coupon(
             entity_type="CART",
             details={
                 "coupon_code": coupon.coupon_code,
-                "discount_amount": discount_amount,
+                "coupon_discount_amount": coupon_discount_amount,
+                "product_discount_amount": total_product_discount,
                 "subtotal": subtotal_amount,
                 "grand_total": grand_total
             },
@@ -782,8 +801,9 @@ def apply_coupon(
                 "coupon_description": coupon.description,
                 "discount_type": coupon.discount_type.value,
                 "discount_value": coupon.discount_value,
-                "discount_amount": discount_amount,
-                "you_save": discount_amount,
+                "coupon_discount_amount": coupon_discount_amount,  # Discount from coupon
+                "product_discount_amount": total_product_discount,  # Discount from product pricing
+                "you_save": you_save,  # Total savings (product discount + coupon discount)
                 "subtotal_amount": subtotal_amount,
                 "delivery_charge": delivery_charge,
                 "grand_total": grand_total
