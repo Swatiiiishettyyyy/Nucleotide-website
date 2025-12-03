@@ -18,7 +18,8 @@ from .Order_schema import (
     VerifyPaymentRequest,
     PaymentVerificationResponse,
     UpdateOrderStatusRequest,
-    OrderItemTrackingResponse
+    OrderItemTrackingResponse,
+    OrderTrackingResponse
 )
 from .Order_crud import (
     create_order_from_cart,
@@ -431,6 +432,175 @@ def get_orders(
     return result
 
 
+@router.get("/tracking", response_model=List[OrderTrackingResponse])
+def get_all_orders_tracking(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get tracking information for all orders of the current user"""
+    orders = get_user_orders(db, current_user.id)
+    
+    result = []
+    for order in orders:
+        # Get order-level status history (where order_item_id is NULL)
+        order_status_history = []
+        for hist in order.status_history:
+            if hist.order_item_id is None:
+                order_status_history.append({
+                    "status": hist.status.value,
+                    "previous_status": hist.previous_status.value if hist.previous_status else None,
+                    "notes": hist.notes,
+                    "changed_by": hist.changed_by,
+                    "created_at": hist.created_at.isoformat() if hist.created_at else None,
+                    "order_item_id": None
+                })
+        
+        # Sort order-level status history by created_at (most recent first)
+        order_status_history.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+        
+        # Group order items by address
+        address_groups = defaultdict(list)
+        for item in order.items:
+            # Use address_id from snapshot or item
+            snapshot = item.snapshot if item.snapshot else None
+            if snapshot and snapshot.address_data:
+                address_id = snapshot.address_data.get("id", item.address_id)
+            else:
+                address_id = item.address_id
+            
+            # Use a key that includes None handling
+            address_key = address_id if address_id is not None else "no_address"
+            address_groups[address_key].append(item)
+        
+        # Build address tracking data
+        address_tracking = []
+        for address_key, items in address_groups.items():
+            if not items:
+                continue
+            
+            # Get address details from first item's snapshot or original
+            first_item = items[0]
+            snapshot = first_item.snapshot if first_item.snapshot else None
+            
+            if snapshot and snapshot.address_data:
+                address_data = snapshot.address_data
+                address_id = address_data.get("id", first_item.address_id)
+                address_label = address_data.get("address_label")
+                address_details = {
+                    "address_label": address_data.get("address_label"),
+                    "street_address": address_data.get("street_address"),
+                    "landmark": address_data.get("landmark"),
+                    "locality": address_data.get("locality"),
+                    "city": address_data.get("city"),
+                    "state": address_data.get("state"),
+                    "postal_code": address_data.get("postal_code"),
+                    "country": address_data.get("country")
+                }
+            else:
+                # Fallback to original address
+                address_obj = first_item.address
+                address_id = address_obj.id if address_obj else first_item.address_id
+                address_label = address_obj.address_label if address_obj else None
+                address_details = {
+                    "address_label": address_obj.address_label if address_obj else None,
+                    "street_address": address_obj.street_address if address_obj else None,
+                    "landmark": address_obj.landmark if address_obj else None,
+                    "locality": address_obj.locality if address_obj else None,
+                    "city": address_obj.city if address_obj else None,
+                    "state": address_obj.state if address_obj else None,
+                    "postal_code": address_obj.postal_code if address_obj else None,
+                    "country": address_obj.country if address_obj else None
+                }
+            
+            # Get members at this address
+            members = []
+            member_ids_seen = set()
+            for item in items:
+                snapshot = item.snapshot if item.snapshot else None
+                
+                if snapshot and snapshot.member_data:
+                    member_data = snapshot.member_data
+                    member_id = member_data.get("id", item.member_id)
+                else:
+                    member_obj = item.member
+                    member_id = member_obj.id if member_obj else item.member_id
+                
+                # Avoid duplicate members
+                if member_id and member_id not in member_ids_seen:
+                    member_ids_seen.add(member_id)
+                    
+                    if snapshot and snapshot.member_data:
+                        member_data = snapshot.member_data
+                        member = {
+                            "member_id": member_data.get("id", item.member_id),
+                            "name": member_data.get("name", "Unknown"),
+                            "relation": member_data.get("relation"),
+                            "age": member_data.get("age"),
+                            "gender": member_data.get("gender"),
+                            "dob": member_data.get("dob"),
+                            "mobile": member_data.get("mobile")
+                        }
+                    else:
+                        member_obj = item.member
+                        member = {
+                            "member_id": member_obj.id if member_obj else item.member_id,
+                            "name": member_obj.name if member_obj else "Unknown",
+                            "relation": member_obj.relation.value if member_obj and hasattr(member_obj.relation, 'value') else (str(member_obj.relation) if member_obj else None),
+                            "age": member_obj.age if member_obj else None,
+                            "gender": member_obj.gender if member_obj else None,
+                            "dob": member_obj.dob.isoformat() if member_obj and member_obj.dob else None,
+                            "mobile": member_obj.mobile if member_obj else None
+                        }
+                    members.append(member)
+            
+            # Get current status (most recent status among items at this address)
+            # Find the most recent status update among items
+            current_status = items[0].order_status.value if hasattr(items[0].order_status, 'value') else str(items[0].order_status)
+            most_recent_update = items[0].status_updated_at
+            
+            for item in items:
+                if item.status_updated_at and (most_recent_update is None or item.status_updated_at > most_recent_update):
+                    most_recent_update = item.status_updated_at
+                    current_status = item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status)
+            
+            # Get status history for items at this address
+            item_status_history = []
+            item_ids = [item.id for item in items]
+            for hist in order.status_history:
+                if hist.order_item_id in item_ids:
+                    item_status_history.append({
+                        "status": hist.status.value,
+                        "previous_status": hist.previous_status.value if hist.previous_status else None,
+                        "notes": hist.notes,
+                        "changed_by": hist.changed_by,
+                        "created_at": hist.created_at.isoformat() if hist.created_at else None,
+                        "order_item_id": hist.order_item_id
+                    })
+            
+            # Sort status history by created_at (most recent first)
+            item_status_history.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+            
+            address_tracking.append({
+                "address_id": address_id,
+                "address_label": address_label,
+                "address_details": address_details,
+                "members": members,
+                "current_status": current_status,
+                "status_history": item_status_history
+            })
+        
+        result.append({
+            "order_id": order.id,
+            "order_number": order.order_number,
+            "current_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
+            "status_history": order_status_history,
+            "address_tracking": address_tracking
+        })
+    
+    return result
+
+
 @router.get("/{order_id}", response_model=OrderResponse)
 def get_order(
     order_id: int,
@@ -577,6 +747,183 @@ def get_order(
         "razorpay_order_id": order.razorpay_order_id,
         "created_at": order.created_at,
         "items": order_items
+    }
+
+
+@router.get("/{order_id}/tracking", response_model=OrderTrackingResponse)
+def get_order_tracking(
+    order_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get order tracking information grouped by address.
+    Returns overall order status, order-level status history, and per-address tracking details.
+    """
+    from .Order_model import OrderItem
+    
+    # Verify order exists and belongs to user
+    order = get_order_by_id(db, order_id, user_id=current_user.id)
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Order not found"
+        )
+    
+    # Get order-level status history (where order_item_id is NULL)
+    order_status_history = []
+    for hist in order.status_history:
+        if hist.order_item_id is None:
+            order_status_history.append({
+                "status": hist.status.value,
+                "previous_status": hist.previous_status.value if hist.previous_status else None,
+                "notes": hist.notes,
+                "changed_by": hist.changed_by,
+                "created_at": hist.created_at.isoformat() if hist.created_at else None,
+                "order_item_id": None
+            })
+    
+    # Sort order-level status history by created_at (most recent first)
+    order_status_history.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    
+    # Group order items by address
+    address_groups = defaultdict(list)
+    for item in order.items:
+        # Use address_id from snapshot or item
+        snapshot = item.snapshot if item.snapshot else None
+        if snapshot and snapshot.address_data:
+            address_id = snapshot.address_data.get("id", item.address_id)
+        else:
+            address_id = item.address_id
+        
+        # Use a key that includes None handling
+        address_key = address_id if address_id is not None else "no_address"
+        address_groups[address_key].append(item)
+    
+    # Build address tracking data
+    address_tracking = []
+    for address_key, items in address_groups.items():
+        if not items:
+            continue
+        
+        # Get address details from first item's snapshot or original
+        first_item = items[0]
+        snapshot = first_item.snapshot if first_item.snapshot else None
+        
+        if snapshot and snapshot.address_data:
+            address_data = snapshot.address_data
+            address_id = address_data.get("id", first_item.address_id)
+            address_label = address_data.get("address_label")
+            address_details = {
+                "address_label": address_data.get("address_label"),
+                "street_address": address_data.get("street_address"),
+                "landmark": address_data.get("landmark"),
+                "locality": address_data.get("locality"),
+                "city": address_data.get("city"),
+                "state": address_data.get("state"),
+                "postal_code": address_data.get("postal_code"),
+                "country": address_data.get("country")
+            }
+        else:
+            # Fallback to original address
+            address_obj = first_item.address
+            address_id = address_obj.id if address_obj else first_item.address_id
+            address_label = address_obj.address_label if address_obj else None
+            address_details = {
+                "address_label": address_obj.address_label if address_obj else None,
+                "street_address": address_obj.street_address if address_obj else None,
+                "landmark": address_obj.landmark if address_obj else None,
+                "locality": address_obj.locality if address_obj else None,
+                "city": address_obj.city if address_obj else None,
+                "state": address_obj.state if address_obj else None,
+                "postal_code": address_obj.postal_code if address_obj else None,
+                "country": address_obj.country if address_obj else None
+            }
+        
+        # Get members at this address
+        members = []
+        member_ids_seen = set()
+        for item in items:
+            snapshot = item.snapshot if item.snapshot else None
+            
+            if snapshot and snapshot.member_data:
+                member_data = snapshot.member_data
+                member_id = member_data.get("id", item.member_id)
+            else:
+                member_obj = item.member
+                member_id = member_obj.id if member_obj else item.member_id
+            
+            # Avoid duplicate members
+            if member_id and member_id not in member_ids_seen:
+                member_ids_seen.add(member_id)
+                
+                if snapshot and snapshot.member_data:
+                    member_data = snapshot.member_data
+                    member = {
+                        "member_id": member_data.get("id", item.member_id),
+                        "name": member_data.get("name", "Unknown"),
+                        "relation": member_data.get("relation"),
+                        "age": member_data.get("age"),
+                        "gender": member_data.get("gender"),
+                        "dob": member_data.get("dob"),
+                        "mobile": member_data.get("mobile")
+                    }
+                else:
+                    member_obj = item.member
+                    member = {
+                        "member_id": member_obj.id if member_obj else item.member_id,
+                        "name": member_obj.name if member_obj else "Unknown",
+                        "relation": member_obj.relation.value if member_obj and hasattr(member_obj.relation, 'value') else (str(member_obj.relation) if member_obj else None),
+                        "age": member_obj.age if member_obj else None,
+                        "gender": member_obj.gender if member_obj else None,
+                        "dob": member_obj.dob.isoformat() if member_obj and member_obj.dob else None,
+                        "mobile": member_obj.mobile if member_obj else None
+                    }
+                members.append(member)
+        
+        # Get current status (most recent status among items at this address)
+        # Find the most recent status update among items
+        current_status = items[0].order_status.value if hasattr(items[0].order_status, 'value') else str(items[0].order_status)
+        most_recent_update = items[0].status_updated_at
+        
+        for item in items:
+            if item.status_updated_at and (most_recent_update is None or item.status_updated_at > most_recent_update):
+                most_recent_update = item.status_updated_at
+                current_status = item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status)
+        
+        # Get status history for items at this address
+        item_status_history = []
+        item_ids = [item.id for item in items]
+        for hist in order.status_history:
+            if hist.order_item_id in item_ids:
+                item_status_history.append({
+                    "status": hist.status.value,
+                    "previous_status": hist.previous_status.value if hist.previous_status else None,
+                    "notes": hist.notes,
+                    "changed_by": hist.changed_by,
+                    "created_at": hist.created_at.isoformat() if hist.created_at else None,
+                    "order_item_id": hist.order_item_id
+                })
+        
+        # Sort status history by created_at (most recent first)
+        item_status_history.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+        
+        address_tracking.append({
+            "address_id": address_id,
+            "address_label": address_label,
+            "address_details": address_details,
+            "members": members,
+            "current_status": current_status,
+            "status_history": item_status_history
+        })
+    
+    return {
+        "order_id": order.id,
+        "order_number": order.order_number,
+        "current_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
+        "status_history": order_status_history,
+        "address_tracking": address_tracking
     }
 
 
