@@ -600,8 +600,9 @@ def view_cart(
     
     if applied_coupon:
         # Re-validate and recalculate discount (cart total might have changed)
+        # Pass cart_items for product type validation (e.g., FAMILYCOUPLE30 coupon)
         coupon, calculated_discount, error_message = validate_and_calculate_discount(
-            db, applied_coupon.coupon_code, current_user.id, subtotal_amount
+            db, applied_coupon.coupon_code, current_user.id, subtotal_amount, cart_items
         )
         
         if coupon and not error_message:
@@ -753,8 +754,9 @@ def apply_coupon(
         remove_coupon_from_cart(db, current_user.id)
         
         # Apply new coupon (tracked in cart_coupons table, not in cart_items)
+        # Pass cart_items for product type validation (e.g., FAMILYCOUPLE30 coupon)
         success, coupon_discount_amount, message, coupon = apply_coupon_to_cart(
-            db, current_user.id, request_data.coupon_code, subtotal_amount
+            db, current_user.id, request_data.coupon_code, subtotal_amount, cart_items
         )
         
         if not success:

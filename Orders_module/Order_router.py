@@ -401,6 +401,11 @@ def get_orders(
             # Get unique address IDs
             unique_address_ids = list(set(address_ids))
             
+            # Calculate total_amount: price is per product group, not per member
+            # For couple/family products, there are multiple order items but price is calculated once per product
+            # This matches the cart calculation logic: quantity * unit_price (per product, not per member)
+            item_total_amount = first_item.quantity * first_item.unit_price
+            
             order_items.append({
                 "product_id": product_id,
                 "product_name": product_name,
@@ -408,7 +413,7 @@ def get_orders(
                 "address_ids": unique_address_ids,
                 "member_address_map": member_address_map,  # Full details with member-address mapping
                 "quantity": first_item.quantity,
-                "total_amount": sum(item.unit_price * item.quantity for item in items)
+                "total_amount": item_total_amount
             })
         
         result.append({
@@ -721,6 +726,11 @@ def get_order(
         # Get unique address IDs
         unique_address_ids = list(set(address_ids))
         
+        # Calculate total_amount: price is per product group, not per member
+        # For couple/family products, there are multiple order items but price is calculated once per product
+        # This matches the cart calculation logic: quantity * unit_price (per product, not per member)
+        item_total_amount = first_item.quantity * first_item.unit_price
+        
         order_items.append({
             "product_id": product_id,
             "product_name": product_name,
@@ -728,7 +738,7 @@ def get_order(
             "address_ids": unique_address_ids,
             "member_address_map": member_address_map,  # Full details with member-address mapping
             "quantity": first_item.quantity,
-            "total_amount": sum(item.unit_price * item.quantity for item in items)
+            "total_amount": item_total_amount
         })
     
     return {

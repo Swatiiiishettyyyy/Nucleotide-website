@@ -15,10 +15,18 @@ def validate_and_calculate_discount(
     db: Session,
     coupon_code: str,
     user_id: int,
-    subtotal_amount: float
+    subtotal_amount: float,
+    cart_items: Optional[list] = None
 ) -> Tuple[Optional[Coupon], float, str]:
     """
     Validate coupon and calculate discount amount.
+    
+    Args:
+        db: Database session
+        coupon_code: Coupon code to validate
+        user_id: User ID applying the coupon
+        subtotal_amount: Cart subtotal amount
+        cart_items: Optional list of cart items (for product type validation)
     
     Returns:
         Tuple of (Coupon object or None, discount_amount, error_message)
@@ -86,6 +94,55 @@ def validate_and_calculate_discount(
         logger.warning(f"Coupon '{coupon.coupon_code}' requires minimum order of ₹{coupon.min_order_amount}, but subtotal is ₹{subtotal_amount}")
         return None, 0.0, f"Minimum amount of ₹{coupon.min_order_amount} needed to apply this coupon. Your cart total is ₹{subtotal_amount}. Add items worth ₹{coupon.min_order_amount - subtotal_amount:.2f} more to apply this coupon."
     
+    # Special validation for FAMILYCOUPLE30 coupon: Check product types in cart
+    if normalized_code == "FAMILYCOUPLE30":
+        if not cart_items:
+            # If cart_items not provided, fetch them
+            from .Cart_model import CartItem
+            from sqlalchemy.orm import joinedload
+            cart_items = db.query(CartItem).options(
+                joinedload(CartItem.product)
+            ).filter(
+                CartItem.user_id == user_id
+            ).all()
+        
+        if not cart_items:
+            return None, 0.0, "Cart is empty. Add at least one Family plan and one Couple plan to use this coupon."
+        
+        # Group cart items by group_id to get unique products
+        from collections import defaultdict
+        grouped_items = defaultdict(list)
+        for item in cart_items:
+            group_key = item.group_id or f"single_{item.id}"
+            grouped_items[group_key].append(item)
+        
+        # Check for Family and Couple plan products
+        has_family_plan = False
+        has_couple_plan = False
+        
+        for group_key, items in grouped_items.items():
+            if items:
+                product = items[0].product
+                if product:
+                    # Get plan_type - handle both enum and string
+                    plan_type = product.plan_type
+                    if hasattr(plan_type, 'value'):
+                        plan_type = plan_type.value
+                    plan_type = str(plan_type).lower()
+                    
+                    if plan_type == "family":
+                        has_family_plan = True
+                    elif plan_type == "couple":
+                        has_couple_plan = True
+        
+        if not has_family_plan:
+            return None, 0.0, "This coupon requires at least one Family plan in your cart. Please add a Family plan product to use this coupon."
+        
+        if not has_couple_plan:
+            return None, 0.0, "This coupon requires at least one Couple plan in your cart. Please add a Couple plan product to use this coupon."
+        
+        logger.info(f"Coupon '{normalized_code}' validation passed: Family plan={has_family_plan}, Couple plan={has_couple_plan}")
+    
     # Check total usage limit (max_uses is optional, not required)
     if coupon.max_uses is not None:
         total_uses = db.query(func.count(CartCoupon.id)).filter(
@@ -121,17 +178,25 @@ def apply_coupon_to_cart(
     db: Session,
     user_id: int,
     coupon_code: str,
-    subtotal_amount: float
+    subtotal_amount: float,
+    cart_items: Optional[list] = None
 ) -> Tuple[bool, float, str, Optional[Coupon]]:
     """
     Apply coupon to cart and record the application.
     Updates existing CartCoupon record if one exists for this user, otherwise creates new one.
     
+    Args:
+        db: Database session
+        user_id: User ID applying the coupon
+        coupon_code: Coupon code to apply
+        subtotal_amount: Cart subtotal amount
+        cart_items: Optional list of cart items (for product type validation)
+    
     Returns:
         Tuple of (success, discount_amount, message, coupon_object)
     """
     coupon, discount_amount, error_message = validate_and_calculate_discount(
-        db, coupon_code, user_id, subtotal_amount
+        db, coupon_code, user_id, subtotal_amount, cart_items
     )
     
     if not coupon:

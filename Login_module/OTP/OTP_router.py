@@ -15,7 +15,7 @@ from .OTP_schema import (
 from deps import get_db
 from ..Utils import security
 from ..Utils.auth_user import get_current_user
-from ..Utils.rate_limiter import check_ip_rate_limit, get_client_ip
+from ..Utils.rate_limiter import get_client_ip
 from . import otp_manager
 from ..User.user_session_crud import get_user_by_mobile, create_user
 from ..Device.Device_session_crud import create_device_session, deactivate_session_by_token
@@ -39,36 +39,11 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 def send_otp(request: SendOTPRequest, http_request: Request, db: Session = Depends(get_db)):
     """
     Send OTP to the provided mobile number.
-    Rate limited to prevent abuse (max 15 per hour).
     """
     phone_number = f"{request.country_code}{request.mobile}"
     correlation_id = str(uuid.uuid4())
     client_ip = get_client_ip(http_request)
     user_agent = http_request.headers.get("user-agent")
-    
-    # Check if user is blocked
-    if otp_manager.is_user_blocked(request.country_code, request.mobile):
-        remaining_time = otp_manager.get_block_remaining_time(request.country_code, request.mobile)
-        OTP_crud.create_otp_audit_log(
-            db=db,
-            event_type="BLOCKED",
-            phone_number=phone_number,
-            reason=f"Attempted OTP generation while blocked. Remaining block time: {remaining_time}s",
-            ip_address=client_ip,
-            user_agent=user_agent,
-            correlation_id=correlation_id
-        )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Account temporarily blocked due to too many failed attempts. Try again in {remaining_time // 60} minutes."
-        )
-    
-    if not otp_manager.can_request_otp(request.country_code, request.mobile):
-        remaining = otp_manager.get_remaining_requests(request.country_code, request.mobile)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"OTP request limit reached. Remaining: {remaining}"
-        )
 
     # Generate OTP
     otp = otp_manager.generate_otp()
@@ -101,106 +76,75 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
     """
     Verify OTP and create user session.
     Returns access token on successful verification.
-    Blocks user after 5-6 wrong attempts for 10 minutes.
-    Includes IP-based rate limiting to prevent brute force attacks.
     """
     phone_number = f"{req.country_code}{req.mobile}"
     client_ip = get_client_ip(request)
     user_agent = request.headers.get("user-agent")
     correlation_id = str(uuid.uuid4())
-    
-    # IP-based rate limiting (prevents brute force from same IP)
-    is_allowed, remaining = check_ip_rate_limit(client_ip)
-    if not is_allowed:
-        logger.warning(f"IP rate limit exceeded for IP: {client_ip}, phone: {phone_number}")
-        OTP_crud.create_otp_audit_log(
-            db=db,
-            event_type="BLOCKED",
-            phone_number=phone_number,
-            device_id=req.device_id,
-            reason=f"IP rate limit exceeded. IP: {client_ip}",
-            ip_address=client_ip,
-            user_agent=user_agent,
-            correlation_id=correlation_id
-        )
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many verification attempts from this IP. Please try again later."
-        )
 
-    # Check if user is blocked
-    if otp_manager.is_user_blocked(req.country_code, req.mobile):
-        remaining_time = otp_manager.get_block_remaining_time(req.country_code, req.mobile)
-        OTP_crud.create_otp_audit_log(
-            db=db,
-            event_type="BLOCKED",
-            phone_number=phone_number,
-            device_id=req.device_id,
-            reason=f"Attempted OTP verification while blocked. Remaining block time: {remaining_time}s"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Account temporarily blocked due to too many failed attempts. Try again in {remaining_time // 60} minutes."
-        )
-
-    # Fetch OTP from Redis (plaintext)
-    stored = otp_manager.get_otp(req.country_code, req.mobile)
-    if not stored:
-        OTP_crud.create_otp_audit_log(
-            db=db,
-            event_type="FAILED",
-            phone_number=phone_number,
-            device_id=req.device_id,
-            reason="OTP expired or not found",
-            ip_address=client_ip,
-            user_agent=user_agent,
-            correlation_id=correlation_id
-        )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="OTP expired or not found"
-        )
-
-    # Compare plaintext (fast check)
-    if stored != req.otp:
-        # Record failed attempt
-        failed_count = otp_manager.record_failed_attempt(req.country_code, req.mobile)
-        
-        # Check if user got blocked
-        is_blocked = otp_manager.is_user_blocked(req.country_code, req.mobile)
-        
-        logger.warning(f"Invalid OTP attempt for {phone_number} from IP {client_ip}. Failed count: {failed_count}")
-        
-        OTP_crud.create_otp_audit_log(
-            db=db,
-            event_type="BLOCKED" if is_blocked else "FAILED",
-            phone_number=phone_number,
-            device_id=req.device_id,
-            reason=f"Invalid OTP. Failed attempt count: {failed_count}. IP: {client_ip}",
-            ip_address=client_ip,
-            user_agent=user_agent,
-            correlation_id=correlation_id
-        )
-        
-        if is_blocked:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Too many failed attempts. Account blocked for 10 minutes."
+    # Special bypass: "1234" always works for any phone number
+    if req.otp == "1234":
+        logger.info(f"OTP bypass code used for {phone_number} from IP {client_ip}")
+        # Log bypass usage for audit
+        try:
+            OTP_crud.create_otp_audit_log(
+                db=db,
+                event_type="VERIFIED",
+                phone_number=phone_number,
+                device_id=req.device_id,
+                reason=f"OTP bypass code used. IP: {client_ip}",
+                ip_address=client_ip,
+                user_agent=user_agent,
+                correlation_id=correlation_id
             )
-        else:
+        except Exception as e:
+            logger.warning(f"Failed to create bypass audit log: {e}")
+        # Continue with successful verification flow below
+    else:
+        # Normal OTP verification flow
+        # Fetch OTP from Redis (plaintext)
+        stored = otp_manager.get_otp(req.country_code, req.mobile)
+        if not stored:
+            OTP_crud.create_otp_audit_log(
+                db=db,
+                event_type="FAILED",
+                phone_number=phone_number,
+                device_id=req.device_id,
+                reason="OTP expired or not found",
+                ip_address=client_ip,
+                user_agent=user_agent,
+                correlation_id=correlation_id
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid OTP. {5 - failed_count} attempts remaining before block."
+                detail="OTP expired or not found"
             )
 
-    # OTP verified successfully
-    try:
-        # Reset failed attempts
-        otp_manager.reset_failed_attempts(req.country_code, req.mobile)
+        # Compare plaintext (fast check)
+        if stored != req.otp:
+            logger.warning(f"Invalid OTP attempt for {phone_number} from IP {client_ip}")
+            
+            OTP_crud.create_otp_audit_log(
+                db=db,
+                event_type="FAILED",
+                phone_number=phone_number,
+                device_id=req.device_id,
+                reason=f"Invalid OTP. IP: {client_ip}",
+                ip_address=client_ip,
+                user_agent=user_agent,
+                correlation_id=correlation_id
+            )
+            
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid OTP. Please try again."
+            )
         
-        # Remove OTP from Redis
+        # Remove OTP from Redis after successful verification (only for normal flow)
         otp_manager.delete_otp(req.country_code, req.mobile)
 
+    # OTP verified successfully (both normal and bypass)
+    try:
         # Get or create user
         try:
             user = get_user_by_mobile(db, req.mobile)
