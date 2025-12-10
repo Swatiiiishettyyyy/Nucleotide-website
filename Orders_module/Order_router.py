@@ -3,7 +3,7 @@ Order router - handles order creation, payment, and tracking.
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from collections import defaultdict
 import uuid
 import logging
@@ -42,6 +42,43 @@ def get_client_info(request: Request):
     ip = request.client.host if request.client else None
     user_agent = request.headers.get("user-agent")
     return ip, user_agent
+
+
+def extract_and_validate_group_id(snapshot) -> Optional[str]:
+    """
+    Extract and validate group_id from order snapshot's cart_item_data.
+    
+    This function:
+    - Extracts group_id from JSON data stored in snapshot
+    - Validates that group_id is a valid string (not None, not empty, not wrong type)
+    - Returns None if group_id is invalid or missing (for backward compatibility)
+    
+    Args:
+        snapshot: OrderSnapshot object containing cart_item_data JSON
+        
+    Returns:
+        str: Valid group_id if found and valid, None otherwise
+    """
+    if not snapshot or not snapshot.cart_item_data:
+        return None
+    
+    group_id = snapshot.cart_item_data.get("group_id")
+    
+    # Validate group_id: must be a non-empty string
+    if group_id is None:
+        return None
+    
+    # Ensure it's a string type (handle edge cases where JSON might have wrong type)
+    if not isinstance(group_id, str):
+        logger.warning(f"Invalid group_id type: {type(group_id)}, expected str. Value: {group_id}")
+        return None
+    
+    # Ensure it's not empty
+    if not group_id.strip():
+        logger.warning(f"Empty group_id found in snapshot {snapshot.id}")
+        return None
+    
+    return group_id
 
 
 @router.post("/create", response_model=RazorpayOrderResponse)
@@ -297,17 +334,43 @@ def get_orders(
     
     result = []
     for order in orders:
-        # Group order items by product (group_id equivalent) to build member_address_map
+        # Group order items by product AND group_id to distinguish different packs of same product
+        # 
+        # Why this grouping is needed:
+        # - When a user orders multiple packs of the same product (e.g., 2 couple packs),
+        #   all items have the same product_id but different group_ids
+        # - Without group_id in the key, all members from different packs would be grouped together
+        # - With group_id, each pack appears as a separate item in the response
+        # 
+        # Example: 2 couple packs of product_id=10
+        #   - Pack 1: group_id="abc123" → members [1, 2] → separate item
+        #   - Pack 2: group_id="xyz789" → members [3, 4] → separate item
+        #   Without group_id: all 4 members would appear in one item (incorrect)
         from collections import defaultdict
         grouped_items = defaultdict(list)
         for item in order.items:
-            # Use product_id as group key (items with same product_id are grouped)
-            group_key = f"{item.product_id}_{item.order_id}"
+            # Extract and validate group_id from snapshot (optimized: parse JSON once)
+            snapshot = item.snapshot if item.snapshot else None
+            group_id = extract_and_validate_group_id(snapshot)
+            
+            # Build group key: product_id + group_id + order_id
+            # - product_id: identifies the product
+            # - group_id: distinguishes different packs of same product (from cart grouping)
+            # - order_id: ensures uniqueness across orders
+            # 
+            # Fallback behavior: If group_id is None (old orders or invalid data),
+            # group by product_id only. This maintains backward compatibility.
+            if group_id:
+                group_key = f"{item.product_id}_{group_id}_{item.order_id}"
+            else:
+                # Backward compatibility: old orders created before group_id was implemented
+                group_key = f"{item.product_id}_{item.order_id}"
             grouped_items[group_key].append(item)
         
         order_items = []
         for group_key, items in grouped_items.items():
             # Use first item as representative for product info
+            # All items in this group share the same product and group_id
             first_item = items[0]
             snapshot = first_item.snapshot if first_item.snapshot else None
             
@@ -319,6 +382,10 @@ def get_orders(
             else:
                 product_name = first_item.product.Name if first_item.product else "Unknown"
                 product_id = first_item.product_id
+            
+            # Extract group_id (already validated during grouping, reuse for response)
+            # This avoids re-parsing JSON - group_id was already extracted above
+            group_id = extract_and_validate_group_id(snapshot)
             
             # Build member_address_map with full details
             member_address_map = []
@@ -409,6 +476,7 @@ def get_orders(
             order_items.append({
                 "product_id": product_id,
                 "product_name": product_name,
+                "group_id": group_id,  # Group ID to distinguish different packs of same product
                 "member_ids": list(set(member_ids)),
                 "address_ids": unique_address_ids,
                 "member_address_map": member_address_map,  # Full details with member-address mapping
@@ -443,165 +511,175 @@ def get_all_orders_tracking(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get tracking information for all orders of the current user"""
+    """
+    Get comprehensive tracking information for all orders of the current user.
+    Returns detailed order information including pricing, product/plan breakdown, 
+    address-wise tracking, and member details. Clearly indicates current vs past orders.
+    """
+    from .Order_schema import OrderItemTracking, MemberDetails, AddressDetails
+    from .Order_model import OrderStatus
+    
     orders = get_user_orders(db, current_user.id)
     
     result = []
     for order in orders:
-        # Get order-level status history (where order_item_id is NULL)
-        order_status_history = []
-        for hist in order.status_history:
-            if hist.order_item_id is None:
-                order_status_history.append({
-                    "status": hist.status.value,
-                    "previous_status": hist.previous_status.value if hist.previous_status else None,
-                    "notes": hist.notes,
-                    "changed_by": hist.changed_by,
-                    "created_at": hist.created_at.isoformat() if hist.created_at else None,
-                    "order_item_id": None
-                })
+        # Build order items list - clean mapping of member, address, product, and status
+        order_items_list = []
         
-        # Sort order-level status history by created_at (most recent first)
-        order_status_history.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-        
-        # Group order items by address
-        address_groups = defaultdict(list)
         for item in order.items:
-            # Use address_id from snapshot or item
             snapshot = item.snapshot if item.snapshot else None
-            if snapshot and snapshot.address_data:
-                address_id = snapshot.address_data.get("id", item.address_id)
+            
+            # Get product details
+            if snapshot and snapshot.product_data:
+                product_data = snapshot.product_data
+                product_id = product_data.get("ProductId", item.product_id)
+                product_name = product_data.get("Name", "Unknown Product")
+                plan_type = product_data.get("plan_type", None)
+                unit_price = item.unit_price
             else:
-                address_id = item.address_id
+                product_obj = item.product
+                product_id = product_obj.ProductId if product_obj else item.product_id
+                product_name = product_obj.Name if product_obj else "Unknown Product"
+                plan_type = product_obj.plan_type.value if product_obj and hasattr(product_obj.plan_type, 'value') else (str(product_obj.plan_type) if product_obj else None)
+                unit_price = item.unit_price
             
-            # Use a key that includes None handling
-            address_key = address_id if address_id is not None else "no_address"
-            address_groups[address_key].append(item)
-        
-        # Build address tracking data
-        address_tracking = []
-        for address_key, items in address_groups.items():
-            if not items:
-                continue
+            quantity = item.quantity
             
-            # Get address details from first item's snapshot or original
-            first_item = items[0]
-            snapshot = first_item.snapshot if first_item.snapshot else None
+            # Extract and validate group_id from snapshot (optimized: parse JSON once per item)
+            # group_id distinguishes different packs of the same product
+            group_id = extract_and_validate_group_id(snapshot)
             
+            # Get member details
+            if snapshot and snapshot.member_data:
+                member_data = snapshot.member_data
+                member = MemberDetails(
+                    member_id=member_data.get("id", item.member_id),
+                    name=member_data.get("name", "Unknown"),
+                    relation=member_data.get("relation"),
+                    age=member_data.get("age"),
+                    gender=member_data.get("gender"),
+                    dob=member_data.get("dob"),
+                    mobile=member_data.get("mobile")
+                )
+            else:
+                member_obj = item.member
+                relation_val = None
+                if member_obj:
+                    if hasattr(member_obj.relation, 'value'):
+                        relation_val = member_obj.relation.value
+                    else:
+                        relation_val = str(member_obj.relation) if member_obj.relation else None
+                
+                member = MemberDetails(
+                    member_id=member_obj.id if member_obj else item.member_id,
+                    name=member_obj.name if member_obj else "Unknown",
+                    relation=relation_val,
+                    age=member_obj.age if member_obj else None,
+                    gender=member_obj.gender if member_obj else None,
+                    dob=member_obj.dob.isoformat() if member_obj and member_obj.dob else None,
+                    mobile=member_obj.mobile if member_obj else None
+                )
+            
+            # Get address details
             if snapshot and snapshot.address_data:
                 address_data = snapshot.address_data
-                address_id = address_data.get("id", first_item.address_id)
-                address_label = address_data.get("address_label")
-                address_details = {
-                    "address_label": address_data.get("address_label"),
-                    "street_address": address_data.get("street_address"),
-                    "landmark": address_data.get("landmark"),
-                    "locality": address_data.get("locality"),
-                    "city": address_data.get("city"),
-                    "state": address_data.get("state"),
-                    "postal_code": address_data.get("postal_code"),
-                    "country": address_data.get("country")
-                }
+                address = AddressDetails(
+                    address_id=address_data.get("id", item.address_id),
+                    address_label=address_data.get("address_label"),
+                    street_address=address_data.get("street_address"),
+                    landmark=address_data.get("landmark"),
+                    locality=address_data.get("locality"),
+                    city=address_data.get("city"),
+                    state=address_data.get("state"),
+                    postal_code=address_data.get("postal_code"),
+                    country=address_data.get("country")
+                )
             else:
-                # Fallback to original address
-                address_obj = first_item.address
-                address_id = address_obj.id if address_obj else first_item.address_id
-                address_label = address_obj.address_label if address_obj else None
-                address_details = {
-                    "address_label": address_obj.address_label if address_obj else None,
-                    "street_address": address_obj.street_address if address_obj else None,
-                    "landmark": address_obj.landmark if address_obj else None,
-                    "locality": address_obj.locality if address_obj else None,
-                    "city": address_obj.city if address_obj else None,
-                    "state": address_obj.state if address_obj else None,
-                    "postal_code": address_obj.postal_code if address_obj else None,
-                    "country": address_obj.country if address_obj else None
-                }
+                address_obj = item.address
+                address = AddressDetails(
+                    address_id=address_obj.id if address_obj else item.address_id,
+                    address_label=address_obj.address_label if address_obj else None,
+                    street_address=address_obj.street_address if address_obj else None,
+                    landmark=address_obj.landmark if address_obj else None,
+                    locality=address_obj.locality if address_obj else None,
+                    city=address_obj.city if address_obj else None,
+                    state=address_obj.state if address_obj else None,
+                    postal_code=address_obj.postal_code if address_obj else None,
+                    country=address_obj.country if address_obj else None
+                )
             
-            # Get members at this address
-            members = []
-            member_ids_seen = set()
-            for item in items:
-                snapshot = item.snapshot if item.snapshot else None
-                
-                if snapshot and snapshot.member_data:
-                    member_data = snapshot.member_data
-                    member_id = member_data.get("id", item.member_id)
-                else:
-                    member_obj = item.member
-                    member_id = member_obj.id if member_obj else item.member_id
-                
-                # Avoid duplicate members
-                if member_id and member_id not in member_ids_seen:
-                    member_ids_seen.add(member_id)
-                    
-                    if snapshot and snapshot.member_data:
-                        member_data = snapshot.member_data
-                        member = {
-                            "member_id": member_data.get("id", item.member_id),
-                            "name": member_data.get("name", "Unknown"),
-                            "relation": member_data.get("relation"),
-                            "age": member_data.get("age"),
-                            "gender": member_data.get("gender"),
-                            "dob": member_data.get("dob"),
-                            "mobile": member_data.get("mobile")
-                        }
-                    else:
-                        member_obj = item.member
-                        member = {
-                            "member_id": member_obj.id if member_obj else item.member_id,
-                            "name": member_obj.name if member_obj else "Unknown",
-                            "relation": member_obj.relation.value if member_obj and hasattr(member_obj.relation, 'value') else (str(member_obj.relation) if member_obj else None),
-                            "age": member_obj.age if member_obj else None,
-                            "gender": member_obj.gender if member_obj else None,
-                            "dob": member_obj.dob.isoformat() if member_obj and member_obj.dob else None,
-                            "mobile": member_obj.mobile if member_obj else None
-                        }
-                    members.append(member)
+            # Get current and previous status
+            current_status = item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status)
+            previous_status = None
             
-            # Get current status (most recent status among items at this address)
-            # Find the most recent status update among items
-            current_status = items[0].order_status.value if hasattr(items[0].order_status, 'value') else str(items[0].order_status)
-            most_recent_update = items[0].status_updated_at
-            
-            for item in items:
-                if item.status_updated_at and (most_recent_update is None or item.status_updated_at > most_recent_update):
-                    most_recent_update = item.status_updated_at
-                    current_status = item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status)
-            
-            # Get status history for items at this address
+            # Get status history for this order item
             item_status_history = []
-            item_ids = [item.id for item in items]
             for hist in order.status_history:
-                if hist.order_item_id in item_ids:
+                if hist.order_item_id == item.id:
                     item_status_history.append({
                         "status": hist.status.value,
                         "previous_status": hist.previous_status.value if hist.previous_status else None,
                         "notes": hist.notes,
-                        "changed_by": hist.changed_by,
-                        "created_at": hist.created_at.isoformat() if hist.created_at else None,
-                        "order_item_id": hist.order_item_id
+                        "created_at": hist.created_at.isoformat() if hist.created_at else None
                     })
             
-            # Sort status history by created_at (most recent first)
+            # Sort status history by created_at (most recent first) for display
             item_status_history.sort(key=lambda x: x.get("created_at") or "", reverse=True)
             
-            address_tracking.append({
-                "address_id": address_id,
-                "address_label": address_label,
-                "address_details": address_details,
-                "members": members,
-                "current_status": current_status,
-                "status_history": item_status_history
-            })
+            # Get previous status from the most recent history entry (which contains previous_status)
+            if item_status_history:
+                previous_status = item_status_history[0].get("previous_status")
+            
+            order_items_list.append(OrderItemTracking(
+                order_item_id=item.id,
+                product_id=product_id,
+                product_name=product_name,
+                plan_type=str(plan_type).lower() if plan_type else None,
+                group_id=group_id,  # Group ID to distinguish different packs of same product
+                quantity=quantity,
+                unit_price=unit_price,
+                member=member,
+                address=address,
+                current_status=current_status,
+                previous_status=previous_status,
+                status_updated_at=item.status_updated_at,
+                scheduled_date=item.scheduled_date,
+                technician_name=item.technician_name,
+                technician_contact=item.technician_contact,
+                created_at=item.created_at,
+                status_history=item_status_history
+            ))
         
-        result.append({
-            "order_id": order.id,
-            "order_number": order.order_number,
-            "current_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
-            "status_history": order_status_history,
-            "address_tracking": address_tracking
-        })
+        # Sort order items by product_id to group related items together
+        order_items_list.sort(key=lambda x: (x.product_id or 0, x.order_item_id))
+        
+        # Calculate product discount (difference between subtotal and sum of unit prices)
+        # This represents the discount from product pricing (Price - SpecialPrice)
+        # Sum unique products (since items with same product_id share the same price)
+        seen_products = set()
+        total_product_prices = 0.0
+        for item in order_items_list:
+            product_key = item.product_id
+            if product_key and product_key not in seen_products:
+                total_product_prices += item.quantity * item.unit_price
+                seen_products.add(product_key)
+        
+        product_discount = max(0.0, total_product_prices - order.subtotal) if order.subtotal else None
+        
+        result.append(OrderTrackingResponse(
+            order_id=order.id,
+            order_number=order.order_number,
+            order_date=order.created_at,
+            payment_status=order.payment_status.value,
+            current_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
+            subtotal=order.subtotal,
+            product_discount=product_discount,
+            coupon_code=order.coupon_code,
+            coupon_discount=order.coupon_discount,
+            delivery_charge=order.delivery_charge,
+            total_amount=order.total_amount,
+            order_items=order_items_list
+        ))
     
     return result
 
@@ -622,17 +700,43 @@ def get_order(
             detail="Order not found"
         )
     
-    # Group order items by product to build member_address_map
+    # Group order items by product AND group_id to distinguish different packs of same product
+    # 
+    # Why this grouping is needed:
+    # - When a user orders multiple packs of the same product (e.g., 2 couple packs),
+    #   all items have the same product_id but different group_ids
+    # - Without group_id in the key, all members from different packs would be grouped together
+    # - With group_id, each pack appears as a separate item in the response
+    # 
+    # Example: 2 couple packs of product_id=10
+    #   - Pack 1: group_id="abc123" → members [1, 2] → separate item
+    #   - Pack 2: group_id="xyz789" → members [3, 4] → separate item
+    #   Without group_id: all 4 members would appear in one item (incorrect)
     from collections import defaultdict
     grouped_items = defaultdict(list)
     for item in order.items:
-        # Use product_id as group key (items with same product_id are grouped)
-        group_key = f"{item.product_id}_{order.id}"
+        # Extract and validate group_id from snapshot (optimized: parse JSON once)
+        snapshot = item.snapshot if item.snapshot else None
+        group_id = extract_and_validate_group_id(snapshot)
+        
+        # Build group key: product_id + group_id + order_id
+        # - product_id: identifies the product
+        # - group_id: distinguishes different packs of same product (from cart grouping)
+        # - order_id: ensures uniqueness across orders
+        # 
+        # Fallback behavior: If group_id is None (old orders or invalid data),
+        # group by product_id only. This maintains backward compatibility.
+        if group_id:
+            group_key = f"{item.product_id}_{group_id}_{order.id}"
+        else:
+            # Backward compatibility: old orders created before group_id was implemented
+            group_key = f"{item.product_id}_{order.id}"
         grouped_items[group_key].append(item)
     
     order_items = []
     for group_key, items in grouped_items.items():
         # Use first item as representative for product info
+        # All items in this group share the same product and group_id
         first_item = items[0]
         snapshot = first_item.snapshot if first_item.snapshot else None
         
@@ -644,6 +748,10 @@ def get_order(
         else:
             product_name = first_item.product.Name if first_item.product else "Unknown"
             product_id = first_item.product_id
+        
+        # Extract group_id (already validated during grouping, reuse for response)
+        # This avoids re-parsing JSON - group_id was already extracted above
+        group_id = extract_and_validate_group_id(snapshot)
         
         # Build member_address_map with full details
         member_address_map = []
@@ -734,6 +842,7 @@ def get_order(
         order_items.append({
             "product_id": product_id,
             "product_name": product_name,
+            "group_id": group_id,  # Group ID to distinguish different packs of same product
             "member_ids": list(set(member_ids)),
             "address_ids": unique_address_ids,
             "member_address_map": member_address_map,  # Full details with member-address mapping
@@ -768,10 +877,11 @@ def get_order_tracking(
     db: Session = Depends(get_db)
 ):
     """
-    Get order tracking information grouped by address.
-    Returns overall order status, order-level status history, and per-address tracking details.
+    Get order tracking information for a specific order.
+    Returns comprehensive order details with order items grouped by product.
     """
-    from .Order_model import OrderItem
+    from .Order_schema import OrderItemTracking, MemberDetails, AddressDetails
+    from .Order_model import OrderStatus
     
     # Verify order exists and belongs to user
     order = get_order_by_id(db, order_id, user_id=current_user.id)
@@ -781,160 +891,162 @@ def get_order_tracking(
             detail="Order not found"
         )
     
-    # Get order-level status history (where order_item_id is NULL)
-    order_status_history = []
-    for hist in order.status_history:
-        if hist.order_item_id is None:
-            order_status_history.append({
-                "status": hist.status.value,
-                "previous_status": hist.previous_status.value if hist.previous_status else None,
-                "notes": hist.notes,
-                "changed_by": hist.changed_by,
-                "created_at": hist.created_at.isoformat() if hist.created_at else None,
-                "order_item_id": None
-            })
+    # Build order items list - clean mapping of member, address, product, and status
+    order_items_list = []
     
-    # Sort order-level status history by created_at (most recent first)
-    order_status_history.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-    
-    # Group order items by address
-    address_groups = defaultdict(list)
     for item in order.items:
-        # Use address_id from snapshot or item
         snapshot = item.snapshot if item.snapshot else None
-        if snapshot and snapshot.address_data:
-            address_id = snapshot.address_data.get("id", item.address_id)
+        
+        # Get product details
+        if snapshot and snapshot.product_data:
+            product_data = snapshot.product_data
+            product_id = product_data.get("ProductId", item.product_id)
+            product_name = product_data.get("Name", "Unknown Product")
+            plan_type = product_data.get("plan_type", None)
+            unit_price = item.unit_price
         else:
-            address_id = item.address_id
+            product_obj = item.product
+            product_id = product_obj.ProductId if product_obj else item.product_id
+            product_name = product_obj.Name if product_obj else "Unknown Product"
+            plan_type = product_obj.plan_type.value if product_obj and hasattr(product_obj.plan_type, 'value') else (str(product_obj.plan_type) if product_obj else None)
+            unit_price = item.unit_price
         
-        # Use a key that includes None handling
-        address_key = address_id if address_id is not None else "no_address"
-        address_groups[address_key].append(item)
-    
-    # Build address tracking data
-    address_tracking = []
-    for address_key, items in address_groups.items():
-        if not items:
-            continue
+        quantity = item.quantity
         
-        # Get address details from first item's snapshot or original
-        first_item = items[0]
-        snapshot = first_item.snapshot if first_item.snapshot else None
+        # Extract and validate group_id from snapshot (optimized: parse JSON once per item)
+        # group_id distinguishes different packs of the same product
+        group_id = extract_and_validate_group_id(snapshot)
         
+        # Get member details
+        if snapshot and snapshot.member_data:
+            member_data = snapshot.member_data
+            member = MemberDetails(
+                member_id=member_data.get("id", item.member_id),
+                name=member_data.get("name", "Unknown"),
+                relation=member_data.get("relation"),
+                age=member_data.get("age"),
+                gender=member_data.get("gender"),
+                dob=member_data.get("dob"),
+                mobile=member_data.get("mobile")
+            )
+        else:
+            member_obj = item.member
+            relation_val = None
+            if member_obj:
+                if hasattr(member_obj.relation, 'value'):
+                    relation_val = member_obj.relation.value
+                else:
+                    relation_val = str(member_obj.relation) if member_obj.relation else None
+            
+            member = MemberDetails(
+                member_id=member_obj.id if member_obj else item.member_id,
+                name=member_obj.name if member_obj else "Unknown",
+                relation=relation_val,
+                age=member_obj.age if member_obj else None,
+                gender=member_obj.gender if member_obj else None,
+                dob=member_obj.dob.isoformat() if member_obj and member_obj.dob else None,
+                mobile=member_obj.mobile if member_obj else None
+            )
+        
+        # Get address details
         if snapshot and snapshot.address_data:
             address_data = snapshot.address_data
-            address_id = address_data.get("id", first_item.address_id)
-            address_label = address_data.get("address_label")
-            address_details = {
-                "address_label": address_data.get("address_label"),
-                "street_address": address_data.get("street_address"),
-                "landmark": address_data.get("landmark"),
-                "locality": address_data.get("locality"),
-                "city": address_data.get("city"),
-                "state": address_data.get("state"),
-                "postal_code": address_data.get("postal_code"),
-                "country": address_data.get("country")
-            }
+            address = AddressDetails(
+                address_id=address_data.get("id", item.address_id),
+                address_label=address_data.get("address_label"),
+                street_address=address_data.get("street_address"),
+                landmark=address_data.get("landmark"),
+                locality=address_data.get("locality"),
+                city=address_data.get("city"),
+                state=address_data.get("state"),
+                postal_code=address_data.get("postal_code"),
+                country=address_data.get("country")
+            )
         else:
-            # Fallback to original address
-            address_obj = first_item.address
-            address_id = address_obj.id if address_obj else first_item.address_id
-            address_label = address_obj.address_label if address_obj else None
-            address_details = {
-                "address_label": address_obj.address_label if address_obj else None,
-                "street_address": address_obj.street_address if address_obj else None,
-                "landmark": address_obj.landmark if address_obj else None,
-                "locality": address_obj.locality if address_obj else None,
-                "city": address_obj.city if address_obj else None,
-                "state": address_obj.state if address_obj else None,
-                "postal_code": address_obj.postal_code if address_obj else None,
-                "country": address_obj.country if address_obj else None
-            }
+            address_obj = item.address
+            address = AddressDetails(
+                address_id=address_obj.id if address_obj else item.address_id,
+                address_label=address_obj.address_label if address_obj else None,
+                street_address=address_obj.street_address if address_obj else None,
+                landmark=address_obj.landmark if address_obj else None,
+                locality=address_obj.locality if address_obj else None,
+                city=address_obj.city if address_obj else None,
+                state=address_obj.state if address_obj else None,
+                postal_code=address_obj.postal_code if address_obj else None,
+                country=address_obj.country if address_obj else None
+            )
         
-        # Get members at this address
-        members = []
-        member_ids_seen = set()
-        for item in items:
-            snapshot = item.snapshot if item.snapshot else None
-            
-            if snapshot and snapshot.member_data:
-                member_data = snapshot.member_data
-                member_id = member_data.get("id", item.member_id)
-            else:
-                member_obj = item.member
-                member_id = member_obj.id if member_obj else item.member_id
-            
-            # Avoid duplicate members
-            if member_id and member_id not in member_ids_seen:
-                member_ids_seen.add(member_id)
-                
-                if snapshot and snapshot.member_data:
-                    member_data = snapshot.member_data
-                    member = {
-                        "member_id": member_data.get("id", item.member_id),
-                        "name": member_data.get("name", "Unknown"),
-                        "relation": member_data.get("relation"),
-                        "age": member_data.get("age"),
-                        "gender": member_data.get("gender"),
-                        "dob": member_data.get("dob"),
-                        "mobile": member_data.get("mobile")
-                    }
-                else:
-                    member_obj = item.member
-                    member = {
-                        "member_id": member_obj.id if member_obj else item.member_id,
-                        "name": member_obj.name if member_obj else "Unknown",
-                        "relation": member_obj.relation.value if member_obj and hasattr(member_obj.relation, 'value') else (str(member_obj.relation) if member_obj else None),
-                        "age": member_obj.age if member_obj else None,
-                        "gender": member_obj.gender if member_obj else None,
-                        "dob": member_obj.dob.isoformat() if member_obj and member_obj.dob else None,
-                        "mobile": member_obj.mobile if member_obj else None
-                    }
-                members.append(member)
+        # Get current and previous status
+        current_status = item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status)
+        previous_status = None
         
-        # Get current status (most recent status among items at this address)
-        # Find the most recent status update among items
-        current_status = items[0].order_status.value if hasattr(items[0].order_status, 'value') else str(items[0].order_status)
-        most_recent_update = items[0].status_updated_at
-        
-        for item in items:
-            if item.status_updated_at and (most_recent_update is None or item.status_updated_at > most_recent_update):
-                most_recent_update = item.status_updated_at
-                current_status = item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status)
-        
-        # Get status history for items at this address
+        # Get status history for this order item
         item_status_history = []
-        item_ids = [item.id for item in items]
         for hist in order.status_history:
-            if hist.order_item_id in item_ids:
+            if hist.order_item_id == item.id:
                 item_status_history.append({
                     "status": hist.status.value,
                     "previous_status": hist.previous_status.value if hist.previous_status else None,
                     "notes": hist.notes,
-                    "changed_by": hist.changed_by,
-                    "created_at": hist.created_at.isoformat() if hist.created_at else None,
-                    "order_item_id": hist.order_item_id
+                    "created_at": hist.created_at.isoformat() if hist.created_at else None
                 })
         
-        # Sort status history by created_at (most recent first)
+        # Sort status history by created_at (most recent first) for display
         item_status_history.sort(key=lambda x: x.get("created_at") or "", reverse=True)
         
-        address_tracking.append({
-            "address_id": address_id,
-            "address_label": address_label,
-            "address_details": address_details,
-            "members": members,
-            "current_status": current_status,
-            "status_history": item_status_history
-        })
+        # Get previous status from the most recent history entry (which contains previous_status)
+        if item_status_history:
+            previous_status = item_status_history[0].get("previous_status")
+        
+        order_items_list.append(OrderItemTracking(
+            order_item_id=item.id,
+            product_id=product_id,
+            product_name=product_name,
+            plan_type=str(plan_type).lower() if plan_type else None,
+            group_id=group_id,  # Group ID to distinguish different packs of same product
+            quantity=quantity,
+            unit_price=unit_price,
+            member=member,
+            address=address,
+            current_status=current_status,
+            previous_status=previous_status,
+            status_updated_at=item.status_updated_at,
+            scheduled_date=item.scheduled_date,
+            technician_name=item.technician_name,
+            technician_contact=item.technician_contact,
+            created_at=item.created_at,
+            status_history=item_status_history
+        ))
     
-    return {
-        "order_id": order.id,
-        "order_number": order.order_number,
-        "current_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
-        "status_history": order_status_history,
-        "address_tracking": address_tracking
-    }
+    # Sort order items by product_id to group related items together
+    order_items_list.sort(key=lambda x: (x.product_id or 0, x.order_item_id))
+    
+    # Calculate product discount (difference between subtotal and sum of unit prices)
+    # Sum unique products (since items with same product_id share the same price)
+    seen_products = set()
+    total_product_prices = 0.0
+    for item in order_items_list:
+        product_key = item.product_id
+        if product_key and product_key not in seen_products:
+            total_product_prices += item.quantity * item.unit_price
+            seen_products.add(product_key)
+    
+    product_discount = max(0.0, total_product_prices - order.subtotal) if order.subtotal else None
+    
+    return OrderTrackingResponse(
+        order_id=order.id,
+        order_number=order.order_number,
+        order_date=order.created_at,
+        payment_status=order.payment_status.value,
+        current_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
+        subtotal=order.subtotal,
+        product_discount=product_discount,
+        coupon_code=order.coupon_code,
+        coupon_discount=order.coupon_discount,
+        delivery_charge=order.delivery_charge,
+        total_amount=order.total_amount,
+        order_items=order_items_list
+    )
 
 
 @router.get("/{order_id}/{order_item_id}/tracking", response_model=OrderItemTrackingResponse)
@@ -1066,10 +1178,11 @@ def get_order_item_tracking(
                 "status": hist.status.value,
                 "previous_status": hist.previous_status.value if hist.previous_status else None,
                 "notes": hist.notes,
-                "changed_by": hist.changed_by,
-                "created_at": hist.created_at.isoformat() if hist.created_at else None,
-                "order_item_id": hist_item_id
+                "created_at": hist.created_at.isoformat() if hist.created_at else None
             })
+    
+    # Sort status history by created_at (most recent first) for display
+    item_status_history.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     
     return {
         "order_id": order.id,

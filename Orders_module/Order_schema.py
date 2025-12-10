@@ -53,6 +53,7 @@ class OrderItemData(BaseModel):
     """Order item data grouped by product"""
     product_id: Optional[int] = None  # Can be NULL if product was deleted (snapshot preserves data)
     product_name: str
+    group_id: Optional[str] = None  # Group ID to distinguish different packs of same product
     member_ids: List[int]  # List of member IDs in this product group
     address_ids: List[int]  # List of unique address IDs used
     member_address_map: List[MemberAddressMapping]  # Full member-address mapping with details
@@ -116,23 +117,61 @@ class UpdateOrderStatusRequest(BaseModel):
     technician_contact: Optional[str] = Field(None, description="Technician contact (optional)")
 
 
-class AddressTrackingData(BaseModel):
-    """Tracking data grouped by address"""
-    address_id: Optional[int] = None  # Can be NULL if address was deleted (snapshot preserves data)
-    address_label: Optional[str] = None
-    address_details: Optional[dict] = None
-    members: List[dict]  # List of members at this address
-    current_status: str
-    status_history: List[dict]
+class ProductPlanInfo(BaseModel):
+    """Product/Plan information with pricing"""
+    product_id: Optional[int] = None
+    product_name: str
+    plan_type: Optional[str] = None  # single, couple, family
+    quantity: int
+    unit_price: float  # Price per unit at time of order
 
+
+class OrderItemTracking(BaseModel):
+    """Order item tracking - clean mapping of member, address, product, and status"""
+    order_item_id: int
+    product_id: Optional[int] = None  # Product ID reference
+    product_name: str  # Product name
+    plan_type: Optional[str] = None  # single, couple, family
+    group_id: Optional[str] = None  # Group ID to distinguish different packs of same product
+    quantity: int  # Quantity for this product
+    unit_price: float  # Unit price for this product
+    member: MemberDetails  # Member details for this order item
+    address: AddressDetails  # Address details for this order item
+    current_status: str  # Current status of this order item
+    previous_status: Optional[str] = None  # Previous status of this order item
+    status_updated_at: Optional[datetime] = None  # When status was last updated
+    scheduled_date: Optional[datetime] = None  # Scheduled date for this order item
+    technician_name: Optional[str] = None  # Technician assigned to this order item
+    technician_contact: Optional[str] = None  # Technician contact for this order item
+    created_at: Optional[datetime] = None  # When this order item was created
+    status_history: List[dict]  # Complete status history for this order item (sorted by date, newest first)
+
+
+class ProductGroupSummary(BaseModel):
+    """Summary of products in the order - grouped to avoid redundancy"""
+    product_id: Optional[int] = None
+    product_name: str
+    plan_type: Optional[str] = None
+    quantity: int  # Total quantity of this product
+    unit_price: float
+    order_item_ids: List[int]  # Order item IDs that belong to this product group
 
 class OrderTrackingResponse(BaseModel):
-    """Order tracking information"""
+    """Order tracking information - clean and clear order details grouped by order items"""
     order_id: int
     order_number: str
-    current_status: str  # Overall order status
-    status_history: List[dict]  # Order-level status history
-    address_tracking: List[AddressTrackingData]  # Per-address tracking
+    order_date: datetime  # When order was placed
+    payment_status: str  # pending, completed, failed, cancelled
+    current_status: str  # Overall order status (order_confirmed, scheduled, etc.)
+    # Order pricing breakdown
+    subtotal: float  # Subtotal before discounts
+    product_discount: Optional[float] = None  # Discount from product pricing
+    coupon_code: Optional[str] = None
+    coupon_discount: float  # Discount from coupon
+    delivery_charge: float
+    total_amount: float  # Final amount paid
+    # Order items - clean mapping of member, address, product, and status, grouped by product
+    order_items: List[OrderItemTracking]  # All order items grouped by product_id (sorted)
 
 
 class OrderItemTrackingResponse(BaseModel):

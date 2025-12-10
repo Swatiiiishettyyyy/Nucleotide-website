@@ -221,7 +221,9 @@ def create_order_from_cart(
                 "postal_code": address_obj.postal_code,
                 "country": address_obj.country
             },
-            cart_item_data=None  # Not required, can be empty
+            cart_item_data={
+                "group_id": cart_item.group_id  # Store group_id to distinguish different packs of same product
+            }
         )
         db.add(snapshot)
         db.flush()
