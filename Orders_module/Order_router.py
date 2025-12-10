@@ -505,183 +505,183 @@ def get_orders(
     return result
 
 
-@router.get("/tracking", response_model=List[OrderTrackingResponse])
-def get_all_orders_tracking(
-    request: Request,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Get comprehensive tracking information for all orders of the current user.
-    Returns detailed order information including pricing, product/plan breakdown, 
-    address-wise tracking, and member details. Clearly indicates current vs past orders.
-    """
-    from .Order_schema import OrderItemTracking, MemberDetails, AddressDetails
-    from .Order_model import OrderStatus
-    
-    orders = get_user_orders(db, current_user.id)
-    
-    result = []
-    for order in orders:
-        # Build order items list - clean mapping of member, address, product, and status
-        order_items_list = []
-        
-        for item in order.items:
-            snapshot = item.snapshot if item.snapshot else None
-            
-            # Get product details
-            if snapshot and snapshot.product_data:
-                product_data = snapshot.product_data
-                product_id = product_data.get("ProductId", item.product_id)
-                product_name = product_data.get("Name", "Unknown Product")
-                plan_type = product_data.get("plan_type", None)
-                unit_price = item.unit_price
-            else:
-                product_obj = item.product
-                product_id = product_obj.ProductId if product_obj else item.product_id
-                product_name = product_obj.Name if product_obj else "Unknown Product"
-                plan_type = product_obj.plan_type.value if product_obj and hasattr(product_obj.plan_type, 'value') else (str(product_obj.plan_type) if product_obj else None)
-                unit_price = item.unit_price
-            
-            quantity = item.quantity
-            
-            # Extract and validate group_id from snapshot (optimized: parse JSON once per item)
-            # group_id distinguishes different packs of the same product
-            group_id = extract_and_validate_group_id(snapshot)
-            
-            # Get member details
-            if snapshot and snapshot.member_data:
-                member_data = snapshot.member_data
-                member = MemberDetails(
-                    member_id=member_data.get("id", item.member_id),
-                    name=member_data.get("name", "Unknown"),
-                    relation=member_data.get("relation"),
-                    age=member_data.get("age"),
-                    gender=member_data.get("gender"),
-                    dob=member_data.get("dob"),
-                    mobile=member_data.get("mobile")
-                )
-            else:
-                member_obj = item.member
-                relation_val = None
-                if member_obj:
-                    if hasattr(member_obj.relation, 'value'):
-                        relation_val = member_obj.relation.value
-                    else:
-                        relation_val = str(member_obj.relation) if member_obj.relation else None
-                
-                member = MemberDetails(
-                    member_id=member_obj.id if member_obj else item.member_id,
-                    name=member_obj.name if member_obj else "Unknown",
-                    relation=relation_val,
-                    age=member_obj.age if member_obj else None,
-                    gender=member_obj.gender if member_obj else None,
-                    dob=member_obj.dob.isoformat() if member_obj and member_obj.dob else None,
-                    mobile=member_obj.mobile if member_obj else None
-                )
-            
-            # Get address details
-            if snapshot and snapshot.address_data:
-                address_data = snapshot.address_data
-                address = AddressDetails(
-                    address_id=address_data.get("id", item.address_id),
-                    address_label=address_data.get("address_label"),
-                    street_address=address_data.get("street_address"),
-                    landmark=address_data.get("landmark"),
-                    locality=address_data.get("locality"),
-                    city=address_data.get("city"),
-                    state=address_data.get("state"),
-                    postal_code=address_data.get("postal_code"),
-                    country=address_data.get("country")
-                )
-            else:
-                address_obj = item.address
-                address = AddressDetails(
-                    address_id=address_obj.id if address_obj else item.address_id,
-                    address_label=address_obj.address_label if address_obj else None,
-                    street_address=address_obj.street_address if address_obj else None,
-                    landmark=address_obj.landmark if address_obj else None,
-                    locality=address_obj.locality if address_obj else None,
-                    city=address_obj.city if address_obj else None,
-                    state=address_obj.state if address_obj else None,
-                    postal_code=address_obj.postal_code if address_obj else None,
-                    country=address_obj.country if address_obj else None
-                )
-            
-            # Get current and previous status
-            current_status = item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status)
-            previous_status = None
-            
-            # Get status history for this order item
-            item_status_history = []
-            for hist in order.status_history:
-                if hist.order_item_id == item.id:
-                    item_status_history.append({
-                        "status": hist.status.value,
-                        "previous_status": hist.previous_status.value if hist.previous_status else None,
-                        "notes": hist.notes,
-                        "created_at": hist.created_at.isoformat() if hist.created_at else None
-                    })
-            
-            # Sort status history by created_at (most recent first) for display
-            item_status_history.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-            
-            # Get previous status from the most recent history entry (which contains previous_status)
-            if item_status_history:
-                previous_status = item_status_history[0].get("previous_status")
-            
-            order_items_list.append(OrderItemTracking(
-                order_item_id=item.id,
-                product_id=product_id,
-                product_name=product_name,
-                plan_type=str(plan_type).lower() if plan_type else None,
-                group_id=group_id,  # Group ID to distinguish different packs of same product
-                quantity=quantity,
-                unit_price=unit_price,
-                member=member,
-                address=address,
-                current_status=current_status,
-                previous_status=previous_status,
-                status_updated_at=item.status_updated_at,
-                scheduled_date=item.scheduled_date,
-                technician_name=item.technician_name,
-                technician_contact=item.technician_contact,
-                created_at=item.created_at,
-                status_history=item_status_history
-            ))
-        
-        # Sort order items by product_id to group related items together
-        order_items_list.sort(key=lambda x: (x.product_id or 0, x.order_item_id))
-        
-        # Calculate product discount (difference between subtotal and sum of unit prices)
-        # This represents the discount from product pricing (Price - SpecialPrice)
-        # Sum unique products (since items with same product_id share the same price)
-        seen_products = set()
-        total_product_prices = 0.0
-        for item in order_items_list:
-            product_key = item.product_id
-            if product_key and product_key not in seen_products:
-                total_product_prices += item.quantity * item.unit_price
-                seen_products.add(product_key)
-        
-        product_discount = max(0.0, total_product_prices - order.subtotal) if order.subtotal else None
-        
-        result.append(OrderTrackingResponse(
-            order_id=order.id,
-            order_number=order.order_number,
-            order_date=order.created_at,
-            payment_status=order.payment_status.value,
-            current_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
-            subtotal=order.subtotal,
-            product_discount=product_discount,
-            coupon_code=order.coupon_code,
-            coupon_discount=order.coupon_discount,
-            delivery_charge=order.delivery_charge,
-            total_amount=order.total_amount,
-            order_items=order_items_list
-        ))
-    
-    return result
+# @router.get("/tracking", response_model=List[OrderTrackingResponse])
+# def get_all_orders_tracking(
+#     request: Request,
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """
+#     Get comprehensive tracking information for all orders of the current user.
+#     Returns detailed order information including pricing, product/plan breakdown, 
+#     address-wise tracking, and member details. Clearly indicates current vs past orders.
+#     """
+#     from .Order_schema import OrderItemTracking, MemberDetails, AddressDetails
+#     from .Order_model import OrderStatus
+#     
+#     orders = get_user_orders(db, current_user.id)
+#     
+#     result = []
+#     for order in orders:
+#         # Build order items list - clean mapping of member, address, product, and status
+#         order_items_list = []
+#         
+#         for item in order.items:
+#             snapshot = item.snapshot if item.snapshot else None
+#             
+#             # Get product details
+#             if snapshot and snapshot.product_data:
+#                 product_data = snapshot.product_data
+#                 product_id = product_data.get("ProductId", item.product_id)
+#                 product_name = product_data.get("Name", "Unknown Product")
+#                 plan_type = product_data.get("plan_type", None)
+#                 unit_price = item.unit_price
+#             else:
+#                 product_obj = item.product
+#                 product_id = product_obj.ProductId if product_obj else item.product_id
+#                 product_name = product_obj.Name if product_obj else "Unknown Product"
+#                 plan_type = product_obj.plan_type.value if product_obj and hasattr(product_obj.plan_type, 'value') else (str(product_obj.plan_type) if product_obj else None)
+#                 unit_price = item.unit_price
+#             
+#             quantity = item.quantity
+#             
+#             # Extract and validate group_id from snapshot (optimized: parse JSON once per item)
+#             # group_id distinguishes different packs of the same product
+#             group_id = extract_and_validate_group_id(snapshot)
+#             
+#             # Get member details
+#             if snapshot and snapshot.member_data:
+#                 member_data = snapshot.member_data
+#                 member = MemberDetails(
+#                     member_id=member_data.get("id", item.member_id),
+#                     name=member_data.get("name", "Unknown"),
+#                     relation=member_data.get("relation"),
+#                     age=member_data.get("age"),
+#                     gender=member_data.get("gender"),
+#                     dob=member_data.get("dob"),
+#                     mobile=member_data.get("mobile")
+#                 )
+#             else:
+#                 member_obj = item.member
+#                 relation_val = None
+#                 if member_obj:
+#                     if hasattr(member_obj.relation, 'value'):
+#                         relation_val = member_obj.relation.value
+#                     else:
+#                         relation_val = str(member_obj.relation) if member_obj.relation else None
+#                 
+#                 member = MemberDetails(
+#                     member_id=member_obj.id if member_obj else item.member_id,
+#                     name=member_obj.name if member_obj else "Unknown",
+#                     relation=relation_val,
+#                     age=member_obj.age if member_obj else None,
+#                     gender=member_obj.gender if member_obj else None,
+#                     dob=member_obj.dob.isoformat() if member_obj and member_obj.dob else None,
+#                     mobile=member_obj.mobile if member_obj else None
+#                 )
+#             
+#             # Get address details
+#             if snapshot and snapshot.address_data:
+#                 address_data = snapshot.address_data
+#                 address = AddressDetails(
+#                     address_id=address_data.get("id", item.address_id),
+#                     address_label=address_data.get("address_label"),
+#                     street_address=address_data.get("street_address"),
+#                     landmark=address_data.get("landmark"),
+#                     locality=address_data.get("locality"),
+#                     city=address_data.get("city"),
+#                     state=address_data.get("state"),
+#                     postal_code=address_data.get("postal_code"),
+#                     country=address_data.get("country")
+#                 )
+#             else:
+#                 address_obj = item.address
+#                 address = AddressDetails(
+#                     address_id=address_obj.id if address_obj else item.address_id,
+#                     address_label=address_obj.address_label if address_obj else None,
+#                     street_address=address_obj.street_address if address_obj else None,
+#                     landmark=address_obj.landmark if address_obj else None,
+#                     locality=address_obj.locality if address_obj else None,
+#                     city=address_obj.city if address_obj else None,
+#                     state=address_obj.state if address_obj else None,
+#                     postal_code=address_obj.postal_code if address_obj else None,
+#                     country=address_obj.country if address_obj else None
+#                 )
+#             
+#             # Get current and previous status
+#             current_status = item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status)
+#             previous_status = None
+#             
+#             # Get status history for this order item
+#             item_status_history = []
+#             for hist in order.status_history:
+#                 if hist.order_item_id == item.id:
+#                     item_status_history.append({
+#                         "status": hist.status.value,
+#                         "previous_status": hist.previous_status.value if hist.previous_status else None,
+#                         "notes": hist.notes,
+#                         "created_at": hist.created_at.isoformat() if hist.created_at else None
+#                     })
+#             
+#             # Sort status history by created_at (most recent first) for display
+#             item_status_history.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+#             
+#             # Get previous status from the most recent history entry (which contains previous_status)
+#             if item_status_history:
+#                 previous_status = item_status_history[0].get("previous_status")
+#             
+#             order_items_list.append(OrderItemTracking(
+#                 order_item_id=item.id,
+#                 product_id=product_id,
+#                 product_name=product_name,
+#                 plan_type=str(plan_type).lower() if plan_type else None,
+#                 group_id=group_id,  # Group ID to distinguish different packs of same product
+#                 quantity=quantity,
+#                 unit_price=unit_price,
+#                 member=member,
+#                 address=address,
+#                 current_status=current_status,
+#                 previous_status=previous_status,
+#                 status_updated_at=item.status_updated_at,
+#                 scheduled_date=item.scheduled_date,
+#                 technician_name=item.technician_name,
+#                 technician_contact=item.technician_contact,
+#                 created_at=item.created_at,
+#                 status_history=item_status_history
+#             ))
+#         
+#         # Sort order items by product_id to group related items together
+#         order_items_list.sort(key=lambda x: (x.product_id or 0, x.order_item_id))
+#         
+#         # Calculate product discount (difference between subtotal and sum of unit prices)
+#         # This represents the discount from product pricing (Price - SpecialPrice)
+#         # Sum unique products (since items with same product_id share the same price)
+#         seen_products = set()
+#         total_product_prices = 0.0
+#         for item in order_items_list:
+#             product_key = item.product_id
+#             if product_key and product_key not in seen_products:
+#                 total_product_prices += item.quantity * item.unit_price
+#                 seen_products.add(product_key)
+#         
+#         product_discount = max(0.0, total_product_prices - order.subtotal) if order.subtotal else None
+#         
+#         result.append(OrderTrackingResponse(
+#             order_id=order.id,
+#             order_number=order.order_number,
+#             order_date=order.created_at,
+#             payment_status=order.payment_status.value,
+#             current_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
+#             subtotal=order.subtotal,
+#             product_discount=product_discount,
+#             coupon_code=order.coupon_code,
+#             coupon_discount=order.coupon_discount,
+#             delivery_charge=order.delivery_charge,
+#             total_amount=order.total_amount,
+#             order_items=order_items_list
+#         ))
+#     
+#     return result
 
 
 @router.get("/{order_id}", response_model=OrderResponse)
