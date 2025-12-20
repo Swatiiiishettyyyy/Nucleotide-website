@@ -1,0 +1,1131 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>FRONTEND_INTEGRATION_GUIDE.md</title>
+<meta http-equiv="Content-type" content="text/html;charset=UTF-8">
+
+<style>
+/* https://github.com/microsoft/vscode/blob/master/extensions/markdown-language-features/media/markdown.css */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+body {
+	font-family: var(--vscode-markdown-font-family, -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif);
+	font-size: var(--vscode-markdown-font-size, 14px);
+	padding: 0 26px;
+	line-height: var(--vscode-markdown-line-height, 22px);
+	word-wrap: break-word;
+}
+
+#code-csp-warning {
+	position: fixed;
+	top: 0;
+	right: 0;
+	color: white;
+	margin: 16px;
+	text-align: center;
+	font-size: 12px;
+	font-family: sans-serif;
+	background-color:#444444;
+	cursor: pointer;
+	padding: 6px;
+	box-shadow: 1px 1px 1px rgba(0,0,0,.25);
+}
+
+#code-csp-warning:hover {
+	text-decoration: none;
+	background-color:#007acc;
+	box-shadow: 2px 2px 2px rgba(0,0,0,.25);
+}
+
+body.scrollBeyondLastLine {
+	margin-bottom: calc(100vh - 22px);
+}
+
+body.showEditorSelection .code-line {
+	position: relative;
+}
+
+body.showEditorSelection .code-active-line:before,
+body.showEditorSelection .code-line:hover:before {
+	content: "";
+	display: block;
+	position: absolute;
+	top: 0;
+	left: -12px;
+	height: 100%;
+}
+
+body.showEditorSelection li.code-active-line:before,
+body.showEditorSelection li.code-line:hover:before {
+	left: -30px;
+}
+
+.vscode-light.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.15);
+}
+
+.vscode-light.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.40);
+}
+
+.vscode-light.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+.vscode-dark.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.4);
+}
+
+.vscode-dark.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.60);
+}
+
+.vscode-dark.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+.vscode-high-contrast.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 160, 0, 0.7);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 160, 0, 1);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+img {
+	max-width: 100%;
+	max-height: 100%;
+}
+
+a {
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+}
+
+a:focus,
+input:focus,
+select:focus,
+textarea:focus {
+	outline: 1px solid -webkit-focus-ring-color;
+	outline-offset: -1px;
+}
+
+hr {
+	border: 0;
+	height: 2px;
+	border-bottom: 2px solid;
+}
+
+h1 {
+	padding-bottom: 0.3em;
+	line-height: 1.2;
+	border-bottom-width: 1px;
+	border-bottom-style: solid;
+}
+
+h1, h2, h3 {
+	font-weight: normal;
+}
+
+table {
+	border-collapse: collapse;
+}
+
+table > thead > tr > th {
+	text-align: left;
+	border-bottom: 1px solid;
+}
+
+table > thead > tr > th,
+table > thead > tr > td,
+table > tbody > tr > th,
+table > tbody > tr > td {
+	padding: 5px 10px;
+}
+
+table > tbody > tr + tr > td {
+	border-top: 1px solid;
+}
+
+blockquote {
+	margin: 0 7px 0 5px;
+	padding: 0 16px 0 10px;
+	border-left-width: 5px;
+	border-left-style: solid;
+}
+
+code {
+	font-family: Menlo, Monaco, Consolas, "Droid Sans Mono", "Courier New", monospace, "Droid Sans Fallback";
+	font-size: 1em;
+	line-height: 1.357em;
+}
+
+body.wordWrap pre {
+	white-space: pre-wrap;
+}
+
+pre:not(.hljs),
+pre.hljs code > div {
+	padding: 16px;
+	border-radius: 3px;
+	overflow: auto;
+}
+
+pre code {
+	color: var(--vscode-editor-foreground);
+	tab-size: 4;
+}
+
+/** Theming */
+
+.vscode-light pre {
+	background-color: rgba(220, 220, 220, 0.4);
+}
+
+.vscode-dark pre {
+	background-color: rgba(10, 10, 10, 0.4);
+}
+
+.vscode-high-contrast pre {
+	background-color: rgb(0, 0, 0);
+}
+
+.vscode-high-contrast h1 {
+	border-color: rgb(0, 0, 0);
+}
+
+.vscode-light table > thead > tr > th {
+	border-color: rgba(0, 0, 0, 0.69);
+}
+
+.vscode-dark table > thead > tr > th {
+	border-color: rgba(255, 255, 255, 0.69);
+}
+
+.vscode-light h1,
+.vscode-light hr,
+.vscode-light table > tbody > tr + tr > td {
+	border-color: rgba(0, 0, 0, 0.18);
+}
+
+.vscode-dark h1,
+.vscode-dark hr,
+.vscode-dark table > tbody > tr + tr > td {
+	border-color: rgba(255, 255, 255, 0.18);
+}
+
+</style>
+
+<style>
+/* Tomorrow Theme */
+/* http://jmblog.github.com/color-themes-for-google-code-highlightjs */
+/* Original theme - https://github.com/chriskempson/tomorrow-theme */
+
+/* Tomorrow Comment */
+.hljs-comment,
+.hljs-quote {
+	color: #8e908c;
+}
+
+/* Tomorrow Red */
+.hljs-variable,
+.hljs-template-variable,
+.hljs-tag,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-regexp,
+.hljs-deletion {
+	color: #c82829;
+}
+
+/* Tomorrow Orange */
+.hljs-number,
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-literal,
+.hljs-type,
+.hljs-params,
+.hljs-meta,
+.hljs-link {
+	color: #f5871f;
+}
+
+/* Tomorrow Yellow */
+.hljs-attribute {
+	color: #eab700;
+}
+
+/* Tomorrow Green */
+.hljs-string,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition {
+	color: #718c00;
+}
+
+/* Tomorrow Blue */
+.hljs-title,
+.hljs-section {
+	color: #4271ae;
+}
+
+/* Tomorrow Purple */
+.hljs-keyword,
+.hljs-selector-tag {
+	color: #8959a8;
+}
+
+.hljs {
+	display: block;
+	overflow-x: auto;
+	color: #4d4d4c;
+	padding: 0.5em;
+}
+
+.hljs-emphasis {
+	font-style: italic;
+}
+
+.hljs-strong {
+	font-weight: bold;
+}
+</style>
+
+<style>
+/*
+ * Markdown PDF CSS
+ */
+
+ body {
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "Meiryo";
+	padding: 0 12px;
+}
+
+pre {
+	background-color: #f8f8f8;
+	border: 1px solid #cccccc;
+	border-radius: 3px;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
+}
+
+pre:not(.hljs) {
+	padding: 23px;
+	line-height: 19px;
+}
+
+blockquote {
+	background: rgba(127, 127, 127, 0.1);
+	border-color: rgba(0, 122, 204, 0.5);
+}
+
+.emoji {
+	height: 1.4em;
+}
+
+code {
+	font-size: 14px;
+	line-height: 19px;
+}
+
+/* for inline code */
+:not(pre):not(.hljs) > code {
+	color: #C9AE75; /* Change the old color so it seems less like an error */
+	font-size: inherit;
+}
+
+/* Page Break : use <div class="page"/> to insert page break
+-------------------------------------------------------- */
+.page {
+	page-break-after: always;
+}
+
+</style>
+
+<script src="https://unpkg.com/mermaid/dist/mermaid.min.js"></script>
+</head>
+<body>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: document.body.classList.contains('vscode-dark') || document.body.classList.contains('vscode-high-contrast')
+          ? 'dark'
+          : 'default'
+    });
+  </script>
+<h1 id="frontend-integration-guide">Frontend Integration Guide</h1>
+<h2 id="overview">Overview</h2>
+<p>This guide is for frontend developers and fullstack integrators working with the Nucleotide-website_v11 API. It provides detailed information about all API endpoints, with special focus on the Google Meet API (<code>/gmeet</code>) endpoints and OAuth callback handling.</p>
+<p><strong>Base URL:</strong> <code>https://your-domain.com</code> (or <code>http://localhost:8030</code> for development)</p>
+<hr>
+<h2 id="table-of-contents">Table of Contents</h2>
+<ol>
+<li><a href="#authentication">Authentication</a></li>
+<li><a href="#api-endpoints-overview">API Endpoints Overview</a></li>
+<li><a href="#google-meet-api---detailed-guide">Google Meet API - Detailed Guide</a></li>
+<li><a href="#oauth-callback-flow">OAuth Callback Flow</a></li>
+<li><a href="#frontend-implementation-examples">Frontend Implementation Examples</a></li>
+<li><a href="#error-handling">Error Handling</a></li>
+<li><a href="#testing">Testing</a></li>
+</ol>
+<hr>
+<h2 id="authentication">Authentication</h2>
+<h3 id="getting-an-access-token">Getting an Access Token</h3>
+<p>Most endpoints require authentication via JWT tokens.</p>
+<h4 id="1-request-otp">1. Request OTP</h4>
+<pre class="hljs"><code><div><span class="hljs-attribute">POST /auth/send-otp
+Content-Type</span>: application/json
+
+<span class="json">{
+  <span class="hljs-attr">"phone"</span>: <span class="hljs-string">"+919876543210"</span>
+}
+</span></div></code></pre>
+<p><strong>Response:</strong></p>
+<pre class="hljs"><code><div>{
+  <span class="hljs-attr">"status"</span>: <span class="hljs-string">"success"</span>,
+  <span class="hljs-attr">"message"</span>: <span class="hljs-string">"OTP sent successfully"</span>
+}
+</div></code></pre>
+<h4 id="2-verify-otp">2. Verify OTP</h4>
+<pre class="hljs"><code><div><span class="hljs-attribute">POST /auth/verify-otp
+Content-Type</span>: application/json
+
+<span class="json">{
+  <span class="hljs-attr">"phone"</span>: <span class="hljs-string">"+919876543210"</span>,
+  <span class="hljs-attr">"otp"</span>: <span class="hljs-string">"123456"</span>
+}
+</span></div></code></pre>
+<p><strong>Response:</strong></p>
+<pre class="hljs"><code><div>{
+  <span class="hljs-attr">"status"</span>: <span class="hljs-string">"success"</span>,
+  <span class="hljs-attr">"data"</span>: {
+    <span class="hljs-attr">"access_token"</span>: <span class="hljs-string">"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."</span>,
+    <span class="hljs-attr">"user_id"</span>: <span class="hljs-number">123</span>,
+    <span class="hljs-attr">"expires_in"</span>: <span class="hljs-number">86400</span>
+  }
+}
+</div></code></pre>
+<h4 id="3-use-token-in-requests">3. Use Token in Requests</h4>
+<p>Include the token in the <code>Authorization</code> header:</p>
+<pre class="hljs"><code><div><span class="hljs-attribute">GET /profile
+Authorization</span>: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+</div></code></pre>
+<hr>
+<h2 id="api-endpoints-overview">API Endpoints Overview</h2>
+<h3 id="core-modules">Core Modules</h3>
+<table>
+<thead>
+<tr>
+<th>Module</th>
+<th>Base Path</th>
+<th>Key Endpoints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Auth</td>
+<td><code>/auth</code></td>
+<td><code>POST /auth/send-otp</code>, <code>POST /auth/verify-otp</code></td>
+</tr>
+<tr>
+<td>Profile</td>
+<td><code>/profile</code></td>
+<td><code>GET /profile</code>, <code>PUT /profile</code></td>
+</tr>
+<tr>
+<td>Products</td>
+<td><code>/products</code></td>
+<td><code>GET /products</code>, <code>GET /products/{id}</code></td>
+</tr>
+<tr>
+<td>Categories</td>
+<td><code>/categories</code></td>
+<td><code>GET /categories</code></td>
+</tr>
+<tr>
+<td>Cart</td>
+<td><code>/cart</code></td>
+<td><code>GET /cart</code>, <code>POST /cart/add</code>, <code>DELETE /cart/{id}</code></td>
+</tr>
+<tr>
+<td>Address</td>
+<td><code>/address</code></td>
+<td><code>GET /address</code>, <code>POST /address</code>, <code>PUT /address/{id}</code></td>
+</tr>
+<tr>
+<td>Member</td>
+<td><code>/member</code></td>
+<td><code>GET /member</code>, <code>POST /member</code>, <code>PUT /member/{id}</code></td>
+</tr>
+<tr>
+<td>Orders</td>
+<td><code>/orders</code></td>
+<td><code>POST /orders</code>, <code>GET /orders</code>, <code>GET /orders/{id}</code></td>
+</tr>
+<tr>
+<td>Consent</td>
+<td><code>/consent</code></td>
+<td><code>GET /consent</code>, <code>POST /consent</code></td>
+</tr>
+<tr>
+<td>Sessions</td>
+<td><code>/sessions</code></td>
+<td><code>GET /sessions</code>, <code>DELETE /sessions/{id}</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="google-meet-api-gmeet">Google Meet API (<code>/gmeet</code>)</h3>
+<p>See <a href="#google-meet-api---detailed-guide">Google Meet API - Detailed Guide</a> below.</p>
+<hr>
+<h2 id="google-meet-api---detailed-guide">Google Meet API - Detailed Guide</h2>
+<p>The Google Meet API enables counsellors to connect their Google Calendar and allows patients to book appointments with automatic Google Meet link generation.</p>
+<h3 id="concepts">Concepts</h3>
+<h4 id="1-counsellor-id">1. Counsellor ID</h4>
+<ul>
+<li><strong>6-character alphanumeric ID</strong> (e.g., <code>A3X9K2</code>)</li>
+<li>Auto-generated during first OAuth connection</li>
+<li>Used to identify counsellors in all API calls</li>
+<li>Should be stored securely after OAuth completion</li>
+</ul>
+<h4 id="2-oauth-flow">2. OAuth Flow</h4>
+<ul>
+<li>Counsellors authorize the app to access their Google Calendar</li>
+<li>One-time setup per counsellor</li>
+<li>Tokens are stored securely and auto-refreshed</li>
+</ul>
+<h4 id="3-appointment-booking">3. Appointment Booking</h4>
+<ul>
+<li>Patients book appointments with counsellors</li>
+<li>System creates Google Calendar event</li>
+<li>Google Meet link is automatically generated</li>
+<li>Email invitations sent (if patient email provided)</li>
+</ul>
+<h3 id="endpoints">Endpoints</h3>
+<h4 id="1-universal-counsellor-connect">1. Universal Counsellor Connect</h4>
+<p><strong>Endpoint:</strong> <code>GET /gmeet/counsellor/connect</code></p>
+<p><strong>Purpose:</strong> Initiate OAuth flow for counsellor onboarding (new or existing).</p>
+<p><strong>Usage:</strong></p>
+<pre class="hljs"><code><div><span class="hljs-comment">// Redirect user to this endpoint</span>
+<span class="hljs-built_in">window</span>.location.href = <span class="hljs-string">'https://api.yourapp.com/gmeet/counsellor/connect'</span>;
+</div></code></pre>
+<p><strong>Flow:</strong></p>
+<ol>
+<li>User clicks &quot;Connect Calendar&quot; button</li>
+<li>Frontend redirects to <code>/gmeet/counsellor/connect</code></li>
+<li>Backend redirects to Google OAuth consent screen</li>
+<li>User authorizes calendar access</li>
+<li>Google redirects to <code>/gmeet/auth/callback</code></li>
+<li>Backend processes OAuth and redirects to frontend success page</li>
+</ol>
+<p><strong>Query Parameters:</strong></p>
+<ul>
+<li><code>return_url</code> (optional): If <code>true</code>, returns JSON instead of redirecting (for API testing)</li>
+</ul>
+<p><strong>Response (if <code>return_url=true</code>):</strong></p>
+<pre class="hljs"><code><div>{
+  <span class="hljs-attr">"status"</span>: <span class="hljs-string">"success"</span>,
+  <span class="hljs-attr">"message"</span>: <span class="hljs-string">"Authorization URL generated..."</span>,
+  <span class="hljs-attr">"authorization_url"</span>: <span class="hljs-string">"https://accounts.google.com/o/oauth2/auth?..."</span>,
+  <span class="hljs-attr">"redirect_uri"</span>: <span class="hljs-string">"https://api.yourapp.com/gmeet/auth/callback"</span>
+}
+</div></code></pre>
+<p><strong>Important:</strong> This endpoint should be called from a browser (not via fetch/AJAX) because it performs HTTP redirects.</p>
+<hr>
+<h4 id="2-oauth-callback-backend-handled">2. OAuth Callback (Backend Handled)</h4>
+<p><strong>Endpoint:</strong> <code>GET /gmeet/auth/callback</code></p>
+<p><strong>Purpose:</strong> Handles Google OAuth callback. <strong>Do not call this directly from frontend.</strong></p>
+<p><strong>How it works:</strong></p>
+<ul>
+<li>Google redirects here after authorization</li>
+<li>Backend exchanges authorization code for tokens</li>
+<li>Backend fetches user info from Google</li>
+<li>Backend creates/updates counsellor record</li>
+<li>Backend redirects to frontend success/error page</li>
+</ul>
+<p><strong>Query Parameters (from Google):</strong></p>
+<ul>
+<li><code>code</code>: Authorization code</li>
+<li><code>state</code>: Either <code>&quot;new_counsellor_signup&quot;</code> or existing <code>counsellor_id</code></li>
+</ul>
+<p><strong>Frontend Redirects:</strong></p>
+<p>If <code>FRONTEND_COUNSELLOR_SUCCESS_URL</code> is configured:</p>
+<pre class="hljs"><code><div>GET /gmeet/auth/callback?code=...&amp;state=...
+→ Redirects to: FRONTEND_COUNSELLOR_SUCCESS_URL?counsellor_id=A3X9K2&amp;name=Dr.%20John&amp;email=john@example.com&amp;is_new=true
+</div></code></pre>
+<p>If <code>FRONTEND_COUNSELLOR_ERROR_URL</code> is configured (on error):</p>
+<pre class="hljs"><code><div>GET /gmeet/auth/callback?code=...&amp;state=...&amp;error=...
+→ Redirects to: FRONTEND_COUNSELLOR_ERROR_URL?error=oauth_failed&amp;message=Failed%20to%20connect...
+</div></code></pre>
+<p>If frontend URLs are NOT configured:</p>
+<ul>
+<li>Returns JSON response instead of redirecting</li>
+</ul>
+<hr>
+<h4 id="3-check-availability">3. Check Availability</h4>
+<p><strong>Endpoint:</strong> <code>GET /gmeet/availability</code></p>
+<p><strong>Purpose:</strong> Get available time slots for a counsellor.</p>
+<p><strong>Query Parameters:</strong></p>
+<ul>
+<li><code>counsellor_id</code> (required): Counsellor's 6-character ID</li>
+<li><code>start_time</code> (required): ISO format datetime (e.g., <code>2024-12-10T09:00:00+05:30</code>)</li>
+<li><code>end_time</code> (required): ISO format datetime (e.g., <code>2024-12-10T18:00:00+05:30</code>)</li>
+</ul>
+<p><strong>Example Request:</strong></p>
+<pre class="hljs"><code><div><span class="hljs-keyword">const</span> response = <span class="hljs-keyword">await</span> fetch(
+  <span class="hljs-string">`https://api.yourapp.com/gmeet/availability?counsellor_id=A3X9K2&amp;start_time=2024-12-10T09:00:00+05:30&amp;end_time=2024-12-10T18:00:00+05:30`</span>
+);
+<span class="hljs-keyword">const</span> data = <span class="hljs-keyword">await</span> response.json();
+</div></code></pre>
+<p><strong>Response:</strong></p>
+<pre class="hljs"><code><div>{
+  <span class="hljs-attr">"status"</span>: <span class="hljs-string">"success"</span>,
+  <span class="hljs-attr">"message"</span>: <span class="hljs-string">"Availability fetched successfully"</span>,
+  <span class="hljs-attr">"counsellor_id"</span>: <span class="hljs-string">"A3X9K2"</span>,
+  <span class="hljs-attr">"start_time"</span>: <span class="hljs-string">"2024-12-10T09:00:00+05:30"</span>,
+  <span class="hljs-attr">"end_time"</span>: <span class="hljs-string">"2024-12-10T18:00:00+05:30"</span>,
+  <span class="hljs-attr">"available_slots"</span>: [
+    {
+      <span class="hljs-attr">"start"</span>: <span class="hljs-string">"2024-12-10T09:00:00+05:30"</span>,
+      <span class="hljs-attr">"end"</span>: <span class="hljs-string">"2024-12-10T09:30:00+05:30"</span>
+    },
+    {
+      <span class="hljs-attr">"start"</span>: <span class="hljs-string">"2024-12-10T10:00:00+05:30"</span>,
+      <span class="hljs-attr">"end"</span>: <span class="hljs-string">"2024-12-10T10:30:00+05:30"</span>
+    }
+  ]
+}
+</div></code></pre>
+<p><strong>Frontend Implementation:</strong></p>
+<pre class="hljs"><code><div><span class="hljs-keyword">async</span> <span class="hljs-function"><span class="hljs-keyword">function</span> <span class="hljs-title">getAvailability</span>(<span class="hljs-params">counsellorId, startTime, endTime</span>) </span>{
+  <span class="hljs-keyword">const</span> params = <span class="hljs-keyword">new</span> URLSearchParams({
+    <span class="hljs-attr">counsellor_id</span>: counsellorId,
+    <span class="hljs-attr">start_time</span>: startTime,
+    <span class="hljs-attr">end_time</span>: endTime
+  });
+  
+  <span class="hljs-keyword">const</span> response = <span class="hljs-keyword">await</span> fetch(
+    <span class="hljs-string">`https://api.yourapp.com/gmeet/availability?<span class="hljs-subst">${params}</span>`</span>
+  );
+  
+  <span class="hljs-keyword">if</span> (!response.ok) {
+    <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-built_in">Error</span>(<span class="hljs-string">'Failed to fetch availability'</span>);
+  }
+  
+  <span class="hljs-keyword">return</span> <span class="hljs-keyword">await</span> response.json();
+}
+</div></code></pre>
+<hr>
+<h4 id="4-book-appointment">4. Book Appointment</h4>
+<p><strong>Endpoint:</strong> <code>POST /gmeet/book</code></p>
+<p><strong>Purpose:</strong> Book a Google Meet appointment.</p>
+<p><strong>Request Body:</strong></p>
+<pre class="hljs"><code><div>{
+  <span class="hljs-attr">"counsellor_id"</span>: <span class="hljs-string">"A3X9K2"</span>,
+  <span class="hljs-attr">"counsellor_member_id"</span>: <span class="hljs-string">"MEMBER123"</span>,
+  <span class="hljs-attr">"patient_name"</span>: <span class="hljs-string">"John Doe"</span>,
+  <span class="hljs-attr">"patient_email"</span>: <span class="hljs-string">"john@example.com"</span>,
+  <span class="hljs-attr">"patient_phone"</span>: <span class="hljs-string">"+91-9876543210"</span>,
+  <span class="hljs-attr">"start_time"</span>: <span class="hljs-string">"2024-12-10T10:00:00+05:30"</span>,
+  <span class="hljs-attr">"end_time"</span>: <span class="hljs-string">"2024-12-10T10:30:00+05:30"</span>
+}
+</div></code></pre>
+<p><strong>Example Request:</strong></p>
+<pre class="hljs"><code><div><span class="hljs-keyword">const</span> response = <span class="hljs-keyword">await</span> fetch(<span class="hljs-string">'https://api.yourapp.com/gmeet/book'</span>, {
+  <span class="hljs-attr">method</span>: <span class="hljs-string">'POST'</span>,
+  <span class="hljs-attr">headers</span>: {
+    <span class="hljs-string">'Content-Type'</span>: <span class="hljs-string">'application/json'</span>
+  },
+  <span class="hljs-attr">body</span>: <span class="hljs-built_in">JSON</span>.stringify({
+    <span class="hljs-attr">counsellor_id</span>: <span class="hljs-string">'A3X9K2'</span>,
+    <span class="hljs-attr">counsellor_member_id</span>: <span class="hljs-string">'MEMBER123'</span>,
+    <span class="hljs-attr">patient_name</span>: <span class="hljs-string">'John Doe'</span>,
+    <span class="hljs-attr">patient_email</span>: <span class="hljs-string">'john@example.com'</span>,
+    <span class="hljs-attr">patient_phone</span>: <span class="hljs-string">'+91-9876543210'</span>,
+    <span class="hljs-attr">start_time</span>: <span class="hljs-string">'2024-12-10T10:00:00+05:30'</span>,
+    <span class="hljs-attr">end_time</span>: <span class="hljs-string">'2024-12-10T10:30:00+05:30'</span>
+  })
+});
+
+<span class="hljs-keyword">const</span> booking = <span class="hljs-keyword">await</span> response.json();
+</div></code></pre>
+<p><strong>Response:</strong></p>
+<pre class="hljs"><code><div>{
+  <span class="hljs-attr">"status"</span>: <span class="hljs-string">"success"</span>,
+  <span class="hljs-attr">"message"</span>: <span class="hljs-string">"Appointment booked successfully"</span>,
+  <span class="hljs-attr">"booking_id"</span>: <span class="hljs-number">1</span>,
+  <span class="hljs-attr">"counsellor_id"</span>: <span class="hljs-string">"A3X9K2"</span>,
+  <span class="hljs-attr">"counsellor_member_id"</span>: <span class="hljs-string">"MEMBER123"</span>,
+  <span class="hljs-attr">"google_event_id"</span>: <span class="hljs-string">"abc123xyz789"</span>,
+  <span class="hljs-attr">"meet_link"</span>: <span class="hljs-string">"https://meet.google.com/abc-defg-hij"</span>,
+  <span class="hljs-attr">"calendar_link"</span>: <span class="hljs-string">"https://www.google.com/calendar/event?eid=..."</span>,
+  <span class="hljs-attr">"start_time"</span>: <span class="hljs-string">"2024-12-10T10:00:00+05:30"</span>,
+  <span class="hljs-attr">"end_time"</span>: <span class="hljs-string">"2024-12-10T10:30:00+05:30"</span>,
+  <span class="hljs-attr">"patient_name"</span>: <span class="hljs-string">"John Doe"</span>,
+  <span class="hljs-attr">"patient_email"</span>: <span class="hljs-string">"john@example.com"</span>,
+  <span class="hljs-attr">"patient_phone"</span>: <span class="hljs-string">"+91-9876543210"</span>,
+  <span class="hljs-attr">"notifications_sent"</span>: <span class="hljs-literal">true</span>
+}
+</div></code></pre>
+<p><strong>Important Fields:</strong></p>
+<ul>
+<li><code>meet_link</code>: Google Meet video call link (share with patient)</li>
+<li><code>calendar_link</code>: Google Calendar event link</li>
+<li><code>booking_id</code>: Use this to cancel the appointment later</li>
+</ul>
+<hr>
+<h4 id="5-cancel-appointment">5. Cancel Appointment</h4>
+<p><strong>Endpoint:</strong> <code>DELETE /gmeet/appointment/{counsellor_id}/{booking_id}</code></p>
+<p><strong>Purpose:</strong> Cancel an appointment and remove it from Google Calendar.</p>
+<p><strong>Query Parameters:</strong></p>
+<ul>
+<li><code>send_notifications</code> (optional): Send cancellation emails (default: <code>true</code>)</li>
+</ul>
+<p><strong>Example Request:</strong></p>
+<pre class="hljs"><code><div><span class="hljs-keyword">const</span> response = <span class="hljs-keyword">await</span> fetch(
+  <span class="hljs-string">`https://api.yourapp.com/gmeet/appointment/A3X9K2/1?send_notifications=true`</span>,
+  { <span class="hljs-attr">method</span>: <span class="hljs-string">'DELETE'</span> }
+);
+
+<span class="hljs-keyword">const</span> result = <span class="hljs-keyword">await</span> response.json();
+</div></code></pre>
+<p><strong>Response:</strong></p>
+<pre class="hljs"><code><div>{
+  <span class="hljs-attr">"status"</span>: <span class="hljs-string">"success"</span>,
+  <span class="hljs-attr">"message"</span>: <span class="hljs-string">"Appointment cancelled successfully"</span>,
+  <span class="hljs-attr">"booking_id"</span>: <span class="hljs-number">1</span>,
+  <span class="hljs-attr">"counsellor_id"</span>: <span class="hljs-string">"A3X9K2"</span>,
+  <span class="hljs-attr">"google_event_id"</span>: <span class="hljs-string">"abc123xyz789"</span>,
+  <span class="hljs-attr">"notifications_sent"</span>: <span class="hljs-literal">true</span>
+}
+</div></code></pre>
+<hr>
+<h2 id="oauth-callback-flow">OAuth Callback Flow</h2>
+<h3 id="understanding-the-flow">Understanding the Flow</h3>
+<p>The OAuth callback flow is <strong>automatic</strong> - you don't need to call <code>/gmeet/auth/callback</code> directly. Here's how it works:</p>
+<pre class="hljs"><code><div>┌─────────────┐
+│   Frontend  │
+│   (React)   │
+└──────┬──────┘
+       │
+       │ 1. User clicks &quot;Connect Calendar&quot;
+       │    window.location.href = '/gmeet/counsellor/connect'
+       ▼
+┌─────────────────────┐
+│   Backend API       │
+│ /gmeet/counsellor/  │
+│      connect        │
+└──────┬──────────────┘
+       │
+       │ 2. Redirects to Google
+       ▼
+┌─────────────────────┐
+│   Google OAuth      │
+│   Consent Screen    │
+└──────┬──────────────┘
+       │
+       │ 3. User authorizes
+       │    Google redirects with code
+       ▼
+┌─────────────────────┐
+│   Backend API       │
+│ /gmeet/auth/        │
+│    callback         │
+└──────┬──────────────┘
+       │
+       │ 4. Backend processes OAuth
+       │    Creates/updates counsellor
+       │    Redirects to frontend
+       ▼
+┌─────────────────────┐
+│   Frontend          │
+│   Success Page      │
+│   ?counsellor_id=   │
+│   A3X9K2&amp;name=...   │
+└─────────────────────┘
+</div></code></pre>
+<h3 id="frontend-pages-needed">Frontend Pages Needed</h3>
+<p>You need to create <strong>two pages</strong> in your frontend:</p>
+<h4 id="1-success-page">1. Success Page</h4>
+<p><strong>Route:</strong> <code>/counsellor/welcome</code> (or your custom route)</p>
+<p><strong>URL Parameters:</strong></p>
+<ul>
+<li><code>counsellor_id</code> (string): Unique 6-character ID</li>
+<li><code>name</code> (string): Counsellor's name from Google</li>
+<li><code>email</code> (string): Counsellor's email</li>
+<li><code>is_new</code> (string): <code>&quot;true&quot;</code> if first signup, <code>&quot;false&quot;</code> if returning</li>
+</ul>
+<p><strong>Example URL:</strong></p>
+<pre class="hljs"><code><div>https://yourapp.com/counsellor/welcome?counsellor_id=A3X9K2&amp;name=Dr.%20John%20Doe&amp;email=john@example.com&amp;is_new=true
+</div></code></pre>
+<p><strong>Implementation Example (React):</strong></p>
+<pre class="hljs"><code><div><span class="hljs-keyword">import</span> { useSearchParams } <span class="hljs-keyword">from</span> <span class="hljs-string">'react-router-dom'</span>;
+
+<span class="hljs-function"><span class="hljs-keyword">function</span> <span class="hljs-title">CounsellorWelcomePage</span>(<span class="hljs-params"></span>) </span>{
+  <span class="hljs-keyword">const</span> [searchParams] = useSearchParams();
+  <span class="hljs-keyword">const</span> counsellorId = searchParams.get(<span class="hljs-string">'counsellor_id'</span>);
+  <span class="hljs-keyword">const</span> name = searchParams.get(<span class="hljs-string">'name'</span>);
+  <span class="hljs-keyword">const</span> email = searchParams.get(<span class="hljs-string">'email'</span>);
+  <span class="hljs-keyword">const</span> isNew = searchParams.get(<span class="hljs-string">'is_new'</span>) === <span class="hljs-string">'true'</span>;
+
+  <span class="hljs-keyword">const</span> copyId = <span class="hljs-function"><span class="hljs-params">()</span> =&gt;</span> {
+    navigator.clipboard.writeText(counsellorId);
+    alert(<span class="hljs-string">'Counsellor ID copied to clipboard!'</span>);
+  };
+
+  <span class="hljs-keyword">return</span> (
+    <span class="xml"><span class="hljs-tag">&lt;<span class="hljs-name">div</span>&gt;</span>
+      <span class="hljs-tag">&lt;<span class="hljs-name">h1</span>&gt;</span>{isNew ? 'Welcome! Calendar Connected!' : 'Welcome Back! Calendar Reconnected!'}<span class="hljs-tag">&lt;/<span class="hljs-name">h1</span>&gt;</span>
+      <span class="hljs-tag">&lt;<span class="hljs-name">p</span>&gt;</span>Your Google Calendar has been successfully linked.<span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+      
+      <span class="hljs-tag">&lt;<span class="hljs-name">div</span>&gt;</span>
+        <span class="hljs-tag">&lt;<span class="hljs-name">strong</span>&gt;</span>Counsellor ID:<span class="hljs-tag">&lt;/<span class="hljs-name">strong</span>&gt;</span> {counsellorId}
+        <span class="hljs-tag">&lt;<span class="hljs-name">button</span> <span class="hljs-attr">onClick</span>=<span class="hljs-string">{copyId}</span>&gt;</span>Copy<span class="hljs-tag">&lt;/<span class="hljs-name">button</span>&gt;</span>
+      <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+      <span class="hljs-tag">&lt;<span class="hljs-name">div</span>&gt;</span><span class="hljs-tag">&lt;<span class="hljs-name">strong</span>&gt;</span>Name:<span class="hljs-tag">&lt;/<span class="hljs-name">strong</span>&gt;</span> {name}<span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+      <span class="hljs-tag">&lt;<span class="hljs-name">div</span>&gt;</span><span class="hljs-tag">&lt;<span class="hljs-name">strong</span>&gt;</span>Email:<span class="hljs-tag">&lt;/<span class="hljs-name">strong</span>&gt;</span> {email}<span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+      
+      <span class="hljs-tag">&lt;<span class="hljs-name">button</span> <span class="hljs-attr">onClick</span>=<span class="hljs-string">{()</span> =&gt;</span> window.location.href = '/dashboard'}&gt;
+        Go to Dashboard
+      <span class="hljs-tag">&lt;/<span class="hljs-name">button</span>&gt;</span>
+    <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span></span>
+  );
+}
+</div></code></pre>
+<p><strong>Implementation Example (Vue):</strong></p>
+<pre class="hljs"><code><div>&lt;template&gt;
+  &lt;div&gt;
+    &lt;h1&gt;{{ isNew ? 'Welcome! Calendar Connected!' : 'Welcome Back! Calendar Reconnected!' }}&lt;/h1&gt;
+    &lt;p&gt;Your Google Calendar has been successfully linked.&lt;/p&gt;
+    
+    &lt;div&gt;
+      &lt;strong&gt;Counsellor ID:&lt;/strong&gt; {{ counsellorId }}
+      &lt;button @click=&quot;copyId&quot;&gt;Copy&lt;/button&gt;
+    &lt;/div&gt;
+    &lt;div&gt;&lt;strong&gt;Name:&lt;/strong&gt; {{ name }}&lt;/div&gt;
+    &lt;div&gt;&lt;strong&gt;Email:&lt;/strong&gt; {{ email }}&lt;/div&gt;
+    
+    &lt;button @click=&quot;goToDashboard&quot;&gt;Go to Dashboard&lt;/button&gt;
+  &lt;/div&gt;
+&lt;/template&gt;
+
+&lt;script&gt;
+export default {
+  data() {
+    return {
+      counsellorId: '',
+      name: '',
+      email: '',
+      isNew: false
+    };
+  },
+  mounted() {
+    this.counsellorId = this.$route.query.counsellor_id;
+    this.name = this.$route.query.name;
+    this.email = this.$route.query.email;
+    this.isNew = this.$route.query.is_new === 'true';
+  },
+  methods: {
+    copyId() {
+      navigator.clipboard.writeText(this.counsellorId);
+      alert('Counsellor ID copied to clipboard!');
+    },
+    goToDashboard() {
+      this.$router.push('/dashboard');
+    }
+  }
+};
+&lt;/script&gt;
+</div></code></pre>
+<h4 id="2-error-page">2. Error Page</h4>
+<p><strong>Route:</strong> <code>/counsellor/error</code> (or your custom route)</p>
+<p><strong>URL Parameters:</strong></p>
+<ul>
+<li><code>error</code> (string): Error code (e.g., <code>&quot;oauth_failed&quot;</code>, <code>&quot;token_error&quot;</code>)</li>
+<li><code>message</code> (string): Human-readable error message</li>
+</ul>
+<p><strong>Example URL:</strong></p>
+<pre class="hljs"><code><div>https://yourapp.com/counsellor/error?error=oauth_failed&amp;message=Failed%20to%20connect%20calendar.%20Please%20try%20again.
+</div></code></pre>
+<p><strong>Implementation Example (React):</strong></p>
+<pre class="hljs"><code><div><span class="hljs-keyword">import</span> { useSearchParams } <span class="hljs-keyword">from</span> <span class="hljs-string">'react-router-dom'</span>;
+
+<span class="hljs-function"><span class="hljs-keyword">function</span> <span class="hljs-title">CounsellorErrorPage</span>(<span class="hljs-params"></span>) </span>{
+  <span class="hljs-keyword">const</span> [searchParams] = useSearchParams();
+  <span class="hljs-keyword">const</span> errorCode = searchParams.get(<span class="hljs-string">'error'</span>);
+  <span class="hljs-keyword">const</span> errorMessage = searchParams.get(<span class="hljs-string">'message'</span>);
+
+  <span class="hljs-keyword">const</span> tryAgain = <span class="hljs-function"><span class="hljs-params">()</span> =&gt;</span> {
+    <span class="hljs-built_in">window</span>.location.href = <span class="hljs-string">'https://api.yourapp.com/gmeet/counsellor/connect'</span>;
+  };
+
+  <span class="hljs-keyword">return</span> (
+    <span class="xml"><span class="hljs-tag">&lt;<span class="hljs-name">div</span>&gt;</span>
+      <span class="hljs-tag">&lt;<span class="hljs-name">h1</span>&gt;</span>Connection Failed<span class="hljs-tag">&lt;/<span class="hljs-name">h1</span>&gt;</span>
+      <span class="hljs-tag">&lt;<span class="hljs-name">p</span>&gt;</span>{errorMessage || 'An unexpected error occurred while connecting your calendar.'}<span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+      <span class="hljs-tag">&lt;<span class="hljs-name">p</span>&gt;</span>Error Code: {errorCode}<span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+      
+      <span class="hljs-tag">&lt;<span class="hljs-name">button</span> <span class="hljs-attr">onClick</span>=<span class="hljs-string">{tryAgain}</span>&gt;</span>Try Again<span class="hljs-tag">&lt;/<span class="hljs-name">button</span>&gt;</span>
+      <span class="hljs-tag">&lt;<span class="hljs-name">button</span> <span class="hljs-attr">onClick</span>=<span class="hljs-string">{()</span> =&gt;</span> window.history.back()}&gt;Close<span class="hljs-tag">&lt;/<span class="hljs-name">button</span>&gt;</span>
+    <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span></span>
+  );
+}
+</div></code></pre>
+<h3 id="configuration">Configuration</h3>
+<p>Set these environment variables in AWS App Runner:</p>
+<pre class="hljs"><code><div>FRONTEND_COUNSELLOR_SUCCESS_URL=https://yourapp.com/counsellor/welcome
+FRONTEND_COUNSELLOR_ERROR_URL=https://yourapp.com/counsellor/error
+</div></code></pre>
+<p><strong>Note:</strong> If these are not set, the backend will return JSON responses instead of redirecting (useful for API testing).</p>
+<hr>
+<h2 id="frontend-implementation-examples">Frontend Implementation Examples</h2>
+<h3 id="complete-oauth-flow-react">Complete OAuth Flow (React)</h3>
+<pre class="hljs"><code><div><span class="hljs-keyword">import</span> React, { useState } <span class="hljs-keyword">from</span> <span class="hljs-string">'react'</span>;
+
+<span class="hljs-function"><span class="hljs-keyword">function</span> <span class="hljs-title">ConnectCalendarButton</span>(<span class="hljs-params"></span>) </span>{
+  <span class="hljs-keyword">const</span> [loading, setLoading] = useState(<span class="hljs-literal">false</span>);
+
+  <span class="hljs-keyword">const</span> handleConnect = <span class="hljs-function"><span class="hljs-params">()</span> =&gt;</span> {
+    setLoading(<span class="hljs-literal">true</span>);
+    <span class="hljs-comment">// Redirect to backend OAuth endpoint</span>
+    <span class="hljs-comment">// Backend will handle the rest and redirect back to frontend</span>
+    <span class="hljs-built_in">window</span>.location.href = <span class="hljs-string">'https://api.yourapp.com/gmeet/counsellor/connect'</span>;
+  };
+
+  <span class="hljs-keyword">return</span> (
+    <span class="xml"><span class="hljs-tag">&lt;<span class="hljs-name">button</span> <span class="hljs-attr">onClick</span>=<span class="hljs-string">{handleConnect}</span> <span class="hljs-attr">disabled</span>=<span class="hljs-string">{loading}</span>&gt;</span>
+      {loading ? 'Connecting...' : 'Connect Google Calendar'}
+    <span class="hljs-tag">&lt;/<span class="hljs-name">button</span>&gt;</span></span>
+  );
+}
+</div></code></pre>
+<h3 id="booking-flow-react">Booking Flow (React)</h3>
+<pre class="hljs"><code><div><span class="hljs-keyword">import</span> React, { useState, useEffect } <span class="hljs-keyword">from</span> <span class="hljs-string">'react'</span>;
+
+<span class="hljs-function"><span class="hljs-keyword">function</span> <span class="hljs-title">AppointmentBooking</span>(<span class="hljs-params">{ counsellorId }</span>) </span>{
+  <span class="hljs-keyword">const</span> [slots, setSlots] = useState([]);
+  <span class="hljs-keyword">const</span> [selectedSlot, setSelectedSlot] = useState(<span class="hljs-literal">null</span>);
+  <span class="hljs-keyword">const</span> [patientInfo, setPatientInfo] = useState({
+    <span class="hljs-attr">name</span>: <span class="hljs-string">''</span>,
+    <span class="hljs-attr">email</span>: <span class="hljs-string">''</span>,
+    <span class="hljs-attr">phone</span>: <span class="hljs-string">''</span>
+  });
+
+  <span class="hljs-comment">// Fetch availability</span>
+  useEffect(<span class="hljs-function"><span class="hljs-params">()</span> =&gt;</span> {
+    <span class="hljs-keyword">const</span> fetchAvailability = <span class="hljs-keyword">async</span> () =&gt; {
+      <span class="hljs-keyword">const</span> startTime = <span class="hljs-string">'2024-12-10T09:00:00+05:30'</span>;
+      <span class="hljs-keyword">const</span> endTime = <span class="hljs-string">'2024-12-10T18:00:00+05:30'</span>;
+      
+      <span class="hljs-keyword">const</span> response = <span class="hljs-keyword">await</span> fetch(
+        <span class="hljs-string">`https://api.yourapp.com/gmeet/availability?counsellor_id=<span class="hljs-subst">${counsellorId}</span>&amp;start_time=<span class="hljs-subst">${startTime}</span>&amp;end_time=<span class="hljs-subst">${endTime}</span>`</span>
+      );
+      
+      <span class="hljs-keyword">const</span> data = <span class="hljs-keyword">await</span> response.json();
+      setSlots(data.available_slots);
+    };
+
+    fetchAvailability();
+  }, [counsellorId]);
+
+  <span class="hljs-comment">// Book appointment</span>
+  <span class="hljs-keyword">const</span> handleBooking = <span class="hljs-keyword">async</span> () =&gt; {
+    <span class="hljs-keyword">const</span> response = <span class="hljs-keyword">await</span> fetch(<span class="hljs-string">'https://api.yourapp.com/gmeet/book'</span>, {
+      <span class="hljs-attr">method</span>: <span class="hljs-string">'POST'</span>,
+      <span class="hljs-attr">headers</span>: { <span class="hljs-string">'Content-Type'</span>: <span class="hljs-string">'application/json'</span> },
+      <span class="hljs-attr">body</span>: <span class="hljs-built_in">JSON</span>.stringify({
+        <span class="hljs-attr">counsellor_id</span>: counsellorId,
+        <span class="hljs-attr">counsellor_member_id</span>: <span class="hljs-string">'MEMBER123'</span>, <span class="hljs-comment">// Get from your system</span>
+        <span class="hljs-attr">patient_name</span>: patientInfo.name,
+        <span class="hljs-attr">patient_email</span>: patientInfo.email,
+        <span class="hljs-attr">patient_phone</span>: patientInfo.phone,
+        <span class="hljs-attr">start_time</span>: selectedSlot.start,
+        <span class="hljs-attr">end_time</span>: selectedSlot.end
+      })
+    });
+
+    <span class="hljs-keyword">const</span> booking = <span class="hljs-keyword">await</span> response.json();
+    
+    <span class="hljs-keyword">if</span> (booking.status === <span class="hljs-string">'success'</span>) {
+      alert(<span class="hljs-string">`Appointment booked! Meet link: <span class="hljs-subst">${booking.meet_link}</span>`</span>);
+      <span class="hljs-comment">// Redirect to confirmation page</span>
+    }
+  };
+
+  <span class="hljs-keyword">return</span> (
+    <span class="xml"><span class="hljs-tag">&lt;<span class="hljs-name">div</span>&gt;</span>
+      <span class="hljs-tag">&lt;<span class="hljs-name">h2</span>&gt;</span>Select Time Slot<span class="hljs-tag">&lt;/<span class="hljs-name">h2</span>&gt;</span>
+      {slots.map((slot, index) =&gt; (
+        <span class="hljs-tag">&lt;<span class="hljs-name">button</span>
+          <span class="hljs-attr">key</span>=<span class="hljs-string">{index}</span>
+          <span class="hljs-attr">onClick</span>=<span class="hljs-string">{()</span> =&gt;</span> setSelectedSlot(slot)}
+          className={selectedSlot === slot ? 'selected' : ''}
+        &gt;
+          {new Date(slot.start).toLocaleString()} - {new Date(slot.end).toLocaleString()}
+        <span class="hljs-tag">&lt;/<span class="hljs-name">button</span>&gt;</span>
+      ))}
+
+      {selectedSlot &amp;&amp; (
+        <span class="hljs-tag">&lt;<span class="hljs-name">div</span>&gt;</span>
+          <span class="hljs-tag">&lt;<span class="hljs-name">input</span>
+            <span class="hljs-attr">placeholder</span>=<span class="hljs-string">"Patient Name"</span>
+            <span class="hljs-attr">value</span>=<span class="hljs-string">{patientInfo.name}</span>
+            <span class="hljs-attr">onChange</span>=<span class="hljs-string">{(e)</span> =&gt;</span> setPatientInfo({ ...patientInfo, name: e.target.value })}
+          /&gt;
+          <span class="hljs-tag">&lt;<span class="hljs-name">input</span>
+            <span class="hljs-attr">placeholder</span>=<span class="hljs-string">"Email (optional)"</span>
+            <span class="hljs-attr">value</span>=<span class="hljs-string">{patientInfo.email}</span>
+            <span class="hljs-attr">onChange</span>=<span class="hljs-string">{(e)</span> =&gt;</span> setPatientInfo({ ...patientInfo, email: e.target.value })}
+          /&gt;
+          <span class="hljs-tag">&lt;<span class="hljs-name">input</span>
+            <span class="hljs-attr">placeholder</span>=<span class="hljs-string">"Phone"</span>
+            <span class="hljs-attr">value</span>=<span class="hljs-string">{patientInfo.phone}</span>
+            <span class="hljs-attr">onChange</span>=<span class="hljs-string">{(e)</span> =&gt;</span> setPatientInfo({ ...patientInfo, phone: e.target.value })}
+          /&gt;
+          <span class="hljs-tag">&lt;<span class="hljs-name">button</span> <span class="hljs-attr">onClick</span>=<span class="hljs-string">{handleBooking}</span>&gt;</span>Book Appointment<span class="hljs-tag">&lt;/<span class="hljs-name">button</span>&gt;</span>
+        <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+      )}
+    <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span></span>
+  );
+}
+</div></code></pre>
+<hr>
+<h2 id="error-handling">Error Handling</h2>
+<h3 id="common-error-responses">Common Error Responses</h3>
+<p>All endpoints return consistent error formats:</p>
+<pre class="hljs"><code><div>{
+  <span class="hljs-attr">"status"</span>: <span class="hljs-string">"error"</span>,
+  <span class="hljs-attr">"message"</span>: <span class="hljs-string">"Error description"</span>,
+  <span class="hljs-attr">"details"</span>: [...]
+}
+</div></code></pre>
+<h3 id="http-status-codes">HTTP Status Codes</h3>
+<ul>
+<li><code>200</code> - Success</li>
+<li><code>400</code> - Bad Request (validation errors)</li>
+<li><code>401</code> - Unauthorized (invalid/missing token)</li>
+<li><code>404</code> - Not Found</li>
+<li><code>422</code> - Unprocessable Entity (validation errors)</li>
+<li><code>500</code> - Internal Server Error</li>
+</ul>
+<h3 id="error-handling-example">Error Handling Example</h3>
+<pre class="hljs"><code><div><span class="hljs-keyword">async</span> <span class="hljs-function"><span class="hljs-keyword">function</span> <span class="hljs-title">bookAppointment</span>(<span class="hljs-params">bookingData</span>) </span>{
+  <span class="hljs-keyword">try</span> {
+    <span class="hljs-keyword">const</span> response = <span class="hljs-keyword">await</span> fetch(<span class="hljs-string">'https://api.yourapp.com/gmeet/book'</span>, {
+      <span class="hljs-attr">method</span>: <span class="hljs-string">'POST'</span>,
+      <span class="hljs-attr">headers</span>: { <span class="hljs-string">'Content-Type'</span>: <span class="hljs-string">'application/json'</span> },
+      <span class="hljs-attr">body</span>: <span class="hljs-built_in">JSON</span>.stringify(bookingData)
+    });
+
+    <span class="hljs-keyword">const</span> data = <span class="hljs-keyword">await</span> response.json();
+
+    <span class="hljs-keyword">if</span> (!response.ok) {
+      <span class="hljs-comment">// Handle error</span>
+      <span class="hljs-keyword">if</span> (response.status === <span class="hljs-number">400</span> || response.status === <span class="hljs-number">422</span>) {
+        <span class="hljs-comment">// Validation errors</span>
+        <span class="hljs-built_in">console</span>.error(<span class="hljs-string">'Validation errors:'</span>, data.details);
+      } <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (response.status === <span class="hljs-number">401</span>) {
+        <span class="hljs-comment">// Unauthorized - redirect to login</span>
+        <span class="hljs-built_in">window</span>.location.href = <span class="hljs-string">'/login'</span>;
+      } <span class="hljs-keyword">else</span> {
+        <span class="hljs-comment">// Other errors</span>
+        <span class="hljs-built_in">console</span>.error(<span class="hljs-string">'Error:'</span>, data.message);
+      }
+      <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-built_in">Error</span>(data.message);
+    }
+
+    <span class="hljs-keyword">return</span> data;
+  } <span class="hljs-keyword">catch</span> (error) {
+    <span class="hljs-built_in">console</span>.error(<span class="hljs-string">'Booking failed:'</span>, error);
+    <span class="hljs-keyword">throw</span> error;
+  }
+}
+</div></code></pre>
+<hr>
+<h2 id="testing">Testing</h2>
+<h3 id="testing-oauth-flow">Testing OAuth Flow</h3>
+<ol>
+<li>
+<p><strong>Start OAuth:</strong></p>
+<pre class="hljs"><code><div><span class="hljs-built_in">window</span>.location.href = <span class="hljs-string">'https://api.yourapp.com/gmeet/counsellor/connect?return_url=true'</span>;
+</div></code></pre>
+<p>This returns JSON with <code>authorization_url</code> for testing.</p>
+</li>
+<li>
+<p><strong>Test Callback:</strong></p>
+<ul>
+<li>Use the <code>authorization_url</code> from step 1</li>
+<li>Complete OAuth in browser</li>
+<li>Check redirect to your frontend success page</li>
+</ul>
+</li>
+</ol>
+<h3 id="testing-endpoints">Testing Endpoints</h3>
+<p>Use Swagger UI for interactive testing:</p>
+<pre class="hljs"><code><div>https://api.yourapp.com/docs
+</div></code></pre>
+<h3 id="postman-collection">Postman Collection</h3>
+<p>Create a Postman collection with:</p>
+<ul>
+<li>Environment variables for base URL</li>
+<li>Pre-request scripts for token management</li>
+<li>Tests for response validation</li>
+</ul>
+<hr>
+<h2 id="best-practices">Best Practices</h2>
+<h3 id="1-store-counsellor-id-securely">1. Store Counsellor ID Securely</h3>
+<p>After OAuth completion, store the <code>counsellor_id</code> securely:</p>
+<ul>
+<li>In your database linked to user account</li>
+<li>In encrypted local storage (if needed)</li>
+<li>Never expose in client-side logs</li>
+</ul>
+<h3 id="2-handle-redirects-properly">2. Handle Redirects Properly</h3>
+<ul>
+<li>Use <code>window.location.href</code> for OAuth initiation (not fetch/AJAX)</li>
+<li>Handle popup windows if needed</li>
+<li>Provide clear user feedback during OAuth flow</li>
+</ul>
+<h3 id="3-validate-data-before-sending">3. Validate Data Before Sending</h3>
+<ul>
+<li>Validate datetime formats (ISO 8601)</li>
+<li>Validate email formats</li>
+<li>Validate phone numbers</li>
+<li>Check required fields</li>
+</ul>
+<h3 id="4-error-handling">4. Error Handling</h3>
+<ul>
+<li>Always handle network errors</li>
+<li>Display user-friendly error messages</li>
+<li>Log errors for debugging</li>
+<li>Provide retry mechanisms</li>
+</ul>
+<h3 id="5-security">5. Security</h3>
+<ul>
+<li>Never expose API keys or tokens in frontend code</li>
+<li>Use HTTPS in production</li>
+<li>Validate all user inputs</li>
+<li>Implement rate limiting on frontend (in addition to backend)</li>
+</ul>
+<hr>
+<h2 id="support">Support</h2>
+<p>For API documentation and testing:</p>
+<ul>
+<li><strong>Swagger UI:</strong> <code>https://api.yourapp.com/docs</code></li>
+<li><strong>ReDoc:</strong> <code>https://api.yourapp.com/redoc</code></li>
+</ul>
+<p>For questions or issues, contact the backend team.</p>
+
+</body>
+</html>

@@ -8,12 +8,20 @@ from .Consent_model import UserConsent, ConsentProduct
 
 logger = logging.getLogger(__name__)
 
-# Special consent product ID for "All Products" (login consent)
-ALL_PRODUCTS_CONSENT_ID = 99999
+
+
+def get_consent_by_member_and_product(db: Session, member_id: int, product_id: int) -> Optional[UserConsent]:
+    """Get consent record for a specific member and product"""
+    return db.query(UserConsent).filter(
+        and_(
+            UserConsent.member_id == member_id,
+            UserConsent.product_id == product_id
+        )
+    ).first()
 
 
 def get_consent_by_user_and_product(db: Session, user_phone: str, product_id: int) -> Optional[UserConsent]:
-    """Get consent record for a specific user and product"""
+    """Get consent record for a specific user and product (legacy - for backward compatibility)"""
     return db.query(UserConsent).filter(
         and_(
             UserConsent.user_phone == user_phone,
@@ -22,24 +30,16 @@ def get_consent_by_user_and_product(db: Session, user_phone: str, product_id: in
     ).first()
 
 
-def get_user_all_products_consent(db: Session, user_phone: str) -> Optional[UserConsent]:
-    """Get user's 'All Products' consent record (login consent)"""
-    return get_consent_by_user_and_product(db, user_phone, ALL_PRODUCTS_CONSENT_ID)
 
 
-def has_consent_for_product(db: Session, user_phone: str, product_id: int) -> bool:
+def has_consent_for_product(db: Session, member_id: int, product_id: int) -> bool:
     """
-    Check if user has consent for a specific product.
-    Returns True if user has consent for the specific product_id OR has "All Products" consent.
+    Check if member has consent for a specific product.
+    Returns True if member has consent for the specific product_id.
     """
     # Check for specific product consent
-    specific_consent = get_consent_by_user_and_product(db, user_phone, product_id)
+    specific_consent = get_consent_by_member_and_product(db, member_id, product_id)
     if specific_consent and specific_consent.status == "yes":
-        return True
-    
-    # Check for "All Products" consent
-    all_products_consent = get_user_all_products_consent(db, user_phone)
-    if all_products_consent and all_products_consent.status == "yes":
         return True
     
     return False
@@ -49,6 +49,7 @@ def create_consent(
     db: Session,
     user_id: int,
     user_phone: str,
+    member_id: int,
     product_id: int,
     consent_source: str,
     status: str = "yes"
@@ -61,6 +62,7 @@ def create_consent(
     consent = UserConsent(
         user_id=user_id,
         user_phone=user_phone,
+        member_id=member_id,
         product_id=product_id,
         product=product_name,
         consent_given=1,
@@ -92,6 +94,7 @@ def record_consent(
     db: Session,
     user_id: int,
     user_phone: str,
+    member_id: int,
     product_id: int,
     consent_value: str,
     consent_source: str
@@ -107,15 +110,8 @@ def record_consent(
     if not consent_product:
         raise HTTPException(status_code=404, detail=f"Consent product with ID {product_id} not found")
     
-    # Prevent using the special "All Products" ID for individual product consents
-    if product_id == ALL_PRODUCTS_CONSENT_ID and consent_source.lower() == "product":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Product ID {product_id} is reserved for login consent. Use individual product IDs (1-17)."
-        )
-    
-    # Check if consent already exists
-    existing_consent = get_consent_by_user_and_product(db, user_phone, product_id)
+    # Check if consent already exists (member-scoped)
+    existing_consent = get_consent_by_member_and_product(db, member_id, product_id)
     
     if consent_value.lower() == "yes":
         # User gave consent
@@ -137,7 +133,7 @@ def record_consent(
                 return existing_consent
         else:
             # Create new record
-            return create_consent(db, user_id, user_phone, product_id, consent_source, "yes")
+            return create_consent(db, user_id, user_phone, member_id, product_id, consent_source, "yes")
     
     else:
         # User declined consent (consent_value = "no")
@@ -157,100 +153,13 @@ def record_consent(
             return None
 
 
-def record_bulk_consent(
-    db: Session,
-    user_id: int,
-    user_phone: str,
-    product_ids: List[int],
-    consent_value: str,
-    consent_source: str = "login"
-) -> List[UserConsent]:
-    """
-    Record consent for multiple products (bulk operation for login scenario).
-    When consent_source is 'login' and consent_value is 'yes', creates a single record
-    with the special 'All Products' product_id instead of multiple records.
-    When consent_source is 'login' and consent_value is 'no', updates existing "All Products"
-    consent to "no" if it exists.
-    """
-    # Special handling for login consent: create/update single "All Products" record
-    if consent_source.lower() == "login":
-        # Check if user already has "All Products" consent
-        existing_consent = get_user_all_products_consent(db, user_phone)
-        
-        if existing_consent:
-            # Update existing record
-            if consent_value.lower() == "yes":
-                if existing_consent.status == "no":
-                    updated_consent = update_consent_status(db, existing_consent, "yes", consent_source)
-                    return [updated_consent]
-                else:
-                    # Already active, just update source if needed
-                    if consent_source != existing_consent.consent_source:
-                        existing_consent.consent_source = consent_source
-                        db.commit()
-                        db.refresh(existing_consent)
-                    return [existing_consent]
-            else:
-                # consent_value is "no" - update status to "no"
-                if existing_consent.status == "yes":
-                    updated_consent = update_consent_status(db, existing_consent, "no", consent_source)
-                    return [updated_consent]
-                else:
-                    # Already "no", just update source if needed
-                    if consent_source != existing_consent.consent_source:
-                        existing_consent.consent_source = consent_source
-                        db.commit()
-                        db.refresh(existing_consent)
-                    return [existing_consent]
-        else:
-            # Create new "All Products" consent record only if consent_value is "yes"
-            if consent_value.lower() == "yes":
-                consent = create_consent(db, user_id, user_phone, ALL_PRODUCTS_CONSENT_ID, consent_source, "yes")
-                return [consent]
-            else:
-                # consent_value is "no" and no record exists - don't create record
-                return []
-    
-    # For non-login sources, process each product_id (existing behavior)
-    # Only store if consent_value is 'yes'
-    if consent_value.lower() != "yes":
-        # Don't store "no" consents for non-login sources
-        return []
-    
-    created_consents = []
-    
-    for product_id in product_ids:
-        # Check if consent product exists
-        consent_product = db.query(ConsentProduct).filter(ConsentProduct.id == product_id).first()
-        if not consent_product:
-            logger.warning(f"Consent product {product_id} not found, skipping consent creation")
-            continue
-        
-        # Check if consent already exists
-        existing_consent = get_consent_by_user_and_product(db, user_phone, product_id)
-        
-        if existing_consent:
-            # Update existing record
-            if existing_consent.status == "no":
-                update_consent_status(db, existing_consent, "yes", consent_source)
-                created_consents.append(existing_consent)
-            else:
-                # Already active, just update source if needed
-                if consent_source != existing_consent.consent_source:
-                    existing_consent.consent_source = consent_source
-                    db.commit()
-                    db.refresh(existing_consent)
-                created_consents.append(existing_consent)
-        else:
-            # Create new record
-            consent = create_consent(db, user_id, user_phone, product_id, consent_source, "yes")
-            created_consents.append(consent)
-    
-    return created_consents
+def get_member_consents(db: Session, member_id: int) -> List[UserConsent]:
+    """Get all consent records for a member"""
+    return db.query(UserConsent).filter(UserConsent.member_id == member_id).all()
 
 
 def get_user_consents(db: Session, user_phone: str) -> List[UserConsent]:
-    """Get all consent records for a user"""
+    """Get all consent records for a user (legacy - for backward compatibility)"""
     return db.query(UserConsent).filter(UserConsent.user_phone == user_phone).all()
 
 
@@ -268,6 +177,7 @@ def update_manage_consent(
     db: Session,
     user_id: int,
     user_phone: str,
+    member_id: int,
     product_consents: List[dict]
 ) -> dict:
     """
@@ -281,6 +191,20 @@ def update_manage_consent(
         product_id = item.get("product_id")
         status = item.get("status", "no").lower()
         
+        # Validate product_id is present and is an integer
+        if product_id is None:
+            logger.warning("product_id missing in consent item, skipping")
+            continue
+        
+        try:
+            product_id = int(product_id)
+            if product_id <= 0:
+                logger.warning(f"Invalid product_id {product_id}, must be positive integer, skipping")
+                continue
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid product_id type {type(product_id).__name__}, must be integer, skipping")
+            continue
+        
         if status not in ["yes", "no"]:
             continue
         
@@ -290,8 +214,8 @@ def update_manage_consent(
             logger.warning(f"Consent product {product_id} not found, skipping")
             continue
         
-        # Check if consent exists
-        existing_consent = get_consent_by_user_and_product(db, user_phone, product_id)
+        # Check if consent exists (member-scoped)
+        existing_consent = get_consent_by_member_and_product(db, member_id, product_id)
         
         if existing_consent:
             # Update existing record
@@ -302,7 +226,7 @@ def update_manage_consent(
             # Create new record only if status is "yes"
             # If status is "no" and no record exists, we can skip (nothing to uncheck)
             if status == "yes":
-                create_consent(db, user_id, user_phone, product_id, "product", status)
+                create_consent(db, user_id, user_phone, member_id, product_id, "product", status)
                 created_count += 1
     
     return {
@@ -312,42 +236,27 @@ def update_manage_consent(
     }
 
 
-def get_manage_consent_page_data(db: Session, user_phone: str) -> List[dict]:
+def get_manage_consent_page_data(db: Session, member_id: int) -> List[dict]:
     """
     Get all consent products with their consent status for manage consent page.
     Returns list of consent products with consent status.
-    If user has "All Products" consent (login consent), all products show as consented.
     """
-    # Get all consent products (excluding the special "All Products" product from display)
-    all_consent_products = db.query(ConsentProduct).filter(
-        ConsentProduct.id != ALL_PRODUCTS_CONSENT_ID
-    ).all()
+    # Get all consent products
+    all_consent_products = db.query(ConsentProduct).all()
     
-    # Get user's existing consents
-    user_consents = get_user_consents(db, user_phone)
-    consent_map = {consent.product_id: consent for consent in user_consents}
-    
-    # Check if user has "All Products" consent (login consent)
-    all_products_consent = get_user_all_products_consent(db, user_phone)
-    has_all_products_consent = all_products_consent is not None and all_products_consent.status == "yes"
+    # Get member's existing consents
+    member_consents = get_member_consents(db, member_id)
+    consent_map = {consent.product_id: consent for consent in member_consents}
     
     result = []
     for consent_product in all_consent_products:
         consent = consent_map.get(consent_product.id)
         
-        # If user has "All Products" consent, show all products as consented
-        # Otherwise, check specific product consent
-        if has_all_products_consent:
-            has_consent = True
-            consent_status = "yes"
-            # Use the "All Products" consent timestamps if no specific product consent exists
-            created_at = consent.created_at if consent else all_products_consent.created_at
-            updated_at = consent.updated_at if consent else all_products_consent.updated_at
-        else:
-            has_consent = consent is not None and consent.status == "yes"
-            consent_status = consent.status if consent else "no"
-            created_at = consent.created_at if consent else None
-            updated_at = consent.updated_at if consent else None
+        # Check specific product consent
+        has_consent = consent is not None and consent.status == "yes"
+        consent_status = consent.status if consent else "no"
+        created_at = consent.created_at if consent else None
+        updated_at = consent.updated_at if consent else None
         
         result.append({
             "product_id": consent_product.id,
@@ -359,4 +268,29 @@ def get_manage_consent_page_data(db: Session, user_phone: str) -> List[dict]:
         })
     
     return result
+
+
+def should_show_login_consent(db: Session, member_id: int) -> bool:
+    """
+    Check if login consent should be shown for a member.
+    Returns True if:
+    - Member's login_consent_shown flag is False
+    """
+    from Member_module.Member_model import Member
+    
+    # Get member
+    member = db.query(Member).filter(
+        Member.id == member_id,
+        Member.is_deleted == False
+    ).first()
+    
+    if not member:
+        return False
+    
+    # If consent was already shown, don't show again
+    if member.login_consent_shown:
+        return False
+    
+    # Show consent if not shown yet
+    return True
 

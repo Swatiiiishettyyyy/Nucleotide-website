@@ -44,7 +44,8 @@ def update_user_profile(
     user_id: int,
     name: Optional[str] = None,
     email: Optional[str] = None,
-    mobile: Optional[str] = None
+    mobile: Optional[str] = None,
+    profile_photo_url: Optional[str] = None
 ) -> Optional[User]:
 
     user = db.query(User).filter(User.id == user_id).first()
@@ -55,7 +56,8 @@ def update_user_profile(
     old_data = {
         "name": user.name,
         "email": user.email,
-        "mobile": user.mobile
+        "mobile": user.mobile,
+        "profile_photo_url": user.profile_photo_url
     }
 
     # Update only provided fields
@@ -65,6 +67,8 @@ def update_user_profile(
         user.email = email
     if mobile is not None:
         user.mobile = mobile
+    if profile_photo_url is not None:
+        user.profile_photo_url = profile_photo_url
 
     try:
         db.commit()
@@ -74,7 +78,8 @@ def update_user_profile(
         new_data = {
             "name": user.name,
             "email": user.email,
-            "mobile": user.mobile
+            "mobile": user.mobile,
+            "profile_photo_url": user.profile_photo_url
         }
 
         # If nothing changed, no need to log

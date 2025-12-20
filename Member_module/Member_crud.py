@@ -52,6 +52,7 @@ def _family_member_count(db: Session, user_id: int, category_filter, exclude_mem
         Member.user_id == user_id,
         Member.associated_plan_type == "family",
         category_filter,
+        Member.is_deleted == False
     )
     if exclude_member_id:
         query = query.filter(Member.id != exclude_member_id)
@@ -160,7 +161,8 @@ def save_member(
             Member.user_id == user.id,
             Member.name == req.name,
             Member.relation == relation_to_store,
-            category_filter
+            category_filter,
+            Member.is_deleted == False
         ).first()
         
         if existing:
@@ -178,7 +180,8 @@ def save_member(
                 Member.user_id == user.id,
                 Member.name == req.name,
                 category_filter,
-                Member.associated_plan_type.in_(["single", "couple"])
+                Member.associated_plan_type.in_(["single", "couple"]),
+                Member.is_deleted == False
             ).first()
             
             if conflicting_member:
@@ -203,7 +206,8 @@ def save_member(
                 Member.user_id == user.id,
                 Member.name == req.name,
                 category_filter,
-                Member.associated_plan_type == "family"
+                Member.associated_plan_type == "family",
+                Member.is_deleted == False
             ).first()
             
             if conflicting_member:
@@ -229,7 +233,8 @@ def save_member(
             .join(Product, CartItem.product_id == Product.ProductId)
             .filter(
                 CartItem.member_id == req.member_id,
-                CartItem.user_id == user.id
+                CartItem.user_id == user.id,
+                Product.is_deleted == False
             )
             .all()
         )
@@ -270,6 +275,20 @@ def save_member(
                 f"req.relation: '{req.relation}'"
             )
         
+        # Check if this is the first member for the user
+        existing_member_count = db.query(Member).filter(
+            Member.user_id == user.id,
+            Member.is_deleted == False
+        ).count()
+        is_first_member = existing_member_count == 0
+        
+        # Determine if this should be marked as self profile
+        # Set is_self_profile = True if:
+        # 1. This is the first member for the user, AND
+        # 2. Relation is "Self" (case-insensitive check)
+        relation_lower = relation_to_store.strip().lower()
+        should_mark_as_self = is_first_member and relation_lower in ["self", "user", "account holder", "account_holder"]
+        
         # Create member with the relation value
         # IMPORTANT: relation_to_store has been validated and is guaranteed to be non-empty
         member = Member(
@@ -282,7 +301,8 @@ def save_member(
             mobile=req.mobile,
             associated_category=category_name,
             associated_category_id=category_obj.id,
-            associated_plan_type=plan_type_normalized
+            associated_plan_type=plan_type_normalized,
+            is_self_profile=should_mark_as_self  # Mark as self profile if first member with "Self" relation
         )
         db.add(member)
         db.flush()  # Flush to get the ID without committing
@@ -454,6 +474,10 @@ def save_member(
         if not relation_to_store or len(relation_to_store.strip()) == 0:
             raise ValueError(f"Cannot update member with empty relation. Received: '{req.relation}'")
         
+        # Prevent changing is_self_profile from True to False (primary profile protection)
+        # Once a member is marked as self profile, it should remain so
+        # is_self_profile is not updated during edit - it remains as set during creation
+        
         member.name = req.name
         member.relation = relation_to_store  # Store the validated and trimmed relation value
         member.age = req.age
@@ -461,6 +485,7 @@ def save_member(
         member.dob = req.dob
         member.mobile = req.mobile
         # Note: category_id and plan_type are not updated on edit to maintain data integrity
+        # Note: is_self_profile is not updated on edit to protect primary profile
         
         # Flush changes to database before commit to ensure they're tracked
         db.flush()
@@ -606,7 +631,10 @@ def save_member(
 
 def get_members_by_user(db: Session, user, category: Optional[Union[int, str]] = None, plan_type: Optional[str] = None):
     """Get members for user, optionally filtered by category and plan_type"""
-    query = db.query(Member).filter(Member.user_id == user.id)
+    query = db.query(Member).filter(
+        Member.user_id == user.id,
+        Member.is_deleted == False
+    )
     
     if category:
         if isinstance(category, int):

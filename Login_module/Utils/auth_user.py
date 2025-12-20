@@ -1,11 +1,13 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
+from typing import Optional
 
 from Login_module.Utils import security
 from deps import get_db
 from Login_module.User.user_session_crud import get_user_by_id
 from Login_module.Device.Device_session_crud import update_last_active, get_device_session
+from Member_module.Member_model import Member
 
 security_scheme = HTTPBearer()
 
@@ -84,3 +86,37 @@ def get_current_user(
         )
 
     return user
+
+
+def get_current_member(
+    credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+) -> Optional[Member]:
+    """
+    Extracts and returns the currently selected member from JWT token.
+    Returns None if no member is selected in the token.
+    """
+    token = credentials.credentials
+
+    try:
+        payload = security.decode_access_token(token)
+        selected_member_id = payload.get("selected_member_id")
+        
+        if not selected_member_id:
+            return None
+        
+        # Validate member exists, belongs to user, and is not deleted
+        member = db.query(Member).filter(
+            Member.id == int(selected_member_id),
+            Member.user_id == current_user.id,
+            Member.is_deleted == False
+        ).first()
+        
+        return member
+    except (ValueError, KeyError, AttributeError):
+        # If token doesn't have selected_member_id or invalid format, return None
+        return None
+    except Exception:
+        # For any other error, return None (member not selected)
+        return None

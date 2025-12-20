@@ -44,6 +44,19 @@ from Category_module.bootstrap import seed_default_categories
 # Import models to register with SQLAlchemy Base
 from Consent_module.Consent_model import UserConsent, ConsentProduct
 from Orders_module.Order_model import Order, OrderItem, OrderSnapshot, OrderStatusHistory
+from Member_module.Member_transfer_model import MemberTransferLog
+from GeneticTest_module.GeneticTest_model import GeneticTestParticipant
+
+# Import Google Meet API models to register with SQLAlchemy Base
+try:
+    from gmeet_api.models import (
+        CounsellorToken,
+        CounsellorBooking,
+        CounsellorActivityLog,
+        CounsellorGmeetList
+    )
+except ImportError:
+    logger.warning("Failed to import gmeet_api models. Google Meet tables may not be created.")
 
 # Routers
 from Address_module.Address_router import router as address_router
@@ -57,6 +70,13 @@ from Member_module.Member_router import router as member_router
 from Orders_module.Order_router import router as order_router
 from Product_module.Product_router import router as product_router
 from Profile_module.Profile_router import router as profile_router
+
+# Google Meet API router
+try:
+    from gmeet_api.router import router as gmeet_router
+except ImportError:
+    logger.warning("Failed to import gmeet_api router. Google Meet endpoints will not be available.")
+    gmeet_router = None
 
 # Scheduler
 from Login_module.Device.scheduler import start_scheduler, shutdown_scheduler
@@ -248,6 +268,10 @@ app.include_router(member_router)
 app.include_router(order_router)
 app.include_router(audit_router)
 app.include_router(session_router)
+
+# Include Google Meet API router if available
+if gmeet_router:
+    app.include_router(gmeet_router)
 # API Endpoints
 @app.get("/")
 def root():
@@ -267,7 +291,8 @@ def root():
             "member": "/member",
             "orders": "/orders",
             "audit": "/audit",
-            "sessions": "/sessions"
+            "sessions": "/sessions",
+            "gmeet": "/gmeet"
         },
         "docs": "/docs",
         "redoc": "/redoc"

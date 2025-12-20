@@ -34,6 +34,9 @@ from Cart_module.Cart_audit_model import AuditLog
 from Profile_module.Profile_audit_crud import ProfileAuditLog
 from Login_module.Device.Device_session_audit_model import SessionAuditLog
 from Login_module.OTP.OTP_Log_Model import OTPAuditLog
+from Consent_module.Consent_model import UserConsent, ConsentProduct, PartnerConsent
+from Member_module.Member_transfer_model import MemberTransferLog
+from GeneticTest_module.GeneticTest_model import GeneticTestParticipant
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

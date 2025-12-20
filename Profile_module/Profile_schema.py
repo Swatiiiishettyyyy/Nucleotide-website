@@ -36,6 +36,7 @@ class UserProfileData(BaseModel):
     name: Optional[str]
     email: Optional[str]
     mobile: Optional[str]
+    profile_photo_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -83,7 +84,29 @@ class GetProfileResponse(BaseModel):
                     "user_id": 1,
                     "name": "John Doe",
                     "email": "john.doe@example.com",
-                    "mobile": "9876543210"
+                    "mobile": "9876543210",
+                    "profile_photo_url": "profile_photos/1_abc12345.jpg"
+                }
+            }
+        }
+
+
+class UploadPhotoResponse(BaseModel):
+    status: str
+    message: str
+    data: UserProfileData
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "success",
+                "message": "Profile photo uploaded successfully.",
+                "data": {
+                    "user_id": 1,
+                    "name": "John Doe",
+                    "email": "john.doe@example.com",
+                    "mobile": "9876543210",
+                    "profile_photo_url": "profile_photos/1_abc12345.jpg"
                 }
             }
         }

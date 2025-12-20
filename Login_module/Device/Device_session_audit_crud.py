@@ -4,6 +4,7 @@ Session audit log CRUD operations.
 from sqlalchemy.orm import Session
 from datetime import datetime
 from typing import Optional
+from Login_module.Utils.datetime_utils import now_ist
 from .Device_session_audit_model import SessionAuditLog
 
 
@@ -27,7 +28,7 @@ def create_session_audit_log(
         device_id=device_id,
         event_type=event_type,
         reason=reason,
-        timestamp=datetime.utcnow(),
+        timestamp=now_ist(),
         ip_address=ip_address,
         user_agent=user_agent,
         correlation_id=correlation_id

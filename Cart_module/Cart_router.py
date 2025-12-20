@@ -16,7 +16,7 @@ from Member_module.Member_model import Member
 from Login_module.User.user_model import User
 from .Cart_schema import CartAdd, CartUpdate, ApplyCouponRequest, CouponCreate
 from deps import get_db
-from Login_module.Utils.auth_user import get_current_user
+from Login_module.Utils.auth_user import get_current_user, get_current_member
 from .Cart_audit_crud import create_audit_log
 from .coupon_service import (
     apply_coupon_to_cart,
@@ -54,7 +54,7 @@ def add_to_cart(
     """
     try:
         # Check if product exists
-        product = db.query(Product).filter(Product.ProductId == item.product_id).first()
+        product = db.query(Product).filter(Product.ProductId == item.product_id, Product.is_deleted == False).first()
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
 
@@ -70,7 +70,8 @@ def add_to_cart(
         unique_address_ids = list(set(address_ids))
         addresses = db.query(Address).filter(
             Address.id.in_(unique_address_ids),
-            Address.user_id == current_user.id
+            Address.user_id == current_user.id,
+            Address.is_deleted == False
         ).all()
         
         if len(addresses) != len(unique_address_ids):
@@ -99,6 +100,10 @@ def add_to_cart(
             db.query(CartItem, Product, Member)
             .join(Product, CartItem.product_id == Product.ProductId)
             .join(Member, CartItem.member_id == Member.id)
+            .filter(
+                Product.is_deleted == False,
+                Member.is_deleted == False
+            )
             .filter(
                 CartItem.user_id == current_user.id,
                 CartItem.member_id.in_(member_ids),
@@ -475,21 +480,31 @@ def clear_cart(
 def view_cart(
     request: Request,
     current_user: User = Depends(get_current_user),
+    current_member: Optional[Member] = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
     """
     View cart items for current user (requires authentication).
+    If a member is selected, shows only cart items for that member.
     Returns cart items with product_id, address_id, cart_id, member_id.
     Groups items by group_id for couple/family products.
     """
-    
-    cart_items = db.query(CartItem).options(
+    query = db.query(CartItem).options(
         joinedload(CartItem.member),
         joinedload(CartItem.address),
         joinedload(CartItem.product)
     ).filter(
         CartItem.user_id == current_user.id
-    ).order_by(CartItem.group_id, CartItem.created_at).all()
+    )
+    
+    # Filter by member if a member is selected
+    if current_member:
+        query = query.filter(CartItem.member_id == current_member.id)
+    
+    cart_items = query.order_by(CartItem.group_id, CartItem.created_at).all()
+    
+    # Determine if member filter is applied
+    member_filter_applied = current_member.id if current_member else None
     
     if not cart_items:
         # Audit log
@@ -499,14 +514,15 @@ def view_cart(
             user_id=current_user.id,
             action="VIEW",
             entity_type="CART",
-            details={"items_count": 0},
+            details={"items_count": 0, "member_filter": member_filter_applied},
             ip_address=ip,
             user_agent=user_agent
         )
         
+        filter_message = f"Cart is empty for {current_member.name}." if current_member else "Cart is empty."
         return {
             "status": "success",
-            "message": "Cart is empty.",
+            "message": filter_message,
             "data": {
                 "cart_summary": None,
                 "cart_items": []
@@ -883,7 +899,8 @@ def list_coupons(
         ).all()
         
         coupon_list = []
-        now = datetime.utcnow()
+        from Login_module.Utils.datetime_utils import now_ist
+        now = now_ist()
         
         for coupon in coupons:
             # Check if coupon is within validity period

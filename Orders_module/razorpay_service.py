@@ -152,3 +152,37 @@ def get_order_details(razorpay_order_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def verify_webhook_signature(webhook_body: str, webhook_signature: str) -> bool:
+    """
+    Verify Razorpay webhook signature.
+    
+    Args:
+        webhook_body: Raw webhook request body (as string)
+        webhook_signature: X-Razorpay-Signature header value
+    
+    Returns:
+        True if signature is valid, False otherwise
+    """
+    try:
+        # Generate expected signature
+        generated_signature = hmac.new(
+            RAZORPAY_KEY_SECRET.encode('utf-8'),
+            webhook_body.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        # Compare signatures (use constant-time comparison to prevent timing attacks)
+        is_valid = hmac.compare_digest(generated_signature, webhook_signature)
+        
+        if is_valid:
+            logger.info("Webhook signature verified successfully")
+        else:
+            logger.warning("Invalid webhook signature")
+        
+        return is_valid
+    
+    except Exception as e:
+        logger.error(f"Error verifying webhook signature: {e}")
+        return False
+
+

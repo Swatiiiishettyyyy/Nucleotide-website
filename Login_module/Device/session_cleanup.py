@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 from sqlalchemy.orm import Session
 from database import SessionLocal
+from Login_module.Utils.datetime_utils import now_ist
 from .Device_session_crud import cleanup_inactive_sessions
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ def cleanup_sessions_job():
     try:
         # Cleanup sessions that have been inactive for 24 hours
         deleted_count = cleanup_inactive_sessions(db, hours_inactive=24)
-        logger.info(f"Session cleanup completed at {datetime.utcnow()}. Deleted {deleted_count} inactive sessions.")
+        logger.info(f"Session cleanup completed at {now_ist()}. Deleted {deleted_count} inactive sessions.")
     except Exception as e:
         logger.error(f"Error during session cleanup: {str(e)}")
     finally:

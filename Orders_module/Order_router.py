@@ -7,10 +7,12 @@ from typing import List, Optional
 from collections import defaultdict
 import uuid
 import logging
+import json
 
 from deps import get_db
-from Login_module.Utils.auth_user import get_current_user
+from Login_module.Utils.auth_user import get_current_user, get_current_member
 from Login_module.User.user_model import User
+from Member_module.Member_model import Member
 from .Order_schema import (
     CreateOrderRequest,
     OrderResponse,
@@ -26,10 +28,11 @@ from .Order_crud import (
     verify_and_complete_payment,
     update_order_status,
     get_order_by_id,
-    get_user_orders
+    get_user_orders,
+    mark_payment_failed_or_cancelled
 )
-from .razorpay_service import create_razorpay_order
-from .Order_model import OrderStatus, PaymentStatus
+from .razorpay_service import create_razorpay_order, verify_webhook_signature, get_payment_details
+from .Order_model import OrderStatus, PaymentStatus, Order
 from Cart_module.Cart_model import CartItem
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
@@ -138,7 +141,8 @@ def create_order(
         from Address_module.Address_model import Address
         address = db.query(Address).filter(
             Address.id == primary_address_id,
-            Address.user_id == current_user.id
+            Address.user_id == current_user.id,
+            Address.is_deleted == False
         ).first()
         
         if not address:
@@ -243,7 +247,22 @@ def verify_payment(
     Removes cart items after successful payment.
     """
     try:
-        # Verify and complete payment
+        # First, verify order belongs to user BEFORE payment verification (security check)
+        order = db.query(Order).filter(Order.id == payment_data.order_id).first()
+        if not order:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found"
+            )
+        
+        if order.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Order does not belong to you"
+            )
+        
+        # Now verify and complete payment
+        # Note: verify_and_complete_payment commits the transaction internally
         order = verify_and_complete_payment(
             db=db,
             order_id=payment_data.order_id,
@@ -252,48 +271,48 @@ def verify_payment(
             razorpay_signature=payment_data.razorpay_signature
         )
         
-        # Verify order belongs to user
-        if order.user_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Order does not belong to you"
-            )
+        # Refresh order to get latest state after payment verification
+        db.refresh(order)
         
         # Delete cart items after successful payment
-        # Get order item details (product_id, member_id pairs)
-        order_item_pairs = [(item.product_id, item.member_id) for item in order.items]
-        
-        # Find and delete matching cart items by product_id and member_id
-        deleted_group_ids = set()
-        
-        for product_id, member_id in order_item_pairs:
-            cart_item = (
-                db.query(CartItem)
-                .filter(
-                    CartItem.user_id == current_user.id,
-                    CartItem.product_id == product_id,
-                    CartItem.member_id == member_id
-                )
-                .first()
-            )
+        # Validate order has items before processing
+        if not order.items:
+            logger.warning(f"Order {order.order_number} has no items, skipping cart deletion")
+        else:
+            # Get order item details (product_id, member_id pairs)
+            order_item_pairs = [(item.product_id, item.member_id) for item in order.items]
             
-            if cart_item:
-                # If cart item has group_id, delete all items in the group (for couple/family products)
-                if cart_item.group_id and cart_item.group_id not in deleted_group_ids:
-                    group_items = (
-                        db.query(CartItem)
-                        .filter(
-                            CartItem.group_id == cart_item.group_id,
-                            CartItem.user_id == current_user.id
-                        )
-                        .all()
+            # Find and delete matching cart items by product_id and member_id
+            deleted_group_ids = set()
+            
+            for product_id, member_id in order_item_pairs:
+                cart_item = (
+                    db.query(CartItem)
+                    .filter(
+                        CartItem.user_id == current_user.id,
+                        CartItem.product_id == product_id,
+                        CartItem.member_id == member_id
                     )
-                    for item in group_items:
-                        db.delete(item)
-                    deleted_group_ids.add(cart_item.group_id)
-                elif not cart_item.group_id:
-                    # Single item, delete it
-                    db.delete(cart_item)
+                    .first()
+                )
+                
+                if cart_item:
+                    # If cart item has group_id, delete all items in the group (for couple/family products)
+                    if cart_item.group_id and cart_item.group_id not in deleted_group_ids:
+                        group_items = (
+                            db.query(CartItem)
+                            .filter(
+                                CartItem.group_id == cart_item.group_id,
+                                CartItem.user_id == current_user.id
+                            )
+                            .all()
+                        )
+                        for item in group_items:
+                            db.delete(item)
+                        deleted_group_ids.add(cart_item.group_id)
+                    elif not cart_item.group_id:
+                        # Single item, delete it
+                        db.delete(cart_item)
         
         # Remove applied coupon after successful payment
         from Cart_module.coupon_service import remove_coupon_from_cart
@@ -308,12 +327,62 @@ def verify_payment(
             message="Payment verified successfully. Order confirmed.",
             order_id=order.id,
             order_number=order.order_number,
-            payment_status=order.payment_status.value
+            payment_status=order.payment_status.value,
+            order_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status)
         )
     
     except ValueError as e:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+        # Get the order to return payment status in error response
+        payment_status = "unknown"
+        order_status = None
+        order_number = None
+        
+        try:
+            order = db.query(Order).filter(Order.id == payment_data.order_id).first()
+            if order:
+                payment_status = order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status)
+                order_status = order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status)
+                order_number = order.order_number
+        except Exception as db_error:
+            # Log database error but don't fail - use default values
+            logger.warning(f"Error fetching order details for error response: {db_error}")
+        
+        # Return user-friendly error message with payment status
+        error_message = str(e)
+        payment_failed_indicator = "PAYMENT FAILED"
+        
+        if "Invalid payment signature" in error_message or "verification failed" in error_message.lower():
+            error_message = f"{payment_failed_indicator}: Payment verification failed. Please check your payment details and try again. If the problem persists, please contact support."
+            # Ensure payment_status is set to failed if not already
+            if payment_status not in ["failed", "FAILED"]:
+                payment_status = "failed"
+        elif "already failed" in error_message.lower():
+            error_message = f"{payment_failed_indicator}: Payment for this order has already failed. Please create a new order to retry payment."
+            payment_status = "failed"
+        elif "already cancelled" in error_message.lower():
+            error_message = f"PAYMENT CANCELLED: Payment for this order was cancelled. Please create a new order to proceed with payment."
+            payment_status = "cancelled"
+        elif "already completed" in error_message.lower():
+            error_message = "Payment for this order has already been completed successfully."
+        else:
+            # For any other payment-related error, mark as failed
+            if payment_status == "unknown" or payment_status not in ["completed", "COMPLETED"]:
+                error_message = f"{payment_failed_indicator}: {error_message}"
+                payment_status = "failed"
+        
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "status": "failed",
+                "error": error_message,
+                "payment_status": payment_status.upper() if payment_status != "unknown" else "FAILED",
+                "order_id": payment_data.order_id,
+                "order_number": order_number,
+                "order_status": order_status,
+                "message": f"Payment verification failed. Payment status: {payment_status.upper() if payment_status != 'unknown' else 'FAILED'}"
+            }
+        )
     except Exception as e:
         db.rollback()
         logger.error(f"Error verifying payment: {e}", exc_info=True)
@@ -327,13 +396,22 @@ def verify_payment(
 def get_orders(
     request: Request,
     current_user: User = Depends(get_current_user),
+    current_member: Optional[Member] = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
-    """Get all orders for current user"""
+    """Get all orders for current user. If a member is selected, shows only orders where that member appears."""
     orders = get_user_orders(db, current_user.id)
     
     result = []
     for order in orders:
+        # Filter order items by member if a member is selected
+        order_items_to_process = order.items
+        if current_member:
+            # Only include order items for the selected member
+            order_items_to_process = [item for item in order.items if item.member_id == current_member.id]
+            # Skip this order if no items match the selected member
+            if not order_items_to_process:
+                continue
         # Group order items by product AND group_id to distinguish different packs of same product
         # 
         # Why this grouping is needed:
@@ -348,7 +426,7 @@ def get_orders(
         #   Without group_id: all 4 members would appear in one item (incorrect)
         from collections import defaultdict
         grouped_items = defaultdict(list)
-        for item in order.items:
+        for item in order_items_to_process:
             # Extract and validate group_id from snapshot (optimized: parse JSON once)
             snapshot = item.snapshot if item.snapshot else None
             group_id = extract_and_validate_group_id(snapshot)
@@ -498,7 +576,7 @@ def get_orders(
             "payment_status": order.payment_status.value,
             "order_status": order.order_status.value,
             "razorpay_order_id": order.razorpay_order_id,
-            "created_at": order.created_at,
+            "created_at": order.created_at.isoformat() if order.created_at else None,
             "items": order_items
         })
     
@@ -689,16 +767,31 @@ def get_order(
     order_id: int,
     request: Request,
     current_user: User = Depends(get_current_user),
+    current_member: Optional[Member] = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
-    """Get order details by ID"""
-    order = get_order_by_id(db, order_id, user_id=current_user.id)
+    """
+    Get order details by ID. If a member is selected, shows only order items for that member.
+    Allows viewing orders with any payment status (pending/failed/completed) so users can check their order status.
+    """
+    # Allow viewing orders with any payment status so users can see pending/failed orders
+    order = get_order_by_id(db, order_id, user_id=current_user.id, include_all_payment_statuses=True)
     
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Order not found"
         )
+    
+    # Filter order items by member if a member is selected
+    order_items_to_process = order.items
+    if current_member:
+        order_items_to_process = [item for item in order.items if item.member_id == current_member.id]
+        if not order_items_to_process:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No order items found for the selected member in this order"
+            )
     
     # Group order items by product AND group_id to distinguish different packs of same product
     # 
@@ -714,7 +807,7 @@ def get_order(
     #   Without group_id: all 4 members would appear in one item (incorrect)
     from collections import defaultdict
     grouped_items = defaultdict(list)
-    for item in order.items:
+    for item in order_items_to_process:
         # Extract and validate group_id from snapshot (optimized: parse JSON once)
         snapshot = item.snapshot if item.snapshot else None
         group_id = extract_and_validate_group_id(snapshot)
@@ -874,10 +967,12 @@ def get_order_tracking(
     order_id: int,
     request: Request,
     current_user: User = Depends(get_current_user),
+    current_member: Optional[Member] = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
     """
     Get order tracking information for a specific order.
+    If a member is selected, shows only order items for that member.
     Returns comprehensive order details with order items grouped by product.
     """
     from .Order_schema import OrderItemTracking, MemberDetails, AddressDetails
@@ -891,10 +986,20 @@ def get_order_tracking(
             detail="Order not found"
         )
     
+    # Filter order items by member if a member is selected
+    order_items_to_process = order.items
+    if current_member:
+        order_items_to_process = [item for item in order.items if item.member_id == current_member.id]
+        if not order_items_to_process:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No order items found for the selected member in this order"
+            )
+    
     # Build order items list - clean mapping of member, address, product, and status
     order_items_list = []
     
-    for item in order.items:
+    for item in order_items_to_process:
         snapshot = item.snapshot if item.snapshot else None
         
         # Get product details
@@ -1010,11 +1115,11 @@ def get_order_tracking(
             address=address,
             current_status=current_status,
             previous_status=previous_status,
-            status_updated_at=item.status_updated_at,
-            scheduled_date=item.scheduled_date,
+            status_updated_at=item.status_updated_at.isoformat() if item.status_updated_at else None,
+            scheduled_date=item.scheduled_date.isoformat() if item.scheduled_date else None,
             technician_name=item.technician_name,
             technician_contact=item.technician_contact,
-            created_at=item.created_at,
+            created_at=item.created_at.isoformat() if item.created_at else None,
             status_history=item_status_history
         ))
     
@@ -1036,7 +1141,7 @@ def get_order_tracking(
     return OrderTrackingResponse(
         order_id=order.id,
         order_number=order.order_number,
-        order_date=order.created_at,
+        order_date=order.created_at.isoformat() if order.created_at else None,
         payment_status=order.payment_status.value,
         current_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
         subtotal=order.subtotal,
@@ -1055,10 +1160,12 @@ def get_order_item_tracking(
     order_item_id: int,
     request: Request,
     current_user: User = Depends(get_current_user),
+    current_member: Optional[Member] = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
     """
     Get tracking information for a specific order item.
+    If a member is selected, verifies the order item belongs to that member.
     Returns detailed status history, member, address, and product information for the order item.
     """
     from .Order_model import OrderItem
@@ -1072,11 +1179,17 @@ def get_order_item_tracking(
         )
     
     # Get the specific order item
-    order_item = db.query(OrderItem).filter(
+    query = db.query(OrderItem).filter(
         OrderItem.id == order_item_id,
         OrderItem.order_id == order_id,
         OrderItem.user_id == current_user.id
-    ).first()
+    )
+    
+    # Filter by member if a member is selected
+    if current_member:
+        query = query.filter(OrderItem.member_id == current_member.id)
+    
+    order_item = query.first()
     
     if not order_item:
         raise HTTPException(
@@ -1213,7 +1326,7 @@ def update_order_status_api(
     Update order status (typically used by admin/lab technicians).
     Status transitions are flexible - can update from any stage to any stage.
     
-    Valid statuses: order_confirmed, scheduled, schedule_confirmed_by_lab,
+    Valid statuses: pending_payment, order_confirmed, scheduled, schedule_confirmed_by_lab,
     sample_collected, sample_received_by_lab, testing_in_progress, report_ready
     
     Request body:
@@ -1227,7 +1340,7 @@ def update_order_status_api(
     
     Note: Technician details (scheduled_date, technician_name, technician_contact) are optional.
     They are typically required for: scheduled, schedule_confirmed_by_lab, sample_collected
-    They are NOT needed for: order_confirmed, sample_received_by_lab, testing_in_progress, report_ready
+    They are NOT needed for: pending_payment, order_confirmed, sample_received_by_lab, testing_in_progress, report_ready
     """
     try:
         # Validate status
@@ -1278,5 +1391,279 @@ def update_order_status_api(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error updating order status: {str(e)}"
+        )
+
+
+@router.post("/webhook")
+async def razorpay_webhook(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Razorpay webhook endpoint to handle payment events.
+    
+    This endpoint:
+    - Verifies webhook signature from Razorpay
+    - Handles payment events (payment.captured, payment.failed, etc.)
+    - Updates order status based on payment events
+    - Does NOT require authentication (Razorpay calls this directly)
+    
+    Webhook events handled:
+    - payment.captured: Payment successful, update order to confirmed
+    - payment.failed: Payment failed, mark order as failed
+    - payment.authorized: Payment authorized (for manual capture)
+    - order.paid: Order paid (alternative event for successful payment)
+    """
+    try:
+        # Get raw request body for signature verification
+        body_bytes = await request.body()
+        body_str = body_bytes.decode('utf-8')
+        
+        # Get webhook signature from headers
+        webhook_signature = request.headers.get("X-Razorpay-Signature")
+        if not webhook_signature:
+            logger.warning("Webhook request missing X-Razorpay-Signature header")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing webhook signature"
+            )
+        
+        # Verify webhook signature
+        if not verify_webhook_signature(body_str, webhook_signature):
+            logger.warning("Invalid webhook signature")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid webhook signature"
+            )
+        
+        # Parse webhook payload
+        webhook_data = json.loads(body_str)
+        event = webhook_data.get("event")
+        payload = webhook_data.get("payload", {})
+        
+        logger.info(f"Received Razorpay webhook event: {event}")
+        
+        # Handle different webhook events
+        if event == "payment.captured":
+            # Payment successful
+            payment_entity = payload.get("payment", {}).get("entity", {})
+            payment_id = payment_entity.get("id")
+            order_id_razorpay = payment_entity.get("order_id")
+            
+            if not payment_id or not order_id_razorpay:
+                logger.error(f"Missing payment_id or order_id in payment.captured webhook: {webhook_data}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Missing payment_id or order_id in webhook payload"
+                )
+            
+            # Find order by razorpay_order_id
+            order = db.query(Order).filter(Order.razorpay_order_id == order_id_razorpay).first()
+            if not order:
+                logger.warning(f"Order not found for Razorpay order ID: {order_id_razorpay}")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Order not found"
+                )
+            
+            # Only process if payment is not already completed
+            if order.payment_status == PaymentStatus.COMPLETED:
+                logger.info(f"Payment already completed for order {order.order_number}, ignoring webhook")
+                return {"status": "success", "message": "Payment already processed"}
+            
+            # Get payment details from Razorpay to get signature
+            payment_details = get_payment_details(payment_id)
+            if not payment_details:
+                logger.error(f"Could not fetch payment details from Razorpay for payment_id: {payment_id}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Could not fetch payment details"
+                )
+            
+            # Extract signature from payment details (if available)
+            razorpay_signature = payment_details.get("signature")
+            if not razorpay_signature:
+                logger.warning(f"No signature in payment details for payment_id: {payment_id}, proceeding without signature verification")
+            
+            # Verify and complete payment
+            try:
+                order = verify_and_complete_payment(
+                    db=db,
+                    order_id=order.id,
+                    razorpay_order_id=order_id_razorpay,
+                    razorpay_payment_id=payment_id,
+                    razorpay_signature=razorpay_signature or ""  # Use empty string if signature not available
+                )
+                logger.info(f"Payment completed via webhook for order {order.order_number}")
+                
+                # Note: Cart deletion is handled in verify_payment endpoint, not in webhook
+                # Webhook is for server-side updates, cart deletion happens on client-side verify-payment call
+                
+                return {
+                    "status": "success",
+                    "message": "Payment processed successfully",
+                    "order_id": order.id,
+                    "order_number": order.order_number
+                }
+            except ValueError as e:
+                # Payment verification failed or already processed
+                logger.warning(f"Payment verification failed for order {order.order_number}: {str(e)}")
+                return {
+                    "status": "warning",
+                    "message": str(e),
+                    "order_id": order.id,
+                    "order_number": order.order_number
+                }
+        
+        elif event == "payment.failed":
+            # Payment failed
+            payment_entity = payload.get("payment", {}).get("entity", {})
+            payment_id = payment_entity.get("id")
+            order_id_razorpay = payment_entity.get("order_id")
+            error_description = payment_entity.get("error_description", "Payment failed")
+            
+            if not order_id_razorpay:
+                logger.error(f"Missing order_id in payment.failed webhook: {webhook_data}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Missing order_id in webhook payload"
+                )
+            
+            # Find order by razorpay_order_id
+            order = db.query(Order).filter(Order.razorpay_order_id == order_id_razorpay).first()
+            if not order:
+                logger.warning(f"Order not found for Razorpay order ID: {order_id_razorpay}")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Order not found"
+                )
+            
+            # Only process if payment is not already completed
+            if order.payment_status == PaymentStatus.COMPLETED:
+                logger.info(f"Payment already completed for order {order.order_number}, ignoring failure webhook")
+                return {"status": "success", "message": "Payment already processed"}
+            
+            # Mark payment as failed
+            try:
+                order = mark_payment_failed_or_cancelled(
+                    db=db,
+                    order_id=order.id,
+                    payment_status=PaymentStatus.FAILED,
+                    reason=f"Payment failed via webhook: {error_description}"
+                )
+                logger.info(f"Payment marked as failed via webhook for order {order.order_number}")
+                
+                return {
+                    "status": "success",
+                    "message": "Payment failure processed",
+                    "order_id": order.id,
+                    "order_number": order.order_number
+                }
+            except ValueError as e:
+                logger.warning(f"Could not mark payment as failed for order {order.order_number}: {str(e)}")
+                return {
+                    "status": "warning",
+                    "message": str(e),
+                    "order_id": order.id,
+                    "order_number": order.order_number
+                }
+        
+        elif event == "order.paid":
+            # Alternative event for successful payment (when order is paid)
+            order_entity = payload.get("order", {}).get("entity", {})
+            order_id_razorpay = order_entity.get("id")
+            
+            if not order_id_razorpay:
+                logger.error(f"Missing order_id in order.paid webhook: {webhook_data}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Missing order_id in webhook payload"
+                )
+            
+            # Find order by razorpay_order_id
+            order = db.query(Order).filter(Order.razorpay_order_id == order_id_razorpay).first()
+            if not order:
+                logger.warning(f"Order not found for Razorpay order ID: {order_id_razorpay}")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Order not found"
+                )
+            
+            # Get payment ID from order entity
+            payments = order_entity.get("payments", [])
+            if not payments:
+                logger.warning(f"No payments found in order.paid webhook for order {order.order_number}")
+                return {
+                    "status": "warning",
+                    "message": "No payment ID found in webhook",
+                    "order_id": order.id,
+                    "order_number": order.order_number
+                }
+            
+            payment_id = payments[0]  # Use first payment
+            
+            # Only process if payment is not already completed
+            if order.payment_status == PaymentStatus.COMPLETED:
+                logger.info(f"Payment already completed for order {order.order_number}, ignoring webhook")
+                return {"status": "success", "message": "Payment already processed"}
+            
+            # Get payment details to get signature
+            payment_details = get_payment_details(payment_id)
+            if not payment_details:
+                logger.error(f"Could not fetch payment details from Razorpay for payment_id: {payment_id}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Could not fetch payment details"
+                )
+            
+            razorpay_signature = payment_details.get("signature", "")
+            
+            # Verify and complete payment
+            try:
+                order = verify_and_complete_payment(
+                    db=db,
+                    order_id=order.id,
+                    razorpay_order_id=order_id_razorpay,
+                    razorpay_payment_id=payment_id,
+                    razorpay_signature=razorpay_signature or ""
+                )
+                logger.info(f"Payment completed via order.paid webhook for order {order.order_number}")
+                
+                return {
+                    "status": "success",
+                    "message": "Payment processed successfully",
+                    "order_id": order.id,
+                    "order_number": order.order_number
+                }
+            except ValueError as e:
+                logger.warning(f"Payment verification failed for order {order.order_number}: {str(e)}")
+                return {
+                    "status": "warning",
+                    "message": str(e),
+                    "order_id": order.id,
+                    "order_number": order.order_number
+                }
+        
+        else:
+            # Unhandled event - log but don't fail
+            logger.info(f"Unhandled webhook event: {event}, ignoring")
+            return {
+                "status": "success",
+                "message": f"Event {event} received but not processed"
+            }
+    
+    except HTTPException:
+        raise
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in webhook payload: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON payload"
+        )
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing webhook: {str(e)}"
         )
 

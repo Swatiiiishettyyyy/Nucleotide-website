@@ -1,0 +1,46 @@
+# ============================================
+# Additional Environment Variables for Google Meet API
+# ============================================
+# Add these environment variables to your AWS App Runner configuration
+# These are in addition to the existing environment variables already configured
+
+# ============================================
+# Google OAuth Configuration
+# ============================================
+# OAuth callback URL - where Google redirects after authorization
+# For production: https://your-domain.com/gmeet/auth/callback
+# Replace 'your-domain.com' with your actual AWS App Runner domain
+GOOGLE_OAUTH_REDIRECT_URI=https://your-domain.com/gmeet/auth/callback
+
+# ============================================
+# Frontend Redirect URLs (Optional)
+# ============================================
+# If these are NOT set, the API will return JSON responses instead of redirecting
+# If these ARE set, the API will redirect to these URLs after OAuth completion
+
+# Success page - where to redirect after successful OAuth
+# Example: https://yourapp.com/counsellor/welcome
+FRONTEND_COUNSELLOR_SUCCESS_URL=
+
+# Error page - where to redirect on OAuth failure
+# Example: https://yourapp.com/counsellor/error
+FRONTEND_COUNSELLOR_ERROR_URL=
+
+# ============================================
+# Notes
+# ============================================
+# 1. Place your Google OAuth credentials.json file in the Nucleotide-website_v11 root directory
+# 2. The DATABASE_URL environment variable should already be configured (shared with main app)
+# 3. Database connection pool settings (DB_POOL_SIZE, DB_MAX_OVERFLOW, etc.) are optional
+#    and will use defaults if not set
+# 4. PORT is hardcoded to 8030 in the dockerfile - do not set PORT as an environment variable
+# 5. ENVIRONMENT variable is optional (defaults to "development" if not set)
+
+
+
+
+
+GOOGLE_OAUTH_REDIRECT_URI=https://uvhesg33fj.ap-south-1.awsapprunner.com/gmeet/auth/callback
+FRONTEND_COUNSELLOR_SUCCESS_URL=
+FRONTEND_COUNSELLOR_ERROR_URL=
+ENVIRONMENT=

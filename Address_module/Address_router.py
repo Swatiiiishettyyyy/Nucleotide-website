@@ -85,7 +85,8 @@ def edit_address_api(
     # Fetch existing address for autofill
     existing_address = db.query(Address).filter(
         Address.id == address_id,
-        Address.user_id == user.id
+        Address.user_id == user.id,
+        Address.is_deleted == False
     ).first()
     
     if not existing_address:
@@ -185,7 +186,8 @@ def delete_address_api(
     # Get address before deletion for audit log
     address = db.query(Address).filter(
         Address.id == address_id,
-        Address.user_id == user.id
+        Address.user_id == user.id,
+        Address.is_deleted == False
     ).first()
     
     if not address:
@@ -236,26 +238,27 @@ def delete_address_api(
     address_label = address.address_label
     address_identifier = f"{address.address_label} ({address.city} - {address.postal_code})"
     
-    # Create audit log for deletion BEFORE deleting the address
-    # This ensures the foreign key constraint is satisfied
+    # Soft delete the address
+    from Login_module.Utils.datetime_utils import now_ist
+    address.is_deleted = True
+    address.deleted_at = now_ist()
+    
+    # Create audit log for deletion
     audit = AddressAudit(
         user_id=user.id,
         username=user.name or user.mobile,
         phone_number=user.mobile,
-        address_id=address_id,  # Address still exists at this point
+        address_id=address_id,
         address_label=address_label,
         address_identifier=address_identifier,
         action="deleted",
         old_data=old_data,
-        new_data=None,  # No new data for deletion
+        new_data={"is_deleted": True, "deleted_at": address.deleted_at.isoformat() if address.deleted_at else None},
         ip_address=ip_address,
         user_agent=user_agent,
         correlation_id=correlation_id
     )
     db.add(audit)
-    
-    # Now delete the address
-    db.delete(address)
     
     # Commit both operations in a single transaction
     db.commit()

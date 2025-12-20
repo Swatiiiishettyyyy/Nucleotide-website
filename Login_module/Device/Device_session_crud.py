@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
+from Login_module.Utils.datetime_utils import now_ist
 import secrets
 from typing import Optional
 import logging
@@ -62,7 +63,7 @@ def create_device_session(
             device_platform=device_platform,
             ip_address=ip,
             browser_info=browser_info,
-            last_active=datetime.utcnow(),
+            last_active=now_ist(),
             is_active=True,
 
             # backward-compat
@@ -116,7 +117,7 @@ def get_device_session_by_token(db: Session, session_token: str) -> Optional[Dev
 def update_last_active(db: Session, session_id: int) -> bool:
     session_data = db.query(DeviceSession).filter(DeviceSession.id == session_id).first()
     if session_data:
-        session_data.last_active = datetime.utcnow()
+        session_data.last_active = now_ist()
         db.commit()
         return True
     return False
@@ -142,7 +143,7 @@ def deactivate_session(
 
     if session_data:
         session_data.is_active = False
-        session_data.event_on_logout = datetime.utcnow()
+        session_data.event_on_logout = now_ist()
         db.commit()
 
         try:
@@ -170,7 +171,7 @@ def deactivate_session_by_token(db: Session, session_token: str, reason: Optiona
     session_data = get_device_session_by_token(db, session_token)
     if session_data:
         session_data.is_active = False
-        session_data.event_on_logout = datetime.utcnow()
+        session_data.event_on_logout = now_ist()
         db.commit()
         return True
     return False
@@ -211,7 +212,7 @@ def get_user_active_sessions_count(db: Session, user_id: int, max_sessions: int 
 
 
 def cleanup_inactive_sessions(db: Session, hours_inactive: int = 24) -> int:
-    cutoff = datetime.utcnow() - timedelta(hours=hours_inactive)
+    cutoff = now_ist() - timedelta(hours=hours_inactive)
 
     deleted_count = (
         db.query(DeviceSession)

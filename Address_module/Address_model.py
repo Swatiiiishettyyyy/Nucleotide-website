@@ -20,6 +20,10 @@ class Address(Base):
     country = Column(String(100), nullable=False, default="India")
 
     save_for_future = Column(Boolean, default=True)
+    
+    # Soft delete fields
+    is_deleted = Column(Boolean, nullable=False, default=False, index=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

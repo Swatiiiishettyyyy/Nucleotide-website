@@ -90,7 +90,7 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
         }
     else:
         # Edit existing address - capture old data
-        address = db.query(Address).filter_by(id=req.address_id, user_id=user.id).first()
+        address = db.query(Address).filter_by(id=req.address_id, user_id=user.id, is_deleted=False).first()
         if not address:
             return None
         
@@ -185,15 +185,17 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
     return address
 
 def get_addresses_by_user(db, user):
-    return db.query(Address).filter_by(user_id=user.id).all()
+    return db.query(Address).filter_by(user_id=user.id, is_deleted=False).all()
 
 
 def delete_address(db: Session, user, address_id: int):
-    """Delete an address"""
-    address = db.query(Address).filter_by(id=address_id, user_id=user.id).first()
+    """Soft delete an address"""
+    from Login_module.Utils.datetime_utils import now_ist
+    address = db.query(Address).filter_by(id=address_id, user_id=user.id, is_deleted=False).first()
     if not address:
         return None
     
-    db.delete(address)
+    address.is_deleted = True
+    address.deleted_at = now_ist()
     db.commit()
     return True

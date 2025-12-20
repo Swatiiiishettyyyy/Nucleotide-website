@@ -3,28 +3,28 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from deps import get_db
-from Login_module.Utils.auth_user import get_current_user
+from Login_module.Utils.auth_user import get_current_user, get_current_member
 from Login_module.User.user_model import User
+from Member_module.Member_model import Member
 from .Consent_model import ConsentProduct
 
 from .Consent_schema import (
     ConsentRecordRequest,
-    ConsentBulkRequest,
     ManageConsentRequest,
     ConsentRecordResponse,
     ConsentListResponse,
-    ConsentBulkResponse,
-    ConsentBulkData,
     ManageConsentResponse,
     ManageConsentPageResponse,
-    ProductConsentStatus
+    ProductConsentStatus,
+    PartnerConsentRecordRequest,
+    PartnerConsentRecordResponse
 )
 from .Consent_crud import (
     record_consent,
-    record_bulk_consent,
     update_manage_consent as update_manage_consent_crud,
     get_manage_consent_page_data
 )
+from .Partner_consent_crud import record_partner_consent
 
 router = APIRouter(prefix="/consent", tags=["Consent"])
 
@@ -34,6 +34,7 @@ def record_user_consent(
     req: ConsentRecordRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    current_member: Member = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
     """
@@ -43,8 +44,23 @@ def record_user_consent(
     - If 'no': Updates existing record to 'no' (if exists), or returns success without creating record
     
     Used for individual product consent pages (product_id: 1-17).
+    For product_id 11 (Child simulator), use /consent/partner-record endpoint instead.
     consent_source automatically defaults to "product" if not provided.
+    Requires an active member profile to be selected.
     """
+    if not current_member:
+        raise HTTPException(
+            status_code=400,
+            detail="No member profile selected. Please select a member profile first."
+        )
+    
+    # Route product_id 11 to partner consent endpoint
+    if req.product_id == 11:
+        raise HTTPException(
+            status_code=400,
+            detail="Product ID 11 requires partner consent. Please use /consent/partner-record endpoint."
+        )
+    
     try:
         # Ensure consent_source is "product" for this endpoint
         consent_source = req.consent_source or "product"
@@ -53,6 +69,7 @@ def record_user_consent(
             db=db,
             user_id=current_user.id,
             user_phone=current_user.mobile,
+            member_id=current_member.id,
             product_id=req.product_id,
             consent_value=req.consent_value,
             consent_source=consent_source
@@ -84,83 +101,84 @@ def record_user_consent(
         raise HTTPException(status_code=500, detail=f"Error recording consent: {str(e)}")
 
 
-@router.post("/record-bulk", response_model=ConsentBulkResponse)
-def record_bulk_user_consent(
-    req: ConsentBulkRequest,
+@router.post("/partner-record", response_model=PartnerConsentRecordResponse)
+def record_partner_consent_endpoint(
+    req: PartnerConsentRecordRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    current_member: Member = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
     """
-    Record consent for all products (bulk operation - typically for login scenario).
-    When consent_source is 'login' and consent_value is 'yes', creates a single record
-    for all products. No product_ids needed in request or response.
+    Record partner consent for Product 11 (Child simulator).
+    
+    Flow:
+    - User (self member) gives consent (yes/no)
+    - If user says "yes": Requires partner mobile and partner consent
+    - If user says "no": No record created (same as regular consent)
+    
+    Requires an active member profile to be selected (should be user's self profile).
     """
+    if not current_member:
+        raise HTTPException(
+            status_code=400,
+            detail="No member profile selected. Please select a member profile first."
+        )
+    
     try:
-        # For login consent, product_ids are not needed (will use special "All Products" product)
-        # Pass empty list as product_ids are not used for login consent
-        product_ids = []
-        
-        consents = record_bulk_consent(
+        # Record partner consent
+        partner_consent = record_partner_consent(
             db=db,
             user_id=current_user.id,
-            user_phone=current_user.mobile,
-            product_ids=product_ids,
-            consent_value=req.consent_value,
-            consent_source=req.consent_source
+            user_member_id=current_member.id,
+            user_name=current_user.name or current_user.mobile,
+            user_mobile=current_user.mobile,
+            user_consent=req.user_consent,
+            product_id=req.product_id,
+            partner_mobile=req.partner_mobile,
+            partner_name=req.partner_name,
+            partner_consent=req.partner_consent,
+            consent_source="product"
         )
         
-        if consents:
-            # Convert consent data to exclude product_id
-            consent_data = []
-            for consent in consents:
-                consent_data.append(ConsentBulkData(
-                    id=consent.id,
-                    user_id=consent.user_id,
-                    user_phone=consent.user_phone,
-                    consent_given=consent.consent_given,
-                    consent_source=consent.consent_source,
-                    status=consent.status,
-                    created_at=consent.created_at,
-                    updated_at=consent.updated_at
-                ))
-            
-            if req.consent_value.lower() == "yes":
-                return {
-                    "status": "success",
-                    "message": "Consent recorded for all products.",
-                    "data": consent_data
-                }
-            else:
-                return {
-                    "status": "success",
-                    "message": "Consent declined for all products.",
-                    "data": consent_data
-                }
-        else:
-            # User declined (consent_value = "no") and no record exists
+        if partner_consent:
             return {
                 "status": "success",
-                "message": "Consent declined for all products. No record stored.",
-                "data": []
+                "message": "Partner consent recorded successfully.",
+                "data": partner_consent
+            }
+        else:
+            # User declined (user_consent = "no") and no record was created
+            return {
+                "status": "success",
+                "message": "Consent declined. No record stored.",
+                "data": None
             }
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error recording bulk consent: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error recording partner consent: {str(e)}")
 
 
 @router.get("/manage", response_model=ManageConsentPageResponse)
 def get_manage_consent_page(
     current_user: User = Depends(get_current_user),
+    current_member: Member = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
     """
     Get all products with their consent status for manage consent page.
     Returns list of all products with current consent status (checked/unchecked).
+    Requires an active member profile to be selected.
     """
+    if not current_member:
+        raise HTTPException(
+            status_code=400,
+            detail="No member profile selected. Please select a member profile first."
+        )
+    
     try:
-        products_data = get_manage_consent_page_data(db, current_user.mobile)
+        products_data = get_manage_consent_page_data(db, current_member.id)
         
         # Convert to ProductConsentStatus objects
         result = [
@@ -189,12 +207,20 @@ def update_manage_consent(
     req: ManageConsentRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    current_member: Member = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
     """
     Update consents from manage consent page.
     Accepts list of product consents with product_id and status.
+    Requires an active member profile to be selected.
     """
+    if not current_member:
+        raise HTTPException(
+            status_code=400,
+            detail="No member profile selected. Please select a member profile first."
+        )
+    
     try:
         # Validate and format product_consents
         product_consents = []
@@ -233,6 +259,7 @@ def update_manage_consent(
             db=db,
             user_id=current_user.id,
             user_phone=current_user.mobile,
+            member_id=current_member.id,
             product_consents=product_consents
         )
         

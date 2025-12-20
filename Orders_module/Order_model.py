@@ -2,7 +2,7 @@
 Order model - stores order information and payment details.
 No COD option, no refund policy.
 """
-from sqlalchemy import Column, Integer, String, Float, DateTime, func, Enum, ForeignKey, Text, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, func, Enum, ForeignKey, Text, JSON, Boolean
 from sqlalchemy.orm import relationship
 from database import Base
 import enum
@@ -10,7 +10,9 @@ import enum
 
 class OrderStatus(str, enum.Enum):
     """Order tracking statuses"""
-    ORDER_CONFIRMED = "order_confirmed"
+    ORDER_NOT_PLACED = "order_not_placed"  # Payment failed - order not placed
+    PENDING_PAYMENT = "pending_payment"  # Order created but payment not completed or in processing
+    ORDER_CONFIRMED = "order_confirmed"  # Payment completed and verified, order confirmed
     SCHEDULED = "scheduled"
     SCHEDULE_CONFIRMED_BY_LAB = "schedule_confirmed_by_lab"
     SAMPLE_COLLECTED = "sample_collected"
@@ -39,8 +41,8 @@ class Order(Base):
     id = Column(Integer, primary_key=True, index=True)
     order_number = Column(String(50), unique=True, nullable=False, index=True)  # Unique order number
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    # Primary address can be NULL if original address is deleted (we use snapshot for order details)
-    address_id = Column(Integer, ForeignKey("addresses.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Primary address reference (we use snapshot for order details, but keep FK for reference)
+    address_id = Column(Integer, ForeignKey("addresses.id", ondelete="RESTRICT"), nullable=True, index=True)
     
     # Order totals
     subtotal = Column(Float, nullable=False)
@@ -59,7 +61,7 @@ class Order(Base):
     payment_date = Column(DateTime(timezone=True), nullable=True)  # Payment date (filled after payment completion)
     
     # Order status tracking
-    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.ORDER_CONFIRMED, index=True)
+    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.PENDING_PAYMENT, index=True)
     status_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Additional notes
@@ -69,6 +71,12 @@ class Order(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
+    # Transfer tracking fields
+    linked_from_order_id = Column(Integer, ForeignKey("orders.id", ondelete="SET NULL"), nullable=True)  # Original order if this is a transferred copy
+    is_transferred_copy = Column(Boolean, nullable=False, default=False, index=True)  # True if this order was created from transfer
+    transfer_log_id = Column(Integer, ForeignKey("member_transfer_logs.id", ondelete="SET NULL"), nullable=True, index=True)  # Link to transfer log
+    transferred_at = Column(DateTime(timezone=True), nullable=True)  # When transfer occurred
+
     # Relationships
     user = relationship("User")
     address = relationship("Address")
@@ -85,11 +93,11 @@ class OrderItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)  # User who placed the order
-    # These foreign keys allow NULL because we use OrderSnapshot for data integrity
-    # If original product/member/address is deleted, FK becomes NULL but snapshot preserves data
-    product_id = Column(Integer, ForeignKey("products.ProductId", ondelete="SET NULL"), nullable=True)
-    member_id = Column(Integer, ForeignKey("members.id", ondelete="SET NULL"), nullable=True, index=True)
-    address_id = Column(Integer, ForeignKey("addresses.id", ondelete="SET NULL"), nullable=True)
+    # These foreign keys reference entities (we use OrderSnapshot for data integrity)
+    # RESTRICT prevents deletion if referenced, ensuring IDs never become NULL
+    product_id = Column(Integer, ForeignKey("products.ProductId", ondelete="RESTRICT"), nullable=True)
+    member_id = Column(Integer, ForeignKey("members.id", ondelete="RESTRICT"), nullable=True, index=True)
+    address_id = Column(Integer, ForeignKey("addresses.id", ondelete="RESTRICT"), nullable=True)
     
     # Product snapshot at time of order (from snapshot table)
     snapshot_id = Column(Integer, ForeignKey("order_snapshots.id"), nullable=False)
@@ -98,7 +106,7 @@ class OrderItem(Base):
     unit_price = Column(Float, nullable=False)  # SpecialPrice at time of order (final price per unit)
     
     # Per-item status tracking (for different addresses in couple/family packs)
-    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.ORDER_CONFIRMED, index=True)
+    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.PENDING_PAYMENT, index=True)
     status_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Technician and scheduling information (per item, since items can have different addresses)
@@ -107,6 +115,11 @@ class OrderItem(Base):
     technician_contact = Column(String(20), nullable=True)  # Technician contact for this item
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Transfer tracking fields
+    linked_from_order_item_id = Column(Integer, ForeignKey("order_items.id", ondelete="SET NULL"), nullable=True)  # Original order item if this is a transferred copy
+    transfer_log_id = Column(Integer, ForeignKey("member_transfer_logs.id", ondelete="SET NULL"), nullable=True, index=True)  # Link to transfer log
+    transferred_at = Column(DateTime(timezone=True), nullable=True)  # When transfer occurred
     
     # Relationships
     order = relationship("Order", backref="items")
@@ -141,6 +154,11 @@ class OrderSnapshot(Base):
     cart_item_data = Column(JSON, nullable=True)  # Original cart item data if needed (optional)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Transfer tracking fields
+    linked_from_snapshot_id = Column(Integer, ForeignKey("order_snapshots.id", ondelete="SET NULL"), nullable=True)  # Original snapshot if this is a transferred copy
+    transfer_log_id = Column(Integer, ForeignKey("member_transfer_logs.id", ondelete="SET NULL"), nullable=True, index=True)  # Link to transfer log
+    transferred_at = Column(DateTime(timezone=True), nullable=True)  # When transfer occurred
     
     # Relationships
     order = relationship("Order", backref="snapshots")

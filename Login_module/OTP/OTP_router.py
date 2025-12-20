@@ -148,8 +148,10 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
         # Get or create user
         try:
             user = get_user_by_mobile(db, req.mobile)
+            is_new_user = False
             if not user:
                 user = create_user(db, mobile=req.mobile)
+                is_new_user = True
         except Exception as e:
             db.rollback()
             logger.error(f"Error getting/creating user: {e}", exc_info=True)
@@ -157,6 +159,29 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Database error: Unable to get or create user. {str(e)}"
             )
+        
+        # Check for member transfer and execute if OTP verified
+        try:
+            from Member_module.Member_transfer_crud import (
+                mark_transfer_otp_verified, execute_member_transfer
+            )
+            
+            # Check if there's a pending transfer for this phone number
+            # Mark it as OTP_VERIFIED (OTP was already verified above)
+            transfer_log = mark_transfer_otp_verified(db, req.mobile)
+            
+            if transfer_log and transfer_log.transfer_status == "OTP_VERIFIED":
+                # Execute the transfer
+                try:
+                    execute_member_transfer(db, transfer_log.id, user.id)
+                    logger.info(f"Member transfer executed successfully: transfer_log_id={transfer_log.id}, new_user_id={user.id}")
+                except Exception as transfer_error:
+                    logger.error(f"Error executing member transfer: {transfer_error}", exc_info=True)
+                    # Don't fail login if transfer fails - user can still log in
+                    # Transfer can be retried manually if needed
+        except Exception as e:
+            logger.warning(f"Error checking/executing member transfer: {e}", exc_info=True)
+            # Don't fail login if transfer check fails
 
         # Create audit log for successful verification
         try:
@@ -199,12 +224,40 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
                 detail=f"Database error: Unable to create session. {str(e)}"
             )
 
+        # Get default member (self profile or first member) to set in token
+        from Member_module.Member_model import Member
+        default_member = None
         try:
-            token = security.create_access_token({
-                "sub": str(user.id),
-                "session_id": str(session.id),
-                "device_platform": session.device_platform
-            }, expires_delta=ACCESS_TOKEN_EXPIRE_SECONDS)
+            # Try to get self profile member first
+            default_member = db.query(Member).filter(
+                Member.user_id == user.id,
+                Member.is_self_profile == True,
+                Member.is_deleted == False
+            ).first()
+            
+            # If no self profile, get the first member (oldest by created_at)
+            if not default_member:
+                default_member = db.query(Member).filter(
+                    Member.user_id == user.id,
+                    Member.is_deleted == False
+                ).order_by(Member.created_at.asc()).first()
+        except Exception as e:
+            # Log but don't fail login if member query fails
+            logger.warning(f"Error fetching default member during login: {e}")
+        
+        # Build token data
+        token_data = {
+            "sub": str(user.id),
+            "session_id": str(session.id),
+            "device_platform": session.device_platform
+        }
+        
+        # Add selected_member_id if default member exists
+        if default_member:
+            token_data["selected_member_id"] = str(default_member.id)
+        
+        try:
+            token = security.create_access_token(token_data, expires_delta=ACCESS_TOKEN_EXPIRE_SECONDS)
         except Exception as e:
             db.rollback()
             logger.error(f"Error creating access token: {e}", exc_info=True)

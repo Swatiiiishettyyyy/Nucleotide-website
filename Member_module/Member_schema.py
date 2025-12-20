@@ -164,6 +164,8 @@ class MemberData(BaseModel):
     gender: Optional[str] = None
     dob: Optional[date] = None
     mobile: Optional[str] = None
+    profile_photo_url: Optional[str] = None
+    has_taken_genetic_test: Optional[bool] = False
 
 class MemberResponse(BaseModel):
     status: str
@@ -173,3 +175,22 @@ class MemberListResponse(BaseModel):
     status: str
     message: str
     data: List[MemberData]
+
+
+class InitiateTransferRequest(BaseModel):
+    member_id: int = Field(..., description="Member ID to transfer", ge=1)
+    phone_number: str = Field(..., description="Member's phone number (10 digits)", min_length=10, max_length=10)
+    
+    @validator('phone_number')
+    def validate_phone(cls, v):
+        if v:
+            v = v.strip().replace(" ", "").replace("-", "")
+            if len(v) != 10 or not v.isdigit():
+                raise ValueError('Phone number must be exactly 10 digits')
+        return v
+
+
+class InitiateTransferResponse(BaseModel):
+    status: str
+    message: str
+    transfer_log_id: Optional[int] = None

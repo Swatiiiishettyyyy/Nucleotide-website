@@ -42,7 +42,7 @@ def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
 
 @router.get("/viewProduct", response_model=ProductListResponse)
 def get_products(db: Session = Depends(get_db)):
-    products = db.query(Product).all()
+    products = db.query(Product).filter(Product.is_deleted == False).all()
 
     return {
         "status": "success",
@@ -53,7 +53,7 @@ def get_products(db: Session = Depends(get_db)):
 
 @router.get("/detail/{ProductId}", response_model=ProductSingleResponse)
 def get_product_detail(ProductId: int, db: Session = Depends(get_db)):
-    product = db.query(Product).filter(Product.ProductId == ProductId).first()
+    product = db.query(Product).filter(Product.ProductId == ProductId, Product.is_deleted == False).first()
 
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")

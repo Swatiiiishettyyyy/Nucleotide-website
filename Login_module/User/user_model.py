@@ -8,6 +8,7 @@ class User(Base):
     name = Column(String(255), nullable=True)
     email = Column(String(255), unique=True, nullable=True, index=True)
     mobile = Column(String(20), unique=True, nullable=False, index=True)
+    profile_photo_url = Column(String(500), nullable=True)  # URL/path to profile photo
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     is_active = Column(Boolean, default=True)
     # additional fields can be added (profile, role, etc.)

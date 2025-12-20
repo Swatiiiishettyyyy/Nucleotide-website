@@ -77,7 +77,8 @@ def validate_and_calculate_discount(
         return None, 0.0, f"Coupon '{coupon.coupon_code}' is not active (status: {coupon.status.value})"
     
     # Check validity period
-    now = datetime.utcnow()
+    from Login_module.Utils.datetime_utils import now_ist
+    now = now_ist()
     if coupon.valid_from and now < coupon.valid_from:
         logger.warning(f"Coupon '{coupon.coupon_code}' is not yet valid. Valid from: {coupon.valid_from}, Current: {now}")
         return None, 0.0, f"Coupon '{coupon.coupon_code}' is not yet valid. Valid from: {coupon.valid_from.strftime('%Y-%m-%d %H:%M:%S')}"
@@ -212,7 +213,7 @@ def apply_coupon_to_cart(
         existing_cart_coupon.coupon_id = coupon.id
         existing_cart_coupon.coupon_code = coupon.coupon_code
         existing_cart_coupon.discount_amount = discount_amount
-        existing_cart_coupon.applied_at = datetime.utcnow()
+        existing_cart_coupon.applied_at = now_ist()
         db.commit()
         db.refresh(existing_cart_coupon)
         logger.info(f"Updated existing CartCoupon record (ID: {existing_cart_coupon.id}) for user {user_id}")

@@ -23,7 +23,8 @@ def create_access_token(data: Dict[str, Any], expires_delta: int = None) -> str:
     Creates a JWT access token with expiration timestamp.
     """
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(
+    from Login_module.Utils.datetime_utils import now_ist
+    expire = now_ist() + timedelta(
         seconds=(expires_delta or ACCESS_TOKEN_EXPIRE_SECONDS)
     )
     to_encode.update({"exp": expire})

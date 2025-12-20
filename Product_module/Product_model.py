@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, JSON, Enum, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, JSON, Enum, ForeignKey, DateTime, Boolean, func
 from sqlalchemy.orm import relationship
 from database import Base
 import enum
@@ -41,3 +41,7 @@ class Product(Base):
     category_id = Column(Integer, ForeignKey("categories.id"), nullable=False, index=True)
     category = relationship("Category", back_populates="products")
     max_members = Column(Integer, nullable=False, default=1)  # 1 for single, 2 for couple, 4 for family
+    
+    # Soft delete fields
+    is_deleted = Column(Boolean, nullable=False, default=False, index=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)

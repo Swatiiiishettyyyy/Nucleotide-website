@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, func, Date, Integer as IntCol
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, func, Date, Integer as IntCol, Boolean
 from sqlalchemy.orm import relationship
 from database import Base
 from Product_module.Product_model import Category
@@ -24,6 +24,19 @@ class Member(Base):
     associated_category = Column(String(100), nullable=True, index=True)  # "genome_testing"
     associated_category_id = Column(Integer, ForeignKey("categories.id"), nullable=True, index=True)
     associated_plan_type = Column(String(50), nullable=True, index=True)  # "single", "couple", "family"
+    is_deleted = Column(Boolean, nullable=False, default=False, index=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Consent tracking: track if login consent popup was shown for this member
+    login_consent_shown = Column(Boolean, nullable=False, default=False, index=True)  # True if login consent was shown/declined
+    
+    # Member transfer fields
+    transferred_from_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)  # Original user who owned this member
+    transfer_log_id = Column(Integer, ForeignKey("member_transfer_logs.id", ondelete="SET NULL"), nullable=True, index=True)  # Link to transfer log
+    is_self_profile = Column(Boolean, nullable=False, default=False, index=True)  # True if this is the user's own profile
+    
+    # Profile photo
+    profile_photo_url = Column(String(500), nullable=True)  # URL/path to member's profile photo
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

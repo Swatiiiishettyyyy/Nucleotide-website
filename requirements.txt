@@ -13,6 +13,11 @@ requests
 razorpay
 openpyxl==3.1.5
 alembic
+boto3
+# Google API packages for gmeet_api
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
 # "pydantic[email]"
 
 #pip install -r requirements.txt
