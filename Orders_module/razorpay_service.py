@@ -16,9 +16,13 @@ logger = logging.getLogger(__name__)
 # Razorpay configuration
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
+RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET")
 
 if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
     raise ValueError("RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must be set in .env file")
+
+if not RAZORPAY_WEBHOOK_SECRET:
+    logger.warning("RAZORPAY_WEBHOOK_SECRET not set. Webhook signature verification will fail.")
 
 # Initialize Razorpay client
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
@@ -154,7 +158,7 @@ def get_order_details(razorpay_order_id: str) -> Optional[Dict[str, Any]]:
 
 def verify_webhook_signature(webhook_body: str, webhook_signature: str) -> bool:
     """
-    Verify Razorpay webhook signature.
+    Verify Razorpay webhook signature using webhook secret.
     
     Args:
         webhook_body: Raw webhook request body (as string)
@@ -164,9 +168,13 @@ def verify_webhook_signature(webhook_body: str, webhook_signature: str) -> bool:
         True if signature is valid, False otherwise
     """
     try:
-        # Generate expected signature
+        if not RAZORPAY_WEBHOOK_SECRET:
+            logger.error("RAZORPAY_WEBHOOK_SECRET not configured. Cannot verify webhook signature.")
+            return False
+        
+        # Generate expected signature using webhook secret
         generated_signature = hmac.new(
-            RAZORPAY_KEY_SECRET.encode('utf-8'),
+            RAZORPAY_WEBHOOK_SECRET.encode('utf-8'),
             webhook_body.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
