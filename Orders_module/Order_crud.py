@@ -173,9 +173,9 @@ def create_order_from_cart(
         coupon_discount=coupon_discount,
         total_amount=total_amount,
         payment_method=PaymentMethod.RAZORPAY,
-        payment_status=PaymentStatus.PENDING,
+        payment_status=PaymentStatus.NOT_INITIATED,  # Payment not started yet
         razorpay_order_id=razorpay_order_id,
-        order_status=OrderStatus.PENDING_PAYMENT  # Order is pending until payment is verified
+        order_status=OrderStatus.CREATED  # Order created, waiting for payment
     )
     db.add(order)
     db.flush()  # Get order.id
@@ -248,7 +248,7 @@ def create_order_from_cart(
             snapshot_id=snapshot.id,
             quantity=cart_item.quantity,
             unit_price=product.SpecialPrice,  # Store SpecialPrice as unit_price
-            order_status=OrderStatus.PENDING_PAYMENT  # Initialize with pending payment status
+            order_status=OrderStatus.CREATED  # Initialize with created status
         )
         db.add(order_item)
         db.flush()  # Get order_item.id for status history
@@ -257,19 +257,19 @@ def create_order_from_cart(
         item_status_history = OrderStatusHistory(
             order_id=order.id,
             order_item_id=order_item.id,
-            status=OrderStatus.PENDING_PAYMENT,
+            status=OrderStatus.CREATED,
             previous_status=None,
             notes=f"Order item created for member {member.name} at address {address_obj.address_label or address_obj.id}. Waiting for payment.",
             changed_by=str(user_id)
         )
         db.add(item_status_history)
     
-    # Create initial status history
+        # Create initial status history
     status_history = OrderStatusHistory(
         order_id=order.id,
-        status=OrderStatus.PENDING_PAYMENT,
+        status=OrderStatus.CREATED,
         previous_status=None,
-        notes="Order created from cart. Waiting for payment verification.",
+        notes="Order created from cart. Waiting for payment.",
         changed_by=str(user_id)
     )
     db.add(status_history)
@@ -280,7 +280,7 @@ def create_order_from_cart(
     return order
 
 
-def verify_and_complete_payment(
+def verify_payment_frontend(
     db: Session,
     order_id: int,
     razorpay_order_id: str,
@@ -288,27 +288,33 @@ def verify_and_complete_payment(
     razorpay_signature: str
 ) -> Order:
     """
-    Verify Razorpay payment and update order payment status.
+    Verify Razorpay payment from frontend (verify-payment endpoint).
+    ONLY sets payment_status = SUCCESS (temporary).
+    DOES NOT confirm order or clear cart.
+    Webhook will finalize confirmation later.
     """
-    # Load order with items to ensure all items are in session for updates
+    # Load order with items
     from sqlalchemy.orm import joinedload
     order = db.query(Order).options(joinedload(Order.items)).filter(Order.id == order_id).first()
     if not order:
         raise ValueError("Order not found")
     
-    # Double-check payment status after loading (prevent race condition)
-    # Refresh order to get latest state from database
+    # Refresh to get latest state (prevent race conditions)
     db.refresh(order)
     
-    if order.payment_status == PaymentStatus.COMPLETED:
-        raise ValueError("Payment for this order has already been completed successfully.")
+    # If webhook already confirmed, do nothing (idempotent)
+    if order.order_status == OrderStatus.CONFIRMED:
+        logger.info(f"Order {order.order_number} already confirmed by webhook. Frontend verification skipped.")
+        return order
     
-    # Check if payment was already failed or cancelled
-    if order.payment_status in [PaymentStatus.FAILED, PaymentStatus.CANCELLED]:
-        if order.payment_status == PaymentStatus.FAILED:
-            raise ValueError("Payment for this order has already failed. Please create a new order to retry payment.")
-        else:
-            raise ValueError("Payment for this order was cancelled. Please create a new order to proceed with payment.")
+    # If already verified by frontend, return success (idempotent)
+    if order.payment_status == PaymentStatus.SUCCESS:
+        logger.info(f"Payment already verified for order {order.order_number}. Returning success.")
+        return order
+    
+    # If payment already failed, raise error
+    if order.payment_status == PaymentStatus.FAILED:
+        raise ValueError("Payment for this order has already failed. Please create a new order to retry payment.")
     
     # Validate razorpay_order_id matches the order
     if order.razorpay_order_id != razorpay_order_id:
@@ -321,98 +327,169 @@ def verify_and_complete_payment(
     if not is_valid:
         # Update payment status to failed
         order.payment_status = PaymentStatus.FAILED
-        # Set order_status to ORDER_NOT_PLACED because payment failed
         previous_order_status = order.order_status
-        order.order_status = OrderStatus.ORDER_NOT_PLACED
+        order.order_status = OrderStatus.PAYMENT_FAILED
         order.status_updated_at = now_ist()
         
-        # Capture previous item statuses BEFORE updating
+        # Update item statuses
         item_previous_statuses = {}
         for item in order.items:
             item_previous_statuses[item.id] = item.order_status
-            item.order_status = OrderStatus.ORDER_NOT_PLACED
+            item.order_status = OrderStatus.PAYMENT_FAILED
             item.status_updated_at = now_ist()
         
-        # Create status history entry for payment failure
+        # Create status history
         status_history = OrderStatusHistory(
             order_id=order.id,
-            status=OrderStatus.ORDER_NOT_PLACED,
+            status=OrderStatus.PAYMENT_FAILED,
             previous_status=previous_order_status,
-            notes="Payment verification failed. Invalid payment signature. Order not placed due to payment failure.",
+            notes="Payment verification failed. Invalid payment signature. Payment status set to FAILED. Order status set to PAYMENT_FAILED.",
             changed_by="system"
         )
         db.add(status_history)
         
-        # Create status history entries for each order item
+        # Create status history for each order item
         for item in order.items:
-            item_previous_status = item_previous_statuses.get(item.id, OrderStatus.PENDING_PAYMENT)
+            item_previous_status = item_previous_statuses.get(item.id, OrderStatus.CREATED)
             item_status_history = OrderStatusHistory(
                 order_id=order.id,
                 order_item_id=item.id,
-                status=OrderStatus.ORDER_NOT_PLACED,
+                status=OrderStatus.PAYMENT_FAILED,
                 previous_status=item_previous_status,
-                notes="Payment verification failed. Order item not placed due to payment failure.",
+                notes="Payment verification failed. Order item payment failed.",
                 changed_by="system"
             )
             db.add(item_status_history)
         
         db.commit()
-        logger.warning(f"Payment verification failed for order {order.order_number} (ID: {order.id}). Payment status set to FAILED, order status set to ORDER_NOT_PLACED.")
-        # Return user-friendly error message
+        logger.warning(f"Payment verification failed for order {order.order_number} (ID: {order.id}). Payment status set to FAILED.")
         raise ValueError("Payment verification failed. Please check your payment details and try again. If the problem persists, please contact support.")
     
-    # Update order with payment details
+    # Payment signature valid - update to SUCCESS (temporary, webhook will verify)
     order.razorpay_payment_id = razorpay_payment_id
     order.razorpay_signature = razorpay_signature
-    order.payment_status = PaymentStatus.COMPLETED
+    order.payment_status = PaymentStatus.SUCCESS
     order.payment_date = now_ist()
+    # DO NOT change order_status - remains CREATED until webhook confirms
+    # DO NOT clear cart - webhook will handle this
     
-    # Always set order_status to ORDER_CONFIRMED after successful payment verification
-    # Even if it was manually changed, payment completion should confirm the order
+    db.commit()
+    db.refresh(order)
+    
+    logger.info(f"Frontend payment verification successful for order {order.order_number}. Payment status: SUCCESS. Waiting for webhook confirmation.")
+    
+    return order
+
+
+def confirm_order_from_webhook(
+    db: Session,
+    order_id: int,
+    razorpay_order_id: str,
+    razorpay_payment_id: str
+) -> Order:
+    """
+    Confirm order from webhook (payment.captured event).
+    This is the ONLY place where order confirmation happens.
+    Idempotent - can be called multiple times safely.
+    """
+    # Load order with items using row-level locking to prevent race conditions
+    from sqlalchemy import select
+    from sqlalchemy.orm import joinedload
+    from sqlalchemy import func as sql_func
+    
+    # Use SELECT FOR UPDATE to lock the row
+    order_stmt = select(Order).options(joinedload(Order.items)).where(Order.id == order_id).with_for_update()
+    order = db.execute(order_stmt).scalar_one_or_none()
+    
+    if not order:
+        raise ValueError(f"Order {order_id} not found")
+    
+    # Validate razorpay_order_id matches
+    if order.razorpay_order_id != razorpay_order_id:
+        raise ValueError(f"Razorpay order ID mismatch. Expected {order.razorpay_order_id}, got {razorpay_order_id}")
+    
+    # IDEMPOTENCY CHECK: If already confirmed, return early (idempotent)
+    if order.order_status == OrderStatus.CONFIRMED:
+        logger.info(f"Order {order.order_number} already confirmed. Webhook event ignored (idempotent).")
+        return order
+    
+    # Never downgrade a confirmed order - if somehow confirmed, don't proceed
+    # This protects against late failure events
+    if order.order_status == OrderStatus.CONFIRMED:
+        logger.warning(f"Order {order.order_number} already in confirmed state. Webhook confirmation skipped.")
+        return order
+    
+    # Update payment and order status atomically
+    previous_payment_status = order.payment_status
     previous_order_status = order.order_status
-    order.order_status = OrderStatus.ORDER_CONFIRMED
+    
+    order.razorpay_payment_id = razorpay_payment_id
+    order.payment_status = PaymentStatus.VERIFIED
+    order.order_status = OrderStatus.CONFIRMED
     order.status_updated_at = now_ist()
     
-    # Track previous item statuses before updating
+    # Update all order items
     item_previous_statuses = {}
     for item in order.items:
         item_previous_statuses[item.id] = item.order_status
-        item.order_status = OrderStatus.ORDER_CONFIRMED
+        item.order_status = OrderStatus.CONFIRMED
         item.status_updated_at = now_ist()
     
-    # Create status history entry for order confirmation
+    # Create status history for order confirmation
     status_history = OrderStatusHistory(
         order_id=order.id,
-        status=OrderStatus.ORDER_CONFIRMED,
+        status=OrderStatus.CONFIRMED,
         previous_status=previous_order_status,
-        notes=f"Payment verified successfully. Order confirmed. Previous status: {previous_order_status.value}",
+        notes=f"Order confirmed by webhook (payment.captured). Payment verified. Previous status: {previous_order_status.value}",
         changed_by="system"
     )
     db.add(status_history)
     
-    # Create status history entries for each order item
+    # Create status history for each order item
     for item in order.items:
-        previous_item_status = item_previous_statuses.get(item.id, OrderStatus.PENDING_PAYMENT)
+        previous_item_status = item_previous_statuses.get(item.id, OrderStatus.CREATED)
         item_status_history = OrderStatusHistory(
             order_id=order.id,
             order_item_id=item.id,
-            status=OrderStatus.ORDER_CONFIRMED,
+            status=OrderStatus.CONFIRMED,
             previous_status=previous_item_status,
-            notes="Payment verified. Order item confirmed.",
+            notes="Order item confirmed by webhook. Payment verified.",
             changed_by="system"
         )
         db.add(item_status_history)
     
-    db.flush()  # Flush before tracking participants
+    db.flush()
     
-    # Track genetic test participants after payment completion
+    # Clear cart items (idempotent - clear all cart items for user to ensure nothing is missed)
+    try:
+        from Cart_module.Cart_model import CartItem
+        
+        # Clear all cart items for the user to ensure nothing is missed
+        # This is safer than matching specific items which might miss items added after order creation
+        deleted_count = db.query(CartItem).filter(
+            CartItem.user_id == order.user_id
+        ).delete()
+        
+        # Remove applied coupon after successful payment
+        from Cart_module.coupon_service import remove_coupon_from_cart
+        remove_coupon_from_cart(db, order.user_id)
+        
+        logger.info(f"Cart cleared for user {order.user_id} after order {order.order_number} confirmation. {deleted_count} item(s) removed.")
+    except Exception as e:
+        # Log error but don't fail order confirmation if cart clearing fails
+        # However, this is a critical operation, so log as error for monitoring
+        logger.error(
+            f"CRITICAL: Error clearing cart for order {order.order_number} (user {order.user_id}): {str(e)}. "
+            f"Order confirmed but cart may still contain items. Manual intervention may be required.",
+            exc_info=True
+        )
+    
+    # Track genetic test participants after order confirmation
     try:
         from GeneticTest_module.GeneticTest_crud import create_or_update_participant
         
-        # Get all order items with their products and members
         for order_item in order.items:
             if order_item.member_id and order_item.product_id:
-                # Get member details (check if deleted to avoid tracking deleted members)
                 member = db.query(Member).filter(
                     Member.id == order_item.member_id,
                     Member.is_deleted == False
@@ -421,7 +498,6 @@ def verify_and_complete_payment(
                     logger.warning(f"Member {order_item.member_id} not found or deleted for participant tracking")
                     continue
                 
-                # Get product details for plan_type (check if deleted, though this shouldn't happen for existing orders)
                 product = db.query(Product).filter(
                     Product.ProductId == order_item.product_id,
                     Product.is_deleted == False
@@ -430,12 +506,10 @@ def verify_and_complete_payment(
                     logger.warning(f"Product {order_item.product_id} not found or deleted for participant tracking")
                     continue
                 
-                # Extract plan_type from product
                 plan_type = None
                 if product.plan_type:
                     plan_type = product.plan_type.value if hasattr(product.plan_type, 'value') else str(product.plan_type)
                 
-                # Create or update participant record
                 create_or_update_participant(
                     db=db,
                     user_id=order.user_id,
@@ -450,13 +524,36 @@ def verify_and_complete_payment(
                 )
                 logger.info(f"Tracked genetic test participant: member {order_item.member_id}, plan_type: {plan_type}")
     except Exception as e:
-        # Log error but don't fail the payment completion
-        logger.error(f"Error tracking genetic test participants for order {order.id}: {str(e)}", exc_info=True)
+        # Log error but don't fail order confirmation
+        # However, this is a critical operation, so log as error for monitoring
+        logger.error(
+            f"CRITICAL: Error tracking genetic test participants for order {order.order_number} (ID: {order.id}): {str(e)}. "
+            f"Order confirmed but genetic test flag may not be set. Manual intervention may be required.",
+            exc_info=True
+        )
     
     db.commit()
     db.refresh(order)
     
+    logger.info(f"Order {order.order_number} confirmed by webhook. Payment status: VERIFIED, Order status: CONFIRMED")
+    
     return order
+
+
+# Legacy function - kept for backward compatibility, but deprecated
+def verify_and_complete_payment(
+    db: Session,
+    order_id: int,
+    razorpay_order_id: str,
+    razorpay_payment_id: str,
+    razorpay_signature: str
+) -> Order:
+    """
+    DEPRECATED: Legacy function. Use verify_payment_frontend() instead.
+    This function is kept for backward compatibility but should not be used for new code.
+    """
+    logger.warning("verify_and_complete_payment is deprecated. Use verify_payment_frontend() instead.")
+    return verify_payment_frontend(db, order_id, razorpay_order_id, razorpay_payment_id, razorpay_signature)
 
 
 def mark_payment_failed_or_cancelled(
@@ -466,20 +563,20 @@ def mark_payment_failed_or_cancelled(
     reason: str = None
 ) -> Order:
     """
-    Mark payment as failed or cancelled.
-    This can be called from webhooks or when payment is cancelled by user.
+    Mark payment as failed.
+    Called from webhooks when payment fails.
     
     Args:
         db: Database session
         order_id: Order ID
-        payment_status: PaymentStatus.FAILED or PaymentStatus.CANCELLED
-        reason: Optional reason for failure/cancellation
+        payment_status: PaymentStatus.FAILED
+        reason: Optional reason for failure
     
     Returns:
         Updated order
     """
-    if payment_status not in [PaymentStatus.FAILED, PaymentStatus.CANCELLED]:
-        raise ValueError(f"Invalid payment status. Must be FAILED or CANCELLED, got {payment_status}")
+    if payment_status != PaymentStatus.FAILED:
+        raise ValueError(f"Invalid payment status. Must be FAILED, got {payment_status}")
     
     # Load order with items to ensure all items are in session for updates
     from sqlalchemy.orm import joinedload
@@ -487,55 +584,52 @@ def mark_payment_failed_or_cancelled(
     if not order:
         raise ValueError("Order not found")
     
-    # Don't update if payment is already completed
-    if order.payment_status == PaymentStatus.COMPLETED:
-        logger.warning(f"Cannot mark payment as {payment_status.value} for order {order.order_number} - payment already completed")
+    # Don't update if payment is already verified
+    if order.payment_status == PaymentStatus.VERIFIED:
+        logger.warning(f"Cannot mark payment as {payment_status.value} for order {order.order_number} - payment already verified")
         return order
     
     # Update payment status
     previous_payment_status = order.payment_status
-    order.payment_status = payment_status
+    order.payment_status = PaymentStatus.FAILED
     order.status_updated_at = now_ist()
     
-    # Set order_status to ORDER_NOT_PLACED when payment fails or is cancelled
+    # Set order_status to PAYMENT_FAILED
     previous_order_status = order.order_status
-    order.order_status = OrderStatus.ORDER_NOT_PLACED
-    
-    # Capture previous item statuses BEFORE updating
+    order.order_status = OrderStatus.PAYMENT_FAILED
     item_previous_statuses = {}
+    
+    # Update item statuses
     for item in order.items:
         item_previous_statuses[item.id] = item.order_status
-        item.order_status = OrderStatus.ORDER_NOT_PLACED
+        item.order_status = OrderStatus.PAYMENT_FAILED
         item.status_updated_at = now_ist()
     
     # Create status history entry
-    status_notes = f"Payment marked as {payment_status.value}."
+    status_notes = f"Payment marked as FAILED."
     if reason:
         status_notes += f" Reason: {reason}"
     else:
-        if payment_status == PaymentStatus.FAILED:
-            status_notes += " Payment verification failed or payment was declined. Order not placed."
-        elif payment_status == PaymentStatus.CANCELLED:
-            status_notes += " Payment was cancelled by user or expired. Order not placed."
+        status_notes += " Payment verification failed or payment was declined. Payment status set to FAILED. Order status set to PAYMENT_FAILED."
     
     status_history = OrderStatusHistory(
         order_id=order.id,
-        status=OrderStatus.ORDER_NOT_PLACED,
+        status=OrderStatus.PAYMENT_FAILED,
         previous_status=previous_order_status,
         notes=status_notes,
         changed_by="system"
     )
     db.add(status_history)
     
-    # Create status history entries for each order item
+    # Create status history for order items
     for item in order.items:
-        item_previous_status = item_previous_statuses.get(item.id, OrderStatus.PENDING_PAYMENT)
+        item_previous_status = item_previous_statuses.get(item.id, OrderStatus.CREATED)
         item_status_history = OrderStatusHistory(
             order_id=order.id,
             order_item_id=item.id,
-            status=OrderStatus.ORDER_NOT_PLACED,
+            status=OrderStatus.PAYMENT_FAILED,
             previous_status=item_previous_status,
-            notes=f"Payment {payment_status.value}. Order item not placed due to payment failure/cancellation.",
+            notes="Payment FAILED. Order item payment failed.",
             changed_by="system"
         )
         db.add(item_status_history)
@@ -575,15 +669,16 @@ def update_order_status(
     - sample_collected: may need technician info
     
     Statuses that don't need technician info:
-    - order_confirmed, sample_received_by_lab, testing_in_progress, report_ready
+    - confirmed, sample_received_by_lab, testing_in_progress, report_ready
     """
     # Statuses where technician details are not relevant
     # For these statuses, if technician fields are not provided, they will be cleared
     # However, if explicitly provided, they will still be set (for flexibility)
     STATUSES_WITHOUT_TECHNICIAN = {
-        OrderStatus.ORDER_NOT_PLACED,
-        OrderStatus.PENDING_PAYMENT,
-        OrderStatus.ORDER_CONFIRMED,
+        OrderStatus.CREATED,
+        OrderStatus.AWAITING_PAYMENT_CONFIRMATION,
+        OrderStatus.PAYMENT_FAILED,
+        OrderStatus.CONFIRMED,
         OrderStatus.SAMPLE_RECEIVED_BY_LAB,
         OrderStatus.TESTING_IN_PROGRESS,
         OrderStatus.REPORT_READY
@@ -611,32 +706,35 @@ def update_order_status(
     }
     
     if new_status in POST_PAYMENT_STATUSES:
-        if order.payment_status != PaymentStatus.COMPLETED:
+        if order.payment_status != PaymentStatus.VERIFIED:
             raise ValueError(
                 f"Cannot set order status to {new_status.value} because payment status is {order.payment_status.value}. "
-                f"Payment must be completed before setting post-payment statuses."
+                f"Payment must be verified before setting post-payment statuses."
             )
     
-    # Prevent setting order back to PENDING_PAYMENT if payment is already completed
-    if new_status == OrderStatus.PENDING_PAYMENT and order.payment_status == PaymentStatus.COMPLETED:
+    # Prevent setting order back to CREATED if payment is already verified
+    if new_status == OrderStatus.CREATED and order.payment_status == PaymentStatus.VERIFIED:
         raise ValueError(
-            "Cannot set order status to PENDING_PAYMENT because payment is already completed. "
-            "Order status should remain ORDER_CONFIRMED or progress to next stages."
+            "Cannot set order status to CREATED because payment is already verified. "
+            "Order status should remain CONFIRMED or progress to next stages."
         )
     
-    # Prevent setting order to ORDER_NOT_PLACED if payment is already completed
-    if new_status == OrderStatus.ORDER_NOT_PLACED and order.payment_status == PaymentStatus.COMPLETED:
+    
+    # Prevent manually setting order to CONFIRMED - only webhook can confirm orders
+    # This ensures cart clearing and genetic test flag setting happen correctly
+    if new_status == OrderStatus.CONFIRMED:
         raise ValueError(
-            "Cannot set order status to ORDER_NOT_PLACED because payment is already completed. "
-            "Order status should remain ORDER_CONFIRMED or progress to next stages."
+            "Cannot manually set order status to CONFIRMED. "
+            "Order confirmation must happen via webhook (confirm_order_from_webhook) to ensure "
+            "cart clearing and genetic test flag setting occur correctly."
         )
     
-    # Prevent setting order to ORDER_CONFIRMED or post-payment statuses if payment is not completed
-    if new_status == OrderStatus.ORDER_CONFIRMED or new_status in POST_PAYMENT_STATUSES:
-        if order.payment_status != PaymentStatus.COMPLETED:
+    # Prevent setting order to post-payment statuses if payment is not verified
+    if new_status in POST_PAYMENT_STATUSES:
+        if order.payment_status != PaymentStatus.VERIFIED:
             raise ValueError(
                 f"Cannot set order status to {new_status.value} because payment status is {order.payment_status.value}. "
-                f"Payment must be completed before setting order to {new_status.value}."
+                f"Payment must be verified before setting post-payment statuses."
             )
     
     # If updating specific order item
@@ -795,25 +893,17 @@ def _sync_order_status(db: Session, order: Order):
         target_status = Counter(item_statuses).most_common(1)[0][0]
     
     # Validate status change is consistent with payment status
-    # Don't set to PENDING_PAYMENT if payment is completed
-    if target_status == OrderStatus.PENDING_PAYMENT and order.payment_status == PaymentStatus.COMPLETED:
-        # If payment is completed, don't sync to PENDING_PAYMENT
-        # Keep current order status or use ORDER_CONFIRMED as minimum
-        if order.order_status != OrderStatus.PENDING_PAYMENT:
+    # Don't set to CREATED if payment is verified
+    if target_status == OrderStatus.CREATED and order.payment_status == PaymentStatus.VERIFIED:
+        # If payment is verified, don't sync to CREATED
+        # Keep current order status or use CONFIRMED as minimum
+        if order.order_status != OrderStatus.CREATED:
             return  # Keep current status
-        target_status = OrderStatus.ORDER_CONFIRMED
+        target_status = OrderStatus.CONFIRMED
     
-    # Don't set to ORDER_NOT_PLACED if payment is completed
-    if target_status == OrderStatus.ORDER_NOT_PLACED and order.payment_status == PaymentStatus.COMPLETED:
-        # If payment is completed, don't sync to ORDER_NOT_PLACED
-        # Keep current order status or use ORDER_CONFIRMED
-        if order.order_status != OrderStatus.ORDER_NOT_PLACED:
-            return  # Keep current status
-        target_status = OrderStatus.ORDER_CONFIRMED
-    
-    # Don't set to ORDER_CONFIRMED or post-payment statuses if payment is not completed
+    # Don't set to CONFIRMED or post-payment statuses if payment is not verified
     POST_PAYMENT_STATUSES = {
-        OrderStatus.ORDER_CONFIRMED,
+        OrderStatus.CONFIRMED,
         OrderStatus.SCHEDULED,
         OrderStatus.SCHEDULE_CONFIRMED_BY_LAB,
         OrderStatus.SAMPLE_COLLECTED,
@@ -822,16 +912,17 @@ def _sync_order_status(db: Session, order: Order):
         OrderStatus.REPORT_READY
     }
     
-    if target_status in POST_PAYMENT_STATUSES and order.payment_status != PaymentStatus.COMPLETED:
-        # If payment is not completed, don't sync to post-payment statuses
+    if target_status in POST_PAYMENT_STATUSES and order.payment_status != PaymentStatus.VERIFIED:
+        # If payment is not verified, don't sync to post-payment statuses
         # Keep current status or use appropriate status based on payment
         if order.order_status not in POST_PAYMENT_STATUSES:
             return  # Keep current status
-        # If payment failed/cancelled, set to ORDER_NOT_PLACED, otherwise PENDING_PAYMENT
-        if order.payment_status in [PaymentStatus.FAILED, PaymentStatus.CANCELLED]:
-            target_status = OrderStatus.ORDER_NOT_PLACED
+        # If payment failed, keep as CREATED (user can retry), otherwise keep current status
+        if order.payment_status == PaymentStatus.FAILED:
+            target_status = OrderStatus.CREATED
         else:
-            target_status = OrderStatus.PENDING_PAYMENT
+            # Keep current status or use CREATED
+            target_status = order.order_status if order.order_status else OrderStatus.CREATED
     
     # Update order status
     order.order_status = target_status
@@ -841,7 +932,7 @@ def _sync_order_status(db: Session, order: Order):
 def get_order_by_id(db: Session, order_id: int, user_id: Optional[int] = None, include_all_payment_statuses: bool = False) -> Optional[Order]:
     """
     Get order by ID, optionally filtered by user access.
-    By default, only returns orders with completed payment for security.
+    By default, only returns orders with verified payment for security.
     Set include_all_payment_statuses=True to allow viewing pending/failed orders (for order owner only).
     
     User can access order if:
@@ -859,9 +950,9 @@ def get_order_by_id(db: Session, order_id: int, user_id: Optional[int] = None, i
     # Build query - allow all payment statuses if flag is set
     query = db.query(Order).filter(Order.id == order_id)
     
-    # If not including all statuses, filter to completed only
+    # If not including all statuses, filter to verified only
     if not include_all_payment_statuses:
-        query = query.filter(Order.payment_status == PaymentStatus.COMPLETED)
+        query = query.filter(Order.payment_status == PaymentStatus.VERIFIED)
     
     if user_id:
         # Check if user owns the order OR has transferred members in the order
@@ -873,22 +964,50 @@ def get_order_by_id(db: Session, order_id: int, user_id: Optional[int] = None, i
         if order.user_id == user_id:
             return order
         
-        # Check if user has transferred members in this order
-        transferred_member_ids = db.query(Member.id).filter(
-            Member.user_id == user_id,
-            Member.transferred_from_user_id.isnot(None)
-        ).all()
+        # User doesn't have access (removed transferred member check)
         
-        if transferred_member_ids:
-            member_id_list = [m.id for m in transferred_member_ids]
-            # Check if any order items belong to these members
-            has_access = db.query(OrderItem).filter(
-                OrderItem.order_id == order_id,
-                OrderItem.member_id.in_(member_id_list)
-            ).first() is not None
-            
-            if has_access:
-                return order
+        # User doesn't have access
+        return None
+    
+    return query.first()
+
+
+def get_order_by_number(db: Session, order_number: str, user_id: Optional[int] = None, include_all_payment_statuses: bool = False) -> Optional[Order]:
+    """
+    Get order by order number, optionally filtered by user access.
+    By default, only returns orders with verified payment for security.
+    Set include_all_payment_statuses=True to allow viewing pending/failed orders (for order owner only).
+    
+    User can access order if:
+    1. Order belongs to user (Order.user_id = user_id), OR
+    2. User has transferred members that appear in the order (via order_items)
+    
+    Args:
+        db: Database session
+        order_number: Order number (e.g., "ORD2024012012345678")
+        user_id: Optional user ID for access control
+        include_all_payment_statuses: If True, allows viewing orders with any payment status (for order owner)
+    """
+    from Member_module.Member_model import Member
+    
+    # Build query - allow all payment statuses if flag is set
+    query = db.query(Order).filter(Order.order_number == order_number)
+    
+    # If not including all statuses, filter to verified only
+    if not include_all_payment_statuses:
+        query = query.filter(Order.payment_status == PaymentStatus.VERIFIED)
+    
+    if user_id:
+        # Check if user owns the order OR has transferred members in the order
+        order = query.first()
+        if not order:
+            return None
+        
+        # Check if user owns the order
+        if order.user_id == user_id:
+            return order
+        
+        # User doesn't have access (removed transferred member check)
         
         # User doesn't have access
         return None
@@ -902,9 +1021,7 @@ def get_user_orders(db: Session, user_id: int, limit: int = 50, payment_status_f
     By default, returns all orders regardless of payment status so users can see pending/failed orders.
     Can optionally filter by payment_status if needed.
     
-    Includes:
-    1. Orders owned by the user (Order.user_id = user_id)
-    2. Orders where user's transferred members appear (via order_items.member_id)
+    Returns orders owned by the user (Order.user_id = user_id)
     
     Args:
         db: Database session
@@ -922,39 +1039,9 @@ def get_user_orders(db: Session, user_id: int, limit: int = 50, payment_status_f
     # Get user's own orders - show all payment statuses by default
     own_orders = db.query(Order).filter(*own_orders_filter).all()
     
-    # Get orders where user's transferred members appear
-    # A transferred member is one where user owns it but it was transferred from another user
-    transferred_member_ids = db.query(Member.id).filter(
-        Member.user_id == user_id,
-        Member.transferred_from_user_id.isnot(None)
-    ).all()
-    
-    shared_orders = []
-    if transferred_member_ids:
-        member_id_list = [m.id for m in transferred_member_ids]
-        # Build filter for shared orders
-        shared_orders_filter = [OrderItem.member_id.in_(member_id_list)]
-        if payment_status_filter:
-            shared_orders_filter.append(Order.payment_status == payment_status_filter)
-        
-        # Get unique orders where these members appear
-        shared_orders = (
-            db.query(Order)
-            .join(OrderItem, Order.id == OrderItem.order_id)
-            .filter(*shared_orders_filter)
-            .distinct()
-            .all()
-        )
-    
-    # Combine and deduplicate by order ID
-    all_orders_dict = {order.id: order for order in own_orders}
-    for order in shared_orders:
-        if order.id not in all_orders_dict:
-            all_orders_dict[order.id] = order
-    
     # Sort by created_at descending and limit
     all_orders = sorted(
-        list(all_orders_dict.values()),
+        own_orders,
         key=lambda x: x.created_at,
         reverse=True
     )[:limit]

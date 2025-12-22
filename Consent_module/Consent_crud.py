@@ -273,8 +273,7 @@ def get_manage_consent_page_data(db: Session, member_id: int) -> List[dict]:
 def should_show_login_consent(db: Session, member_id: int) -> bool:
     """
     Check if login consent should be shown for a member.
-    Returns True if:
-    - Member's login_consent_shown flag is False
+    Returns True if member exists and is not deleted.
     """
     from Member_module.Member_model import Member
     
@@ -287,10 +286,6 @@ def should_show_login_consent(db: Session, member_id: int) -> bool:
     if not member:
         return False
     
-    # If consent was already shown, don't show again
-    if member.login_consent_shown:
-        return False
-    
-    # Show consent if not shown yet
+    # Show consent (always show if member exists)
     return True
 

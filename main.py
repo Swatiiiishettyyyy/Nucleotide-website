@@ -42,6 +42,7 @@ from alembic_runner import run_migrations
 from Category_module.bootstrap import seed_default_categories
 
 # Import models to register with SQLAlchemy Base
+from Banner_module.Banner_model import Banner
 from Consent_module.Consent_model import UserConsent, ConsentProduct
 from Orders_module.Order_model import Order, OrderItem, OrderSnapshot, OrderStatusHistory
 from Member_module.Member_transfer_model import MemberTransferLog
@@ -60,6 +61,7 @@ except ImportError:
 
 # Routers
 from Address_module.Address_router import router as address_router
+from Banner_module.Banner_router import router as banner_router
 from Cart_module.Cart_router import router as cart_router
 from Category_module.Category_router import router as category_router
 from Consent_module.Consent_router import router as consent_router
@@ -263,6 +265,7 @@ app.include_router(product_router)
 app.include_router(category_router)
 app.include_router(cart_router)
 app.include_router(address_router)
+app.include_router(banner_router)
 app.include_router(consent_router)
 app.include_router(member_router)
 app.include_router(order_router)
@@ -287,6 +290,7 @@ def root():
             "categories": "/categories",
             "cart": "/cart",
             "address": "/address",
+            "banners": "/banners",
             "consent": "/consent",
             "member": "/member",
             "orders": "/orders",

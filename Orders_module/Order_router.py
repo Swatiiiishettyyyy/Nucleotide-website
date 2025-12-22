@@ -11,6 +11,7 @@ import json
 
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user, get_current_member
+from Login_module.Utils.datetime_utils import now_ist
 from Login_module.User.user_model import User
 from Member_module.Member_model import Member
 from .Order_schema import (
@@ -21,13 +22,17 @@ from .Order_schema import (
     PaymentVerificationResponse,
     UpdateOrderStatusRequest,
     OrderItemTrackingResponse,
-    OrderTrackingResponse
+    OrderTrackingResponse,
+    RazorpayWebhookPayload,
+    WebhookResponse
 )
 from .Order_crud import (
     create_order_from_cart,
-    verify_and_complete_payment,
+    verify_payment_frontend,
+    confirm_order_from_webhook,
     update_order_status,
     get_order_by_id,
+    get_order_by_number,
     get_user_orders,
     mark_payment_failed_or_cancelled
 )
@@ -243,8 +248,11 @@ def verify_payment(
     db: Session = Depends(get_db)
 ):
     """
-    Verify Razorpay payment and complete order.
-    Removes cart items after successful payment.
+    Verify Razorpay payment from frontend.
+    Provides immediate feedback but does NOT confirm order.
+    Only sets payment_status = SUCCESS (temporary).
+    Order confirmation happens via webhook only.
+    Cart clearing happens via webhook only.
     """
     try:
         # First, verify order belongs to user BEFORE payment verification (security check)
@@ -261,9 +269,22 @@ def verify_payment(
                 detail="Order does not belong to you"
             )
         
-        # Now verify and complete payment
-        # Note: verify_and_complete_payment commits the transaction internally
-        order = verify_and_complete_payment(
+        # Check if webhook already confirmed the order
+        if order.order_status == OrderStatus.CONFIRMED:
+            logger.info(f"Order {order.order_number} already confirmed by webhook. Returning success.")
+            return PaymentVerificationResponse(
+                status="success",
+                message="Payment verified successfully. Order confirmed.",
+                order_id=order.id,
+                order_number=order.order_number,
+                payment_status=order.payment_status.value,
+                order_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status)
+            )
+        
+        # Verify payment (frontend verification - sets SUCCESS, not VERIFIED)
+        # Note: verify_payment_frontend commits the transaction internally
+        from .Order_crud import verify_payment_frontend
+        order = verify_payment_frontend(
             db=db,
             order_id=payment_data.order_id,
             razorpay_order_id=payment_data.razorpay_order_id,
@@ -271,60 +292,20 @@ def verify_payment(
             razorpay_signature=payment_data.razorpay_signature
         )
         
-        # Refresh order to get latest state after payment verification
+        # Refresh order to get latest state
         db.refresh(order)
         
-        # Delete cart items after successful payment
-        # Validate order has items before processing
-        if not order.items:
-            logger.warning(f"Order {order.order_number} has no items, skipping cart deletion")
+        # Determine appropriate message based on status
+        if order.order_status == OrderStatus.CONFIRMED:
+            message = "Payment verified successfully. Order confirmed."
         else:
-            # Get order item details (product_id, member_id pairs)
-            order_item_pairs = [(item.product_id, item.member_id) for item in order.items]
-            
-            # Find and delete matching cart items by product_id and member_id
-            deleted_group_ids = set()
-            
-            for product_id, member_id in order_item_pairs:
-                cart_item = (
-                    db.query(CartItem)
-                    .filter(
-                        CartItem.user_id == current_user.id,
-                        CartItem.product_id == product_id,
-                        CartItem.member_id == member_id
-                    )
-                    .first()
-                )
-                
-                if cart_item:
-                    # If cart item has group_id, delete all items in the group (for couple/family products)
-                    if cart_item.group_id and cart_item.group_id not in deleted_group_ids:
-                        group_items = (
-                            db.query(CartItem)
-                            .filter(
-                                CartItem.group_id == cart_item.group_id,
-                                CartItem.user_id == current_user.id
-                            )
-                            .all()
-                        )
-                        for item in group_items:
-                            db.delete(item)
-                        deleted_group_ids.add(cart_item.group_id)
-                    elif not cart_item.group_id:
-                        # Single item, delete it
-                        db.delete(cart_item)
+            message = "Payment verified successfully. Waiting for confirmation..."
         
-        # Remove applied coupon after successful payment
-        from Cart_module.coupon_service import remove_coupon_from_cart
-        remove_coupon_from_cart(db, current_user.id)
-        
-        db.commit()
-        
-        logger.info(f"Payment verified and order {order.order_number} completed for user {current_user.id}")
+        logger.info(f"Frontend payment verification successful for order {order.order_number} (user {current_user.id}). Payment status: {order.payment_status.value}")
         
         return PaymentVerificationResponse(
             status="success",
-            message="Payment verified successfully. Order confirmed.",
+            message=message,
             order_id=order.id,
             order_number=order.order_number,
             payment_status=order.payment_status.value,
@@ -363,11 +344,11 @@ def verify_payment(
         elif "already cancelled" in error_message.lower():
             error_message = f"PAYMENT CANCELLED: Payment for this order was cancelled. Please create a new order to proceed with payment."
             payment_status = "cancelled"
-        elif "already completed" in error_message.lower():
-            error_message = "Payment for this order has already been completed successfully."
+        elif "already completed" in error_message.lower() or "already verified" in error_message.lower():
+            error_message = "Payment for this order has already been verified successfully."
         else:
             # For any other payment-related error, mark as failed
-            if payment_status == "unknown" or payment_status not in ["completed", "COMPLETED"]:
+            if payment_status == "unknown" or payment_status not in ["verified", "VERIFIED"]:
                 error_message = f"{payment_failed_indicator}: {error_message}"
                 payment_status = "failed"
         
@@ -392,6 +373,319 @@ def verify_payment(
         )
 
 
+@router.post("/webhook", response_model=WebhookResponse)
+async def razorpay_webhook(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Razorpay webhook endpoint - final source of truth for payment verification.
+    Handles payment.captured, payment.failed, and payment.pending events.
+    Only this endpoint can confirm orders (order_status = CONFIRMED).
+    Only this endpoint clears carts (idempotent).
+    
+    Security:
+    - Verifies webhook signature
+    - Validates event authenticity
+    - Handles race conditions with database locking
+    """
+    try:
+        # Get raw request body for signature verification
+        body_bytes = await request.body()
+        body_str = body_bytes.decode('utf-8')
+        
+        # Get webhook signature from headers
+        webhook_signature = request.headers.get("X-Razorpay-Signature")
+        if not webhook_signature:
+            logger.error("Missing X-Razorpay-Signature header in webhook request")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing webhook signature"
+            )
+        
+        # Verify webhook signature
+        from .razorpay_service import verify_webhook_signature
+        is_valid = verify_webhook_signature(body_str, webhook_signature)
+        
+        if not is_valid:
+            logger.error("Invalid webhook signature")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid webhook signature"
+            )
+        
+        # Parse webhook payload
+        try:
+            webhook_data = json.loads(body_str)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in webhook payload: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid webhook payload"
+            )
+        
+        # Extract event type and payload
+        event_type = webhook_data.get("event")
+        event_payload = webhook_data.get("payload", {}).get("payment", {})
+        entity = webhook_data.get("payload", {}).get("payment", {}).get("entity", {})
+        
+        if not event_type:
+            logger.error("Missing event type in webhook payload")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing event type"
+            )
+        
+        logger.info(f"Received webhook event: {event_type}")
+        
+        # Handle different event types
+        if event_type == "payment.captured":
+            # Extract payment details
+            razorpay_payment_id = entity.get("id") or event_payload.get("id")
+            razorpay_order_id = entity.get("order_id") or event_payload.get("order_id")
+            
+            if not razorpay_payment_id or not razorpay_order_id:
+                logger.error(f"Missing payment_id or order_id in payment.captured webhook: {webhook_data}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Missing payment_id or order_id in webhook payload"
+                )
+            
+            # Find order by razorpay_order_id
+            order = db.query(Order).filter(Order.razorpay_order_id == razorpay_order_id).first()
+            
+            if not order:
+                logger.warning(f"Order not found for Razorpay order ID: {razorpay_order_id}")
+                # Return 200 OK so Razorpay doesn't retry (order doesn't exist)
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order not found for Razorpay order ID: {razorpay_order_id}"
+                )
+            
+            # Confirm order from webhook (idempotent)
+            try:
+                order = confirm_order_from_webhook(
+                    db=db,
+                    order_id=order.id,
+                    razorpay_order_id=razorpay_order_id,
+                    razorpay_payment_id=razorpay_payment_id
+                )
+                
+                logger.info(f"Order {order.order_number} confirmed by webhook (payment.captured)")
+                
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order {order.order_number} confirmed successfully"
+                )
+                
+            except ValueError as e:
+                # Order already confirmed or other validation error
+                logger.info(f"Webhook confirmation skipped: {str(e)}")
+                # Return 200 OK (idempotent - already processed)
+                return WebhookResponse(
+                    status="success",
+                    message=str(e)
+                )
+            except Exception as e:
+                # Internal error - return 500 so Razorpay retries
+                logger.error(f"Error confirming order from webhook: {e}", exc_info=True)
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error processing webhook: {str(e)}"
+                )
+        
+        elif event_type == "payment.pending":
+            # Extract payment details
+            razorpay_payment_id = entity.get("id") or event_payload.get("id")
+            razorpay_order_id = entity.get("order_id") or event_payload.get("order_id")
+            
+            if not razorpay_payment_id or not razorpay_order_id:
+                logger.error(f"Missing payment_id or order_id in payment.pending webhook: {webhook_data}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Missing payment_id or order_id in webhook payload"
+                )
+            
+            # Find order by razorpay_order_id
+            order = db.query(Order).filter(Order.razorpay_order_id == razorpay_order_id).first()
+            
+            if not order:
+                logger.warning(f"Order not found for Razorpay order ID: {razorpay_order_id}")
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order not found for Razorpay order ID: {razorpay_order_id}"
+                )
+            
+            # Only update if order is not already confirmed
+            # Never downgrade a confirmed order
+            if order.order_status == OrderStatus.CONFIRMED:
+                logger.warning(f"Received payment.pending webhook for confirmed order {order.order_number}. Ignoring (order already confirmed).")
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order {order.order_number} already confirmed. Payment pending event ignored."
+                )
+            
+            # Update payment status to pending
+            try:
+                previous_payment_status = order.payment_status
+                previous_order_status = order.order_status
+                
+                order.payment_status = PaymentStatus.PENDING
+                order.order_status = OrderStatus.AWAITING_PAYMENT_CONFIRMATION
+                order.status_updated_at = now_ist()
+                
+                # Update order items
+                for item in order.items:
+                    item.order_status = OrderStatus.AWAITING_PAYMENT_CONFIRMATION
+                    item.status_updated_at = now_ist()
+                
+                # Create status history
+                from .Order_model import OrderStatusHistory
+                status_history = OrderStatusHistory(
+                    order_id=order.id,
+                    status=OrderStatus.AWAITING_PAYMENT_CONFIRMATION,
+                    previous_status=previous_order_status,
+                    notes=f"Payment pending (webhook event: payment.pending). Payment initiated but Razorpay has not received final confirmation from bank yet. Previous payment status: {previous_payment_status.value}",
+                    changed_by="system"
+                )
+                db.add(status_history)
+                
+                # Create status history for each order item
+                for item in order.items:
+                    item_status_history = OrderStatusHistory(
+                        order_id=order.id,
+                        order_item_id=item.id,
+                        status=OrderStatus.AWAITING_PAYMENT_CONFIRMATION,
+                        previous_status=previous_order_status,
+                        notes="Payment pending. Waiting for Razorpay/bank confirmation.",
+                        changed_by="system"
+                    )
+                    db.add(item_status_history)
+                
+                db.commit()
+                
+                logger.info(f"Order {order.order_number} marked as payment pending by webhook")
+                
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order {order.order_number} payment marked as pending"
+                )
+                
+            except Exception as e:
+                logger.error(f"Error processing payment.pending webhook: {e}", exc_info=True)
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error processing webhook: {str(e)}"
+                )
+        
+        elif event_type == "payment.failed":
+            # Extract payment details
+            razorpay_payment_id = entity.get("id") or event_payload.get("id")
+            razorpay_order_id = entity.get("order_id") or event_payload.get("order_id")
+            
+            if not razorpay_payment_id or not razorpay_order_id:
+                logger.error(f"Missing payment_id or order_id in payment.failed webhook: {webhook_data}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Missing payment_id or order_id in webhook payload"
+                )
+            
+            # Find order by razorpay_order_id
+            order = db.query(Order).filter(Order.razorpay_order_id == razorpay_order_id).first()
+            
+            if not order:
+                logger.warning(f"Order not found for Razorpay order ID: {razorpay_order_id}")
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order not found for Razorpay order ID: {razorpay_order_id}"
+                )
+            
+            # Only update if order is not already confirmed
+            # Never downgrade a confirmed order
+            if order.order_status == OrderStatus.CONFIRMED:
+                logger.warning(f"Received payment.failed webhook for confirmed order {order.order_number}. Ignoring (order already confirmed).")
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order {order.order_number} already confirmed. Payment failure event ignored."
+                )
+            
+            # Update payment status to failed
+            try:
+                previous_payment_status = order.payment_status
+                previous_order_status = order.order_status
+                
+                order.payment_status = PaymentStatus.FAILED
+                order.order_status = OrderStatus.PAYMENT_FAILED
+                order.status_updated_at = now_ist()
+                
+                # Update order items status
+                for item in order.items:
+                    item.order_status = OrderStatus.PAYMENT_FAILED
+                    item.status_updated_at = now_ist()
+                
+                # Create status history
+                from .Order_model import OrderStatusHistory
+                status_history = OrderStatusHistory(
+                    order_id=order.id,
+                    status=OrderStatus.PAYMENT_FAILED,
+                    previous_status=previous_order_status,
+                    notes=f"Payment failed (webhook event: payment.failed). Payment status set to FAILED. Order status set to PAYMENT_FAILED. Previous payment status: {previous_payment_status.value}",
+                    changed_by="system"
+                )
+                db.add(status_history)
+                
+                # Create status history for each order item
+                for item in order.items:
+                    item_status_history = OrderStatusHistory(
+                        order_id=order.id,
+                        order_item_id=item.id,
+                        status=OrderStatus.PAYMENT_FAILED,
+                        previous_status=previous_order_status,
+                        notes="Payment failed. Order item payment failed.",
+                        changed_by="system"
+                    )
+                    db.add(item_status_history)
+                
+                db.commit()
+                
+                logger.info(f"Order {order.order_number} marked as failed by webhook")
+                
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order {order.order_number} payment marked as failed"
+                )
+                
+            except Exception as e:
+                logger.error(f"Error processing payment.failed webhook: {e}", exc_info=True)
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error processing webhook: {str(e)}"
+                )
+        
+        else:
+            # Unhandled event type - log and return success (don't retry)
+            logger.info(f"Unhandled webhook event type: {event_type}")
+            return WebhookResponse(
+                status="success",
+                message=f"Event {event_type} received but not processed"
+            )
+    
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error processing webhook: {e}", exc_info=True)
+        db.rollback()
+        # Return 500 so Razorpay retries on unexpected errors
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error processing webhook: {str(e)}"
+        )
+
+
 @router.get("/list", response_model=List[OrderResponse])
 def get_orders(
     request: Request,
@@ -404,15 +698,9 @@ def get_orders(
     
     result = []
     for order in orders:
-        # Filter order items by member if a member is selected
-        order_items_to_process = order.items
-        if current_member:
-            # Only include order items for the selected member
-            order_items_to_process = [item for item in order.items if item.member_id == current_member.id]
-            # Skip this order if no items match the selected member
-            if not order_items_to_process:
-                continue
         # Group order items by product AND group_id to distinguish different packs of same product
+        # We'll filter by member later, after checking plan types
+        order_items_to_process = order.items
         # 
         # Why this grouping is needed:
         # - When a user orders multiple packs of the same product (e.g., 2 couple packs),
@@ -457,20 +745,66 @@ def get_orders(
                 product_data = snapshot.product_data
                 product_name = product_data.get("Name", "Unknown")
                 product_id = product_data.get("ProductId", first_item.product_id)
+                plan_type = product_data.get("plan_type")
             else:
                 product_name = first_item.product.Name if first_item.product else "Unknown"
                 product_id = first_item.product_id
+                if first_item.product and hasattr(first_item.product.plan_type, 'value'):
+                    plan_type = first_item.product.plan_type.value
+                elif first_item.product:
+                    plan_type = str(first_item.product.plan_type)
+                else:
+                    plan_type = None
             
             # Extract group_id (already validated during grouping, reuse for response)
             # This avoids re-parsing JSON - group_id was already extracted above
             group_id = extract_and_validate_group_id(snapshot)
             
-            # Build member_address_map with full details
+            # IMPORTANT: Filter logic based on plan type
+            # - For couple/family plans: Keep ALL members in the group (show complete plan)
+            # - For single plans: Filter to show only selected member's items
+            items_to_display = items
+            if current_member:
+                # For couple/family plans, get ALL items from original order for this group
+                # to ensure we show the complete plan with all members
+                if plan_type and plan_type.lower() in ["couple", "family"]:
+                    # Get all items from the original order that belong to this group
+                    all_group_items = []
+                    for orig_item in order.items:
+                        orig_snapshot = orig_item.snapshot if orig_item.snapshot else None
+                        orig_group_id = extract_and_validate_group_id(orig_snapshot)
+                        if orig_group_id == group_id and orig_item.product_id == first_item.product_id:
+                            all_group_items.append(orig_item)
+                    
+                    # Check if selected member is part of this group
+                    member_in_group = any(item.member_id == current_member.id for item in all_group_items)
+                    
+                    if not member_in_group:
+                        # Selected member is not in this group, skip this group
+                        continue
+                    
+                    # Use all items from the group (keep original copy, show all members)
+                    items_to_display = all_group_items
+                else:
+                    # For single plans, check if member is in the group and filter
+                    member_in_group = any(item.member_id == current_member.id for item in items)
+                    
+                    if not member_in_group:
+                        # Selected member is not in this group, skip this group
+                        continue
+                    
+                    # Filter to show only the selected member's items for single plans
+                    items_to_display = [item for item in items if item.member_id == current_member.id]
+            
+            # Use first item for calculation (all items in group have same price)
+            calculation_item = first_item
+            
+            # Build member_address_map with full details using items_to_display
             member_address_map = []
             member_ids = []
             address_ids = []
             
-            for item in items:
+            for item in items_to_display:
                 snapshot = item.snapshot if item.snapshot else None
                 
                 if snapshot:
@@ -549,7 +883,9 @@ def get_orders(
             # Calculate total_amount: price is per product group, not per member
             # For couple/family products, there are multiple order items but price is calculated once per product
             # This matches the cart calculation logic: quantity * unit_price (per product, not per member)
-            item_total_amount = first_item.quantity * first_item.unit_price
+            # IMPORTANT: When member switches and views orders, show full amount for family/couple plans, not split amount
+            # Use calculation_item which includes all items in the group, ensuring full plan amount is shown
+            item_total_amount = calculation_item.quantity * calculation_item.unit_price
             
             order_items.append({
                 "product_id": product_id,
@@ -558,9 +894,13 @@ def get_orders(
                 "member_ids": list(set(member_ids)),
                 "address_ids": unique_address_ids,
                 "member_address_map": member_address_map,  # Full details with member-address mapping
-                "quantity": first_item.quantity,
+                "quantity": calculation_item.quantity,
                 "total_amount": item_total_amount
             })
+        
+        # Only include this order if it has items after filtering
+        if not order_items:
+            continue
         
         result.append({
             "order_id": order.id,
@@ -762,20 +1102,20 @@ def get_orders(
 #     return result
 
 
-@router.get("/{order_id}", response_model=OrderResponse)
+@router.get("/{order_number}", response_model=OrderResponse)
 def get_order(
-    order_id: int,
+    order_number: str,
     request: Request,
     current_user: User = Depends(get_current_user),
     current_member: Optional[Member] = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
     """
-    Get order details by ID. If a member is selected, shows only order items for that member.
-    Allows viewing orders with any payment status (pending/failed/completed) so users can check their order status.
+    Get order details by order number. If a member is selected, shows only order items for that member.
+    Allows viewing orders with any payment status (pending/failed/verified) so users can check their order status.
     """
     # Allow viewing orders with any payment status so users can see pending/failed orders
-    order = get_order_by_id(db, order_id, user_id=current_user.id, include_all_payment_statuses=True)
+    order = get_order_by_number(db, order_number, user_id=current_user.id, include_all_payment_statuses=True)
     
     if not order:
         raise HTTPException(
@@ -783,17 +1123,9 @@ def get_order(
             detail="Order not found"
         )
     
-    # Filter order items by member if a member is selected
-    order_items_to_process = order.items
-    if current_member:
-        order_items_to_process = [item for item in order.items if item.member_id == current_member.id]
-        if not order_items_to_process:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No order items found for the selected member in this order"
-            )
-    
     # Group order items by product AND group_id to distinguish different packs of same product
+    # We'll filter by member later, after checking plan types
+    order_items_to_process = order.items
     # 
     # Why this grouping is needed:
     # - When a user orders multiple packs of the same product (e.g., 2 couple packs),
@@ -838,20 +1170,66 @@ def get_order(
             product_data = snapshot.product_data
             product_name = product_data.get("Name", "Unknown")
             product_id = product_data.get("ProductId", first_item.product_id)
+            plan_type = product_data.get("plan_type")
         else:
             product_name = first_item.product.Name if first_item.product else "Unknown"
             product_id = first_item.product_id
+            if first_item.product and hasattr(first_item.product.plan_type, 'value'):
+                plan_type = first_item.product.plan_type.value
+            elif first_item.product:
+                plan_type = str(first_item.product.plan_type)
+            else:
+                plan_type = None
         
         # Extract group_id (already validated during grouping, reuse for response)
         # This avoids re-parsing JSON - group_id was already extracted above
         group_id = extract_and_validate_group_id(snapshot)
         
-        # Build member_address_map with full details
+        # IMPORTANT: Filter logic based on plan type
+        # - For couple/family plans: Keep ALL members in the group (show complete plan)
+        # - For single plans: Filter to show only selected member's items
+        items_to_display = items
+        if current_member:
+            # For couple/family plans, get ALL items from original order for this group
+            # to ensure we show the complete plan with all members
+            if plan_type and plan_type.lower() in ["couple", "family"]:
+                # Get all items from the original order that belong to this group
+                all_group_items = []
+                for orig_item in order.items:
+                    orig_snapshot = orig_item.snapshot if orig_item.snapshot else None
+                    orig_group_id = extract_and_validate_group_id(orig_snapshot)
+                    if orig_group_id == group_id and orig_item.product_id == first_item.product_id:
+                        all_group_items.append(orig_item)
+                
+                # Check if selected member is part of this group
+                member_in_group = any(item.member_id == current_member.id for item in all_group_items)
+                
+                if not member_in_group:
+                    # Selected member is not in this group, skip this group
+                    continue
+                
+                # Use all items from the group (keep original copy, show all members)
+                items_to_display = all_group_items
+            else:
+                # For single plans, check if member is in the group and filter
+                member_in_group = any(item.member_id == current_member.id for item in items)
+                
+                if not member_in_group:
+                    # Selected member is not in this group, skip this group
+                    continue
+                
+                # Filter to show only the selected member's items for single plans
+                items_to_display = [item for item in items if item.member_id == current_member.id]
+        
+        # Use first item for calculation (all items in group have same price)
+        calculation_item = first_item
+        
+        # Build member_address_map with full details using items_to_display
         member_address_map = []
         member_ids = []
         address_ids = []
         
-        for item in items:
+        for item in items_to_display:
             snapshot = item.snapshot if item.snapshot else None
             
             if snapshot:
@@ -930,7 +1308,9 @@ def get_order(
         # Calculate total_amount: price is per product group, not per member
         # For couple/family products, there are multiple order items but price is calculated once per product
         # This matches the cart calculation logic: quantity * unit_price (per product, not per member)
-        item_total_amount = first_item.quantity * first_item.unit_price
+        # IMPORTANT: When member switches and views orders, show full amount for family/couple plans, not split amount
+        # Use calculation_item which includes all items in the group, ensuring full plan amount is shown
+        item_total_amount = calculation_item.quantity * calculation_item.unit_price
         
         order_items.append({
             "product_id": product_id,
@@ -939,9 +1319,16 @@ def get_order(
             "member_ids": list(set(member_ids)),
             "address_ids": unique_address_ids,
             "member_address_map": member_address_map,  # Full details with member-address mapping
-            "quantity": first_item.quantity,
+            "quantity": calculation_item.quantity,
             "total_amount": item_total_amount
         })
+    
+    # Check if we have any items after filtering
+    if not order_items:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No order items found for the selected member in this order"
+        )
     
     return {
         "order_id": order.id,
@@ -962,16 +1349,16 @@ def get_order(
     }
 
 
-@router.get("/{order_id}/tracking", response_model=OrderTrackingResponse)
+@router.get("/{order_number}/tracking", response_model=OrderTrackingResponse)
 def get_order_tracking(
-    order_id: int,
+    order_number: str,
     request: Request,
     current_user: User = Depends(get_current_user),
     current_member: Optional[Member] = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
     """
-    Get order tracking information for a specific order.
+    Get order tracking information for a specific order by order number.
     If a member is selected, shows only order items for that member.
     Returns comprehensive order details with order items grouped by product.
     """
@@ -979,7 +1366,7 @@ def get_order_tracking(
     from .Order_model import OrderStatus
     
     # Verify order exists and belongs to user
-    order = get_order_by_id(db, order_id, user_id=current_user.id)
+    order = get_order_by_number(db, order_number, user_id=current_user.id)
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1326,7 +1713,7 @@ def update_order_status_api(
     Update order status (typically used by admin/lab technicians).
     Status transitions are flexible - can update from any stage to any stage.
     
-    Valid statuses: pending_payment, order_confirmed, scheduled, schedule_confirmed_by_lab,
+    Valid statuses: created, awaiting_payment_confirmation, confirmed, payment_failed, scheduled, schedule_confirmed_by_lab,
     sample_collected, sample_received_by_lab, testing_in_progress, report_ready
     
     Request body:
@@ -1340,7 +1727,7 @@ def update_order_status_api(
     
     Note: Technician details (scheduled_date, technician_name, technician_contact) are optional.
     They are typically required for: scheduled, schedule_confirmed_by_lab, sample_collected
-    They are NOT needed for: pending_payment, order_confirmed, sample_received_by_lab, testing_in_progress, report_ready
+    They are NOT needed for: created, confirmed, sample_received_by_lab, testing_in_progress, report_ready
     """
     try:
         # Validate status
@@ -1466,38 +1853,16 @@ async def razorpay_webhook(
                     detail="Order not found"
                 )
             
-            # Only process if payment is not already completed
-            if order.payment_status == PaymentStatus.COMPLETED:
-                logger.info(f"Payment already completed for order {order.order_number}, ignoring webhook")
-                return {"status": "success", "message": "Payment already processed"}
-            
-            # Get payment details from Razorpay to get signature
-            payment_details = get_payment_details(payment_id)
-            if not payment_details:
-                logger.error(f"Could not fetch payment details from Razorpay for payment_id: {payment_id}")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Could not fetch payment details"
-                )
-            
-            # Extract signature from payment details (if available)
-            razorpay_signature = payment_details.get("signature")
-            if not razorpay_signature:
-                logger.warning(f"No signature in payment details for payment_id: {payment_id}, proceeding without signature verification")
-            
-            # Verify and complete payment
+            # Confirm order from webhook (this will set order_status to CONFIRMED, clear cart, and set genetic test flag)
+            # Note: confirm_order_from_webhook is idempotent and handles already-confirmed orders internally
             try:
-                order = verify_and_complete_payment(
+                order = confirm_order_from_webhook(
                     db=db,
                     order_id=order.id,
                     razorpay_order_id=order_id_razorpay,
-                    razorpay_payment_id=payment_id,
-                    razorpay_signature=razorpay_signature or ""  # Use empty string if signature not available
+                    razorpay_payment_id=payment_id
                 )
-                logger.info(f"Payment completed via webhook for order {order.order_number}")
-                
-                # Note: Cart deletion is handled in verify_payment endpoint, not in webhook
-                # Webhook is for server-side updates, cart deletion happens on client-side verify-payment call
+                logger.info(f"Order {order.order_number} confirmed via payment.captured webhook. Cart cleared and genetic test flag set.")
                 
                 return {
                     "status": "success",
@@ -1538,9 +1903,9 @@ async def razorpay_webhook(
                     detail="Order not found"
                 )
             
-            # Only process if payment is not already completed
-            if order.payment_status == PaymentStatus.COMPLETED:
-                logger.info(f"Payment already completed for order {order.order_number}, ignoring failure webhook")
+            # Only process if payment is not already verified
+            if order.payment_status == PaymentStatus.VERIFIED:
+                logger.info(f"Payment already verified for order {order.order_number}, ignoring failure webhook")
                 return {"status": "success", "message": "Payment already processed"}
             
             # Mark payment as failed
@@ -1602,32 +1967,16 @@ async def razorpay_webhook(
             
             payment_id = payments[0]  # Use first payment
             
-            # Only process if payment is not already completed
-            if order.payment_status == PaymentStatus.COMPLETED:
-                logger.info(f"Payment already completed for order {order.order_number}, ignoring webhook")
-                return {"status": "success", "message": "Payment already processed"}
-            
-            # Get payment details to get signature
-            payment_details = get_payment_details(payment_id)
-            if not payment_details:
-                logger.error(f"Could not fetch payment details from Razorpay for payment_id: {payment_id}")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Could not fetch payment details"
-                )
-            
-            razorpay_signature = payment_details.get("signature", "")
-            
-            # Verify and complete payment
+            # Confirm order from webhook (this will set order_status to CONFIRMED, clear cart, and set genetic test flag)
+            # Note: confirm_order_from_webhook is idempotent and handles already-confirmed orders internally
             try:
-                order = verify_and_complete_payment(
+                order = confirm_order_from_webhook(
                     db=db,
                     order_id=order.id,
                     razorpay_order_id=order_id_razorpay,
-                    razorpay_payment_id=payment_id,
-                    razorpay_signature=razorpay_signature or ""
+                    razorpay_payment_id=payment_id
                 )
-                logger.info(f"Payment completed via order.paid webhook for order {order.order_number}")
+                logger.info(f"Order {order.order_number} confirmed via order.paid webhook. Cart cleared and genetic test flag set.")
                 
                 return {
                     "status": "success",

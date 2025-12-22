@@ -160,28 +160,8 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
                 detail=f"Database error: Unable to get or create user. {str(e)}"
             )
         
-        # Check for member transfer and execute if OTP verified
-        try:
-            from Member_module.Member_transfer_crud import (
-                mark_transfer_otp_verified, execute_member_transfer
-            )
-            
-            # Check if there's a pending transfer for this phone number
-            # Mark it as OTP_VERIFIED (OTP was already verified above)
-            transfer_log = mark_transfer_otp_verified(db, req.mobile)
-            
-            if transfer_log and transfer_log.transfer_status == "OTP_VERIFIED":
-                # Execute the transfer
-                try:
-                    execute_member_transfer(db, transfer_log.id, user.id)
-                    logger.info(f"Member transfer executed successfully: transfer_log_id={transfer_log.id}, new_user_id={user.id}")
-                except Exception as transfer_error:
-                    logger.error(f"Error executing member transfer: {transfer_error}", exc_info=True)
-                    # Don't fail login if transfer fails - user can still log in
-                    # Transfer can be retried manually if needed
-        except Exception as e:
-            logger.warning(f"Error checking/executing member transfer: {e}", exc_info=True)
-            # Don't fail login if transfer check fails
+        # Member transfer to independent user functionality removed
+        # Members can only be switched within the same account, not transferred to become independent users
 
         # Create audit log for successful verification
         try:

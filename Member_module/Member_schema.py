@@ -1,5 +1,6 @@
 from datetime import date
 from typing import List, Optional
+import re
 
 from pydantic import BaseModel, Field, validator
 
@@ -11,6 +12,7 @@ class MemberRequest(BaseModel):
     gender: str = Field(..., description="Gender (M/F/Other)", max_length=10)
     dob: date = Field(..., description="Date of birth")
     mobile: str = Field(..., description="Mobile number (10 digits)", min_length=10, max_length=10)
+    email: Optional[str] = Field(None, description="Email address (optional)", max_length=255)
     
     @validator('relation')
     def validate_relation(cls, v):
@@ -78,6 +80,18 @@ class MemberRequest(BaseModel):
             if len(v) != 10 or not v.isdigit():
                 raise ValueError('Mobile number must be exactly 10 digits')
         return v
+    
+    @validator('email')
+    def validate_email(cls, v):
+        if v is not None and v:
+            # Basic email validation regex
+            v = v.strip().lower()
+            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            if not re.match(email_pattern, v):
+                raise ValueError('Invalid email format')
+            if len(v) > 255:
+                raise ValueError('Email address must be 255 characters or less')
+        return v if v else None
 
 
 class EditMemberRequest(BaseModel):
@@ -88,6 +102,7 @@ class EditMemberRequest(BaseModel):
     gender: Optional[str] = Field(None, description="Gender (M/F/Other)", max_length=10)
     dob: Optional[date] = Field(None, description="Date of birth")
     mobile: Optional[str] = Field(None, description="Mobile number (10 digits)", min_length=10, max_length=10)
+    email: Optional[str] = Field(None, description="Email address (optional)", max_length=255)
     
     @validator('relation')
     def validate_relation(cls, v):
@@ -155,6 +170,18 @@ class EditMemberRequest(BaseModel):
             if len(v) != 10 or not v.isdigit():
                 raise ValueError('Mobile number must be exactly 10 digits')
         return v
+    
+    @validator('email')
+    def validate_email(cls, v):
+        if v is not None and v:
+            # Basic email validation regex
+            v = v.strip().lower()
+            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            if not re.match(email_pattern, v):
+                raise ValueError('Invalid email format')
+            if len(v) > 255:
+                raise ValueError('Email address must be 255 characters or less')
+        return v if v else None
 
 class MemberData(BaseModel):
     member_id: int
@@ -164,6 +191,7 @@ class MemberData(BaseModel):
     gender: Optional[str] = None
     dob: Optional[date] = None
     mobile: Optional[str] = None
+    email: Optional[str] = None
     profile_photo_url: Optional[str] = None
     has_taken_genetic_test: Optional[bool] = False
 

@@ -151,3 +151,9 @@ class RazorpayWebhookPayload(BaseModel):
     event: str = Field(..., description="Webhook event type (e.g., payment.captured, payment.failed)")
     payload: Dict[str, Any] = Field(..., description="Event payload containing payment/order details")
     created_at: Optional[int] = Field(None, description="Unix timestamp when event was created")
+
+
+class WebhookResponse(BaseModel):
+    """Webhook response"""
+    status: str
+    message: str

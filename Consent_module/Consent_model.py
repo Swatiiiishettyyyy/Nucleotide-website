@@ -31,7 +31,6 @@ class UserConsent(Base):
     
     # Transfer tracking fields
     linked_from_consent_id = Column(Integer, ForeignKey("user_consents.id", ondelete="SET NULL"), nullable=True)  # Original consent if this is a transferred copy
-    transfer_log_id = Column(Integer, ForeignKey("member_transfer_logs.id", ondelete="SET NULL"), nullable=True, index=True)  # Link to transfer log
     transferred_at = Column(DateTime(timezone=True), nullable=True)  # When transfer occurred
 
     # Relationships

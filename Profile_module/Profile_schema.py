@@ -3,23 +3,27 @@ from typing import Optional
 
 
 class EditProfileRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255, example="John Doe")
-    email: EmailStr = Field(..., example="john.doe@example.com")
-    mobile: str = Field(..., min_length=10, max_length=15, example="9876543210")
+    name: Optional[str] = Field(None, min_length=1, max_length=255, example="John Doe")
+    email: Optional[EmailStr] = Field(None, example="john.doe@example.com")
+    mobile: Optional[str] = Field(None, min_length=10, max_length=15, example="9876543210")
 
     @validator('mobile')
     def validate_mobile(cls, v):
-        # Remove any spaces or special characters
-        cleaned = ''.join(filter(str.isdigit, v))
-        if len(cleaned) < 10 or len(cleaned) > 15:
-            raise ValueError('Mobile number must be between 10 and 15 digits')
-        return cleaned
+        if v is not None:
+            # Remove any spaces or special characters
+            cleaned = ''.join(filter(str.isdigit, v))
+            if len(cleaned) < 10 or len(cleaned) > 15:
+                raise ValueError('Mobile number must be between 10 and 15 digits')
+            return cleaned
+        return v
     
     @validator('name')
     def validate_name(cls, v):
-        if v.strip() == '':
-            raise ValueError('Name cannot be empty or just whitespace')
-        return v.strip()
+        if v is not None:
+            if v.strip() == '':
+                raise ValueError('Name cannot be empty or just whitespace')
+            return v.strip()
+        return v
 
     class Config:
         json_schema_extra = {
@@ -37,6 +41,7 @@ class UserProfileData(BaseModel):
     email: Optional[str]
     mobile: Optional[str]
     profile_photo_url: Optional[str] = None
+    has_taken_genetic_test: Optional[bool] = False
 
     class Config:
         from_attributes = True
@@ -107,6 +112,27 @@ class UploadPhotoResponse(BaseModel):
                     "email": "john.doe@example.com",
                     "mobile": "9876543210",
                     "profile_photo_url": "profile_photos/1_abc12345.jpg"
+                }
+            }
+        }
+
+
+class DeletePhotoResponse(BaseModel):
+    status: str
+    message: str
+    data: UserProfileData
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "success",
+                "message": "Profile photo deleted successfully.",
+                "data": {
+                    "user_id": 1,
+                    "name": "John Doe",
+                    "email": "john.doe@example.com",
+                    "mobile": "9876543210",
+                    "profile_photo_url": None
                 }
             }
         }

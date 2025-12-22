@@ -10,9 +10,10 @@ import enum
 
 class OrderStatus(str, enum.Enum):
     """Order tracking statuses"""
-    ORDER_NOT_PLACED = "order_not_placed"  # Payment failed - order not placed
-    PENDING_PAYMENT = "pending_payment"  # Order created but payment not completed or in processing
-    ORDER_CONFIRMED = "order_confirmed"  # Payment completed and verified, order confirmed
+    CREATED = "created"  # Order exists, not confirmed (initial state)
+    AWAITING_PAYMENT_CONFIRMATION = "awaiting_payment_confirmation"  # Payment initiated, waiting for Razorpay/bank confirmation
+    CONFIRMED = "confirmed"  # Payment verified by webhook, order finalized
+    PAYMENT_FAILED = "payment_failed"  # Payment failed - order not confirmed
     SCHEDULED = "scheduled"
     SCHEDULE_CONFIRMED_BY_LAB = "schedule_confirmed_by_lab"
     SAMPLE_COLLECTED = "sample_collected"
@@ -22,11 +23,12 @@ class OrderStatus(str, enum.Enum):
 
 
 class PaymentStatus(str, enum.Enum):
-    """Payment status"""
-    PENDING = "pending"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
+    """Payment status - tracks money/transaction state"""
+    NOT_INITIATED = "not_initiated"  # Order created, payment not started
+    PENDING = "pending"  # Payment initiated, awaiting completion
+    SUCCESS = "success"  # Frontend verified only (temporary, before webhook)
+    VERIFIED = "verified"  # Webhook confirmed (final, order can be confirmed)
+    FAILED = "failed"  # Payment failed
 
 
 class PaymentMethod(str, enum.Enum):
@@ -54,14 +56,14 @@ class Order(Base):
     
     # Payment details
     payment_method = Column(Enum(PaymentMethod), nullable=False, default=PaymentMethod.RAZORPAY)
-    payment_status = Column(Enum(PaymentStatus), nullable=False, default=PaymentStatus.PENDING, index=True)
+    payment_status = Column(Enum(PaymentStatus), nullable=False, default=PaymentStatus.NOT_INITIATED, index=True)
     razorpay_order_id = Column(String(255), nullable=False, unique=True, index=True)  # Razorpay order ID
     razorpay_payment_id = Column(String(255), nullable=True, unique=True, index=True)  # Razorpay payment ID (filled after payment completion)
     razorpay_signature = Column(String(255), nullable=True)  # Razorpay signature for verification (filled after payment completion)
     payment_date = Column(DateTime(timezone=True), nullable=True)  # Payment date (filled after payment completion)
     
     # Order status tracking
-    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.PENDING_PAYMENT, index=True)
+    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.CREATED, index=True)
     status_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Additional notes
@@ -74,7 +76,6 @@ class Order(Base):
     # Transfer tracking fields
     linked_from_order_id = Column(Integer, ForeignKey("orders.id", ondelete="SET NULL"), nullable=True)  # Original order if this is a transferred copy
     is_transferred_copy = Column(Boolean, nullable=False, default=False, index=True)  # True if this order was created from transfer
-    transfer_log_id = Column(Integer, ForeignKey("member_transfer_logs.id", ondelete="SET NULL"), nullable=True, index=True)  # Link to transfer log
     transferred_at = Column(DateTime(timezone=True), nullable=True)  # When transfer occurred
 
     # Relationships
@@ -106,7 +107,7 @@ class OrderItem(Base):
     unit_price = Column(Float, nullable=False)  # SpecialPrice at time of order (final price per unit)
     
     # Per-item status tracking (for different addresses in couple/family packs)
-    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.PENDING_PAYMENT, index=True)
+    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.CREATED, index=True)
     status_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Technician and scheduling information (per item, since items can have different addresses)
@@ -118,7 +119,6 @@ class OrderItem(Base):
     
     # Transfer tracking fields
     linked_from_order_item_id = Column(Integer, ForeignKey("order_items.id", ondelete="SET NULL"), nullable=True)  # Original order item if this is a transferred copy
-    transfer_log_id = Column(Integer, ForeignKey("member_transfer_logs.id", ondelete="SET NULL"), nullable=True, index=True)  # Link to transfer log
     transferred_at = Column(DateTime(timezone=True), nullable=True)  # When transfer occurred
     
     # Relationships
@@ -157,7 +157,6 @@ class OrderSnapshot(Base):
     
     # Transfer tracking fields
     linked_from_snapshot_id = Column(Integer, ForeignKey("order_snapshots.id", ondelete="SET NULL"), nullable=True)  # Original snapshot if this is a transferred copy
-    transfer_log_id = Column(Integer, ForeignKey("member_transfer_logs.id", ondelete="SET NULL"), nullable=True, index=True)  # Link to transfer log
     transferred_at = Column(DateTime(timezone=True), nullable=True)  # When transfer occurred
     
     # Relationships

@@ -146,13 +146,6 @@ def execute_member_transfer(
             detail="Member does not belong to the specified old user"
         )
     
-    # Check if member is already transferred
-    if member.transferred_from_user_id is not None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Member has already been transferred"
-        )
-    
     try:
         # Validate new user exists
         new_user = get_user_by_id(db, new_user_id)
@@ -185,8 +178,6 @@ def execute_member_transfer(
             )
         
         member.user_id = new_user_id
-        member.transferred_from_user_id = old_user_id
-        member.transfer_log_id = transfer_log_id
         member.is_self_profile = True  # Transferred member becomes new user's self profile
         member.relation = "Self"  # Update relation to Self
         new_member_id = member.id  # Same member, just ownership changed
@@ -207,14 +198,14 @@ def execute_member_transfer(
         
         # Step 2: Move cart items (orders are shared, not copied)
         cart_items_moved = _move_member_cart_items(
-            db, old_user_id, new_user_id, old_member_id, new_member_id, transfer_log_id
+            db, old_user_id, new_user_id, old_member_id, new_member_id
         )
         transfer_log.cart_items_moved_count = cart_items_moved
         db.flush()
         
         # Step 3: Copy consents
         consents_copied = _copy_member_consents(
-            db, old_user_id, new_user_id, old_member_id, new_member_id, transfer_log_id
+            db, old_user_id, new_user_id, old_member_id, new_member_id
         )
         transfer_log.consents_copied_count = consents_copied
         db.flush()
@@ -251,8 +242,7 @@ def _move_member_cart_items(
     old_user_id: int,
     new_user_id: int,
     old_member_id: int,
-    new_member_id: int,
-    transfer_log_id: int
+    new_member_id: int
 ) -> int:
     """
     Move cart items from old user to new user.
@@ -306,8 +296,7 @@ def _copy_member_consents(
     old_user_id: int,
     new_user_id: int,
     old_member_id: int,
-    new_member_id: int,
-    transfer_log_id: int
+    new_member_id: int
 ) -> int:
     """
     Copy consent records for the member.
@@ -332,7 +321,6 @@ def _copy_member_consents(
         
         if existing:
             # Update existing consent with transfer info
-            existing.transfer_log_id = transfer_log_id
             existing.transferred_at = now_ist()
             existing.linked_from_consent_id = original_consent.id
         else:
@@ -351,7 +339,6 @@ def _copy_member_consents(
                 status=original_consent.status,
                 created_at=original_consent.created_at,  # Preserve original consent date
                 linked_from_consent_id=original_consent.id,
-                transfer_log_id=transfer_log_id,
                 transferred_at=now_ist()
             )
             db.add(new_consent)

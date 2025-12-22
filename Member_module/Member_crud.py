@@ -289,6 +289,19 @@ def save_member(
         relation_lower = relation_to_store.strip().lower()
         should_mark_as_self = is_first_member and relation_lower in ["self", "user", "account holder", "account_holder"]
         
+        # For first member with "Self" relation, auto-populate mobile from user's login mobile
+        # Extract last 10 digits from user.mobile to match member schema validation (exactly 10 digits)
+        member_mobile = req.mobile
+        if should_mark_as_self and user.mobile:
+            # Extract digits only from user.mobile
+            user_mobile_digits = ''.join(filter(str.isdigit, str(user.mobile)))
+            # Take last 10 digits (handles cases where user.mobile might have country code)
+            if len(user_mobile_digits) >= 10:
+                member_mobile = user_mobile_digits[-10:]
+            elif len(user_mobile_digits) > 0:
+                # If less than 10 digits, use as-is (fallback - should not happen in normal flow)
+                member_mobile = user_mobile_digits
+        
         # Create member with the relation value
         # IMPORTANT: relation_to_store has been validated and is guaranteed to be non-empty
         member = Member(
@@ -298,7 +311,8 @@ def save_member(
             age=req.age,
             gender=req.gender,
             dob=req.dob,
-            mobile=req.mobile,
+            mobile=member_mobile,
+            email=getattr(req, 'email', None),  # Optional email field
             associated_category=category_name,
             associated_category_id=category_obj.id,
             associated_plan_type=plan_type_normalized,
@@ -425,6 +439,18 @@ def save_member(
                 
                 raise HTTPException(status_code=500, detail=error_msg)
         
+        # If this is the first member with "Self" relation (is_self_profile=True),
+        # update user table fields from member details
+        if should_mark_as_self:
+            user.name = req.name
+            if getattr(req, 'email', None):
+                user.email = req.email
+            # Update profile_photo_url if provided in member (though it's not in MemberRequest schema currently)
+            # This allows future extensibility if profile_photo_url is added to the request
+            if hasattr(member, 'profile_photo_url') and member.profile_photo_url:
+                user.profile_photo_url = member.profile_photo_url
+            db.flush()  # Flush user updates before committing audit log
+        
         # Audit log for creation
         new_data = {
             "member_id": member.id,
@@ -434,6 +460,7 @@ def save_member(
             "gender": req.gender,
             "dob": req.dob.isoformat() if req.dob else None,
             "mobile": req.mobile,
+            "email": getattr(req, 'email', None),
             "category": category_name,
             "plan_type": plan_type_normalized
         }
@@ -465,6 +492,7 @@ def save_member(
             "gender": member.gender,
             "dob": member.dob.isoformat() if member.dob else None,
             "mobile": member.mobile,
+            "email": member.email,
             "category": member.associated_category,
             "plan_type": member.associated_plan_type
         }
@@ -484,6 +512,7 @@ def save_member(
         member.gender = req.gender
         member.dob = req.dob
         member.mobile = req.mobile
+        member.email = getattr(req, 'email', None)  # Optional email field
         # Note: category_id and plan_type are not updated on edit to maintain data integrity
         # Note: is_self_profile is not updated on edit to protect primary profile
         

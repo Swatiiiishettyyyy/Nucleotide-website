@@ -9,16 +9,10 @@ import os
 
 from deps import get_db
 from .Member_schema import (
-    MemberRequest, MemberResponse, MemberListResponse, MemberData, EditMemberRequest,
-    InitiateTransferRequest, InitiateTransferResponse
+    MemberRequest, MemberResponse, MemberListResponse, MemberData, EditMemberRequest
 )
 from .Member_crud import save_member, get_members_by_user
-from .Member_transfer_crud import (
-    create_transfer_log, get_pending_transfer_by_phone,
-    execute_member_transfer
-)
 from .Member_model import Member
-from .Member_transfer_model import MemberTransferLog
 from Login_module.Utils.auth_user import get_current_user, get_current_member
 from Login_module.Utils import security
 from Login_module.Utils.datetime_utils import to_ist_isoformat
@@ -268,7 +262,8 @@ def edit_member_api(
         age=req_dict.get('age', existing_member.age),
         gender=req_dict.get('gender', existing_member.gender),
         dob=req_dict.get('dob', existing_member.dob),
-        mobile=req_dict.get('mobile', existing_member.mobile)
+        mobile=req_dict.get('mobile', existing_member.mobile),
+        email=req_dict.get('email', existing_member.email)
     )
     
     # Get IP and user agent
@@ -310,118 +305,6 @@ def edit_member_api(
         "message": message
     }
 
-# Initiate member transfer
-@router.post("/{member_id}/initiate-transfer", response_model=InitiateTransferResponse)
-def initiate_member_transfer(
-    member_id: int,
-    req: InitiateTransferRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-    user = Depends(get_current_user)
-):
-    """
-    Initiate transfer of a member to their own account.
-    Sends OTP to member's phone number for verification.
-    """
-    from Login_module.OTP import otp_manager
-    from Login_module.Utils.rate_limiter import get_client_ip
-    from Login_module.Utils.datetime_utils import now_ist
-    from datetime import timedelta
-    import os
-    
-    # Validate member exists and belongs to user
-    member = db.query(Member).filter(
-        Member.id == member_id,
-        Member.user_id == user.id,
-        Member.is_deleted == False
-    ).first()
-    
-    if not member:
-        raise HTTPException(
-            status_code=404,
-            detail="Member not found or doesn't belong to you"
-        )
-    
-    # Validate phone number matches member's phone
-    normalized_phone = req.phone_number.strip().replace(" ", "").replace("-", "")
-    if normalized_phone != member.mobile:
-        raise HTTPException(
-            status_code=400,
-            detail="Phone number does not match member's registered phone number"
-        )
-    
-    # Check if member is already transferred
-    if member.transferred_from_user_id is not None:
-        raise HTTPException(
-            status_code=400,
-            detail="Member has already been transferred to another account"
-        )
-    
-    # Check if there's already a pending transfer for this member
-    existing_transfer = db.query(MemberTransferLog).filter(
-        MemberTransferLog.old_member_id == member_id,
-        MemberTransferLog.transfer_status.in_(["PENDING_OTP", "OTP_VERIFIED"])
-    ).first()
-    
-    if existing_transfer:
-        raise HTTPException(
-            status_code=400,
-            detail="A transfer request is already pending for this member. Please complete or cancel the existing transfer."
-        )
-    
-    # Check for active cart items with group_id (family/couple plans)
-    from Cart_module.Cart_model import CartItem
-    cart_items = db.query(CartItem).filter(
-        CartItem.user_id == user.id,
-        CartItem.member_id == member_id
-    ).all()
-    
-    if cart_items:
-        # Check if any items are in a group with other members
-        group_ids = {item.group_id for item in cart_items if item.group_id}
-        for group_id in group_ids:
-            group_items = db.query(CartItem).filter(
-                CartItem.group_id == group_id,
-                CartItem.user_id == user.id
-            ).all()
-            other_member_items = [gi for gi in group_items if gi.member_id != member_id]
-            if other_member_items:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot transfer member with active items in a family/couple plan cart. Please complete the purchase or remove items from cart first."
-                )
-    
-    # Generate OTP
-    OTP_EXPIRY_SECONDS = int(os.getenv("OTP_EXPIRY_SECONDS", 120))
-    otp_code = otp_manager.generate_otp()
-    otp_expires_at = now_ist() + timedelta(seconds=OTP_EXPIRY_SECONDS)
-    
-    # Store OTP in Redis (reuse existing OTP system)
-    country_code = "+91"  # Default, can be made configurable
-    otp_manager.store_otp(country_code, normalized_phone, otp_code, expires_in=OTP_EXPIRY_SECONDS)
-    
-    # Create transfer log
-    client_ip = get_client_ip(request)
-    user_agent = request.headers.get("user-agent")
-    
-    transfer_log = create_transfer_log(
-        db=db,
-        old_user_id=user.id,
-        old_member_id=member_id,
-        member_phone=normalized_phone,
-        initiated_by_user_id=user.id,
-        ip_address=client_ip,
-        user_agent=user_agent,
-        otp_code=otp_code,
-        otp_expires_at=otp_expires_at
-    )
-    
-    return InitiateTransferResponse(
-        status="success",
-        message=f"OTP sent to {normalized_phone}. Please verify OTP to complete transfer.",
-        transfer_log_id=transfer_log.id
-    )
-
 
 # Get list of members for user
 @router.get("/list", response_model=MemberListResponse)
@@ -453,6 +336,7 @@ def get_member_list(
             "gender": m.gender,
             "dob": m.dob.isoformat() if m.dob else None,
             "mobile": m.mobile,
+            "email": m.email,
             "profile_photo_url": m.profile_photo_url,
             "has_taken_genetic_test": has_taken_genetic_test
         })
@@ -812,6 +696,7 @@ def get_current_member_api(
             "gender": current_member.gender,
             "dob": current_member.dob.isoformat() if current_member.dob else None,
             "mobile": current_member.mobile,
+            "email": current_member.email,
             "profile_photo_url": current_member.profile_photo_url,
             "has_taken_genetic_test": has_taken_genetic_test
         }
@@ -831,189 +716,3 @@ CONTENT_TYPE_MAP = {
     ".webp": "image/webp"
 }
 
-
-@router.post("/{member_id}/upload-photo")
-async def upload_member_photo(
-    member_id: int,
-    file: UploadFile = File(...),
-    request: Request = None,
-    db: Session = Depends(get_db),
-    user = Depends(get_current_user)
-):
-    """
-    Upload profile photo for a member to S3.
-    Accepts image files (jpg, jpeg, png, gif, webp) up to 5MB.
-    """
-    # Validate member exists and belongs to user
-    member = db.query(Member).filter(
-        Member.id == member_id,
-        Member.user_id == user.id,
-        Member.is_deleted == False
-    ).first()
-    
-    if not member:
-        raise HTTPException(
-            status_code=404,
-            detail="Member not found or does not belong to you"
-        )
-    
-    # Validate file extension
-    file_ext = Path(file.filename).suffix.lower() if file.filename else ""
-    if file_ext not in ALLOWED_PHOTO_EXTENSIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid file type. Allowed types: {', '.join(ALLOWED_PHOTO_EXTENSIONS)}"
-        )
-    
-    # Read file content to check size
-    file_content = await file.read()
-    file_size = len(file_content)
-    
-    if file_size > MAX_PHOTO_FILE_SIZE:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File size exceeds maximum allowed size of {MAX_PHOTO_FILE_SIZE // (1024 * 1024)}MB"
-        )
-    
-    if file_size == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File is empty"
-        )
-    
-    # Generate unique filename: timestamp.ext
-    timestamp = int(uuid.uuid4().hex[:8], 16)  # Use part of UUID as timestamp-like identifier
-    filename = f"{timestamp}{file_ext}"
-    
-    # Determine content type
-    content_type = file.content_type or CONTENT_TYPE_MAP.get(file_ext, "image/jpeg")
-    
-    # Delete old profile photo from S3 if exists
-    if member.profile_photo_url:
-        try:
-            from .Member_s3_service import get_member_photo_s3_service
-            s3_service = get_member_photo_s3_service()
-            s3_service.delete_member_photo(member.profile_photo_url)
-        except Exception as e:
-            # Log but don't fail if old photo deletion fails
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"Failed to delete old member profile photo from S3: {str(e)}")
-    
-    # Upload to S3
-    try:
-        from .Member_s3_service import get_member_photo_s3_service
-        s3_service = get_member_photo_s3_service()
-        profile_photo_url = s3_service.upload_member_photo(
-            member_id=member_id,
-            filename=filename,
-            file_content=file_content,
-            content_type=content_type
-        )
-    except ValueError as e:
-        # S3 not configured
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"S3 configuration error: {str(e)}"
-        )
-    except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Error uploading member photo to S3: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to upload photo to S3: {str(e)}"
-        )
-    
-    # Update member profile with S3 URL
-    member.profile_photo_url = profile_photo_url
-    db.commit()
-    db.refresh(member)
-    
-    # Check if member has taken genetic test
-    from GeneticTest_module.GeneticTest_crud import get_participant_info
-    participant_info = get_participant_info(db, member_id=member.id)
-    has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
-    
-    return {
-        "status": "success",
-        "message": "Member profile photo uploaded successfully.",
-        "data": {
-            "member_id": member.id,
-            "name": member.name,
-            "relation": str(member.relation),
-            "age": member.age,
-            "gender": member.gender,
-            "dob": member.dob.isoformat() if member.dob else None,
-            "mobile": member.mobile,
-            "profile_photo_url": member.profile_photo_url,
-            "has_taken_genetic_test": has_taken_genetic_test
-        }
-    }
-
-
-@router.delete("/{member_id}/delete-photo")
-def delete_member_photo(
-    member_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-    user = Depends(get_current_user)
-):
-    """
-    Delete profile photo for a member from S3.
-    """
-    # Validate member exists and belongs to user
-    member = db.query(Member).filter(
-        Member.id == member_id,
-        Member.user_id == user.id,
-        Member.is_deleted == False
-    ).first()
-    
-    if not member:
-        raise HTTPException(
-            status_code=404,
-            detail="Member not found or does not belong to you"
-        )
-    
-    if not member.profile_photo_url:
-        raise HTTPException(
-            status_code=404,
-            detail="Member does not have a profile photo"
-        )
-    
-    # Delete file from S3
-    try:
-        from .Member_s3_service import get_member_photo_s3_service
-        s3_service = get_member_photo_s3_service()
-        s3_service.delete_member_photo(member.profile_photo_url)
-    except Exception as e:
-        # Log but don't fail if S3 deletion fails (photo might already be deleted)
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.warning(f"Failed to delete member profile photo from S3: {str(e)}")
-    
-    # Remove photo URL from database
-    member.profile_photo_url = None
-    db.commit()
-    db.refresh(member)
-    
-    # Check if member has taken genetic test
-    from GeneticTest_module.GeneticTest_crud import get_participant_info
-    participant_info = get_participant_info(db, member_id=member.id)
-    has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
-    
-    return {
-        "status": "success",
-        "message": "Member profile photo deleted successfully.",
-        "data": {
-            "member_id": member.id,
-            "name": member.name,
-            "relation": str(member.relation),
-            "age": member.age,
-            "gender": member.gender,
-            "dob": member.dob.isoformat() if member.dob else None,
-            "mobile": member.mobile,
-            "profile_photo_url": None,
-            "has_taken_genetic_test": has_taken_genetic_test
-        }
-    }
