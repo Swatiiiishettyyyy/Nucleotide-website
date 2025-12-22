@@ -380,7 +380,7 @@ async def razorpay_webhook(
 ):
     """
     Razorpay webhook endpoint - final source of truth for payment verification.
-    Handles payment.captured, payment.failed, and payment.pending events.
+    Handles payment.captured, payment.failed, and order.paid events.
     Only this endpoint can confirm orders (order_status = CONFIRMED).
     Only this endpoint clears carts (idempotent).
     
@@ -495,91 +495,6 @@ async def razorpay_webhook(
                     detail=f"Error processing webhook: {str(e)}"
                 )
         
-        elif event_type == "payment.pending":
-            # Extract payment details
-            razorpay_payment_id = entity.get("id") or event_payload.get("id")
-            razorpay_order_id = entity.get("order_id") or event_payload.get("order_id")
-            
-            if not razorpay_payment_id or not razorpay_order_id:
-                logger.error(f"Missing payment_id or order_id in payment.pending webhook: {webhook_data}")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Missing payment_id or order_id in webhook payload"
-                )
-            
-            # Find order by razorpay_order_id
-            order = db.query(Order).filter(Order.razorpay_order_id == razorpay_order_id).first()
-            
-            if not order:
-                logger.warning(f"Order not found for Razorpay order ID: {razorpay_order_id}")
-                return WebhookResponse(
-                    status="success",
-                    message=f"Order not found for Razorpay order ID: {razorpay_order_id}"
-                )
-            
-            # Only update if order is not already confirmed
-            # Never downgrade a confirmed order
-            if order.order_status == OrderStatus.CONFIRMED:
-                logger.warning(f"Received payment.pending webhook for confirmed order {order.order_number}. Ignoring (order already confirmed).")
-                return WebhookResponse(
-                    status="success",
-                    message=f"Order {order.order_number} already confirmed. Payment pending event ignored."
-                )
-            
-            # Update payment status to pending
-            try:
-                previous_payment_status = order.payment_status
-                previous_order_status = order.order_status
-                
-                order.payment_status = PaymentStatus.PENDING
-                order.order_status = OrderStatus.AWAITING_PAYMENT_CONFIRMATION
-                order.status_updated_at = now_ist()
-                
-                # Update order items
-                for item in order.items:
-                    item.order_status = OrderStatus.AWAITING_PAYMENT_CONFIRMATION
-                    item.status_updated_at = now_ist()
-                
-                # Create status history
-                from .Order_model import OrderStatusHistory
-                status_history = OrderStatusHistory(
-                    order_id=order.id,
-                    status=OrderStatus.AWAITING_PAYMENT_CONFIRMATION,
-                    previous_status=previous_order_status,
-                    notes=f"Payment pending (webhook event: payment.pending). Payment initiated but Razorpay has not received final confirmation from bank yet. Previous payment status: {previous_payment_status.value}",
-                    changed_by="system"
-                )
-                db.add(status_history)
-                
-                # Create status history for each order item
-                for item in order.items:
-                    item_status_history = OrderStatusHistory(
-                        order_id=order.id,
-                        order_item_id=item.id,
-                        status=OrderStatus.AWAITING_PAYMENT_CONFIRMATION,
-                        previous_status=previous_order_status,
-                        notes="Payment pending. Waiting for Razorpay/bank confirmation.",
-                        changed_by="system"
-                    )
-                    db.add(item_status_history)
-                
-                db.commit()
-                
-                logger.info(f"Order {order.order_number} marked as payment pending by webhook")
-                
-                return WebhookResponse(
-                    status="success",
-                    message=f"Order {order.order_number} payment marked as pending"
-                )
-                
-            except Exception as e:
-                logger.error(f"Error processing payment.pending webhook: {e}", exc_info=True)
-                db.rollback()
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Error processing webhook: {str(e)}"
-                )
-        
         elif event_type == "payment.failed":
             # Extract payment details
             razorpay_payment_id = entity.get("id") or event_payload.get("id")
@@ -659,6 +574,72 @@ async def razorpay_webhook(
                 
             except Exception as e:
                 logger.error(f"Error processing payment.failed webhook: {e}", exc_info=True)
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error processing webhook: {str(e)}"
+                )
+        
+        elif event_type == "order.paid":
+            # Alternative event for successful payment (when order is paid)
+            order_entity = webhook_data.get("payload", {}).get("order", {}).get("entity", {})
+            razorpay_order_id = order_entity.get("id")
+            
+            if not razorpay_order_id:
+                logger.error(f"Missing order_id in order.paid webhook: {webhook_data}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Missing order_id in webhook payload"
+                )
+            
+            # Find order by razorpay_order_id
+            order = db.query(Order).filter(Order.razorpay_order_id == razorpay_order_id).first()
+            
+            if not order:
+                logger.warning(f"Order not found for Razorpay order ID: {razorpay_order_id}")
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order not found for Razorpay order ID: {razorpay_order_id}"
+                )
+            
+            # Get payment ID from order entity
+            payments = order_entity.get("payments", [])
+            if not payments:
+                logger.warning(f"No payments found in order.paid webhook for order {order.order_number}")
+                return WebhookResponse(
+                    status="success",
+                    message=f"No payment ID found in webhook for order {order.order_number}"
+                )
+            
+            razorpay_payment_id = payments[0]  # Use first payment
+            
+            # Confirm order from webhook (idempotent)
+            try:
+                order = confirm_order_from_webhook(
+                    db=db,
+                    order_id=order.id,
+                    razorpay_order_id=razorpay_order_id,
+                    razorpay_payment_id=razorpay_payment_id
+                )
+                
+                logger.info(f"Order {order.order_number} confirmed by webhook (order.paid)")
+                
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order {order.order_number} confirmed successfully"
+                )
+                
+            except ValueError as e:
+                # Order already confirmed or other validation error
+                logger.info(f"Webhook confirmation skipped: {str(e)}")
+                # Return 200 OK (idempotent - already processed)
+                return WebhookResponse(
+                    status="success",
+                    message=str(e)
+                )
+            except Exception as e:
+                # Internal error - return 500 so Razorpay retries
+                logger.error(f"Error confirming order from webhook: {e}", exc_info=True)
                 db.rollback()
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1779,240 +1760,3 @@ def update_order_status_api(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error updating order status: {str(e)}"
         )
-
-
-@router.post("/webhook")
-async def razorpay_webhook(
-    request: Request,
-    db: Session = Depends(get_db)
-):
-    """
-    Razorpay webhook endpoint to handle payment events.
-    
-    This endpoint:
-    - Verifies webhook signature from Razorpay
-    - Handles payment events (payment.captured, payment.failed, etc.)
-    - Updates order status based on payment events
-    - Does NOT require authentication (Razorpay calls this directly)
-    
-    Webhook events handled:
-    - payment.captured: Payment successful, update order to confirmed
-    - payment.failed: Payment failed, mark order as failed
-    - payment.authorized: Payment authorized (for manual capture)
-    - order.paid: Order paid (alternative event for successful payment)
-    """
-    try:
-        # Get raw request body for signature verification
-        body_bytes = await request.body()
-        body_str = body_bytes.decode('utf-8')
-        
-        # Get webhook signature from headers
-        webhook_signature = request.headers.get("X-Razorpay-Signature")
-        if not webhook_signature:
-            logger.warning("Webhook request missing X-Razorpay-Signature header")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Missing webhook signature"
-            )
-        
-        # Verify webhook signature
-        if not verify_webhook_signature(body_str, webhook_signature):
-            logger.warning("Invalid webhook signature")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid webhook signature"
-            )
-        
-        # Parse webhook payload
-        webhook_data = json.loads(body_str)
-        event = webhook_data.get("event")
-        payload = webhook_data.get("payload", {})
-        
-        logger.info(f"Received Razorpay webhook event: {event}")
-        
-        # Handle different webhook events
-        if event == "payment.captured":
-            # Payment successful
-            payment_entity = payload.get("payment", {}).get("entity", {})
-            payment_id = payment_entity.get("id")
-            order_id_razorpay = payment_entity.get("order_id")
-            
-            if not payment_id or not order_id_razorpay:
-                logger.error(f"Missing payment_id or order_id in payment.captured webhook: {webhook_data}")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Missing payment_id or order_id in webhook payload"
-                )
-            
-            # Find order by razorpay_order_id
-            order = db.query(Order).filter(Order.razorpay_order_id == order_id_razorpay).first()
-            if not order:
-                logger.warning(f"Order not found for Razorpay order ID: {order_id_razorpay}")
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Order not found"
-                )
-            
-            # Confirm order from webhook (this will set order_status to CONFIRMED, clear cart, and set genetic test flag)
-            # Note: confirm_order_from_webhook is idempotent and handles already-confirmed orders internally
-            try:
-                order = confirm_order_from_webhook(
-                    db=db,
-                    order_id=order.id,
-                    razorpay_order_id=order_id_razorpay,
-                    razorpay_payment_id=payment_id
-                )
-                logger.info(f"Order {order.order_number} confirmed via payment.captured webhook. Cart cleared and genetic test flag set.")
-                
-                return {
-                    "status": "success",
-                    "message": "Payment processed successfully",
-                    "order_id": order.id,
-                    "order_number": order.order_number
-                }
-            except ValueError as e:
-                # Payment verification failed or already processed
-                logger.warning(f"Payment verification failed for order {order.order_number}: {str(e)}")
-                return {
-                    "status": "warning",
-                    "message": str(e),
-                    "order_id": order.id,
-                    "order_number": order.order_number
-                }
-        
-        elif event == "payment.failed":
-            # Payment failed
-            payment_entity = payload.get("payment", {}).get("entity", {})
-            payment_id = payment_entity.get("id")
-            order_id_razorpay = payment_entity.get("order_id")
-            error_description = payment_entity.get("error_description", "Payment failed")
-            
-            if not order_id_razorpay:
-                logger.error(f"Missing order_id in payment.failed webhook: {webhook_data}")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Missing order_id in webhook payload"
-                )
-            
-            # Find order by razorpay_order_id
-            order = db.query(Order).filter(Order.razorpay_order_id == order_id_razorpay).first()
-            if not order:
-                logger.warning(f"Order not found for Razorpay order ID: {order_id_razorpay}")
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Order not found"
-                )
-            
-            # Only process if payment is not already verified
-            if order.payment_status == PaymentStatus.VERIFIED:
-                logger.info(f"Payment already verified for order {order.order_number}, ignoring failure webhook")
-                return {"status": "success", "message": "Payment already processed"}
-            
-            # Mark payment as failed
-            try:
-                order = mark_payment_failed_or_cancelled(
-                    db=db,
-                    order_id=order.id,
-                    payment_status=PaymentStatus.FAILED,
-                    reason=f"Payment failed via webhook: {error_description}"
-                )
-                logger.info(f"Payment marked as failed via webhook for order {order.order_number}")
-                
-                return {
-                    "status": "success",
-                    "message": "Payment failure processed",
-                    "order_id": order.id,
-                    "order_number": order.order_number
-                }
-            except ValueError as e:
-                logger.warning(f"Could not mark payment as failed for order {order.order_number}: {str(e)}")
-                return {
-                    "status": "warning",
-                    "message": str(e),
-                    "order_id": order.id,
-                    "order_number": order.order_number
-                }
-        
-        elif event == "order.paid":
-            # Alternative event for successful payment (when order is paid)
-            order_entity = payload.get("order", {}).get("entity", {})
-            order_id_razorpay = order_entity.get("id")
-            
-            if not order_id_razorpay:
-                logger.error(f"Missing order_id in order.paid webhook: {webhook_data}")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Missing order_id in webhook payload"
-                )
-            
-            # Find order by razorpay_order_id
-            order = db.query(Order).filter(Order.razorpay_order_id == order_id_razorpay).first()
-            if not order:
-                logger.warning(f"Order not found for Razorpay order ID: {order_id_razorpay}")
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Order not found"
-                )
-            
-            # Get payment ID from order entity
-            payments = order_entity.get("payments", [])
-            if not payments:
-                logger.warning(f"No payments found in order.paid webhook for order {order.order_number}")
-                return {
-                    "status": "warning",
-                    "message": "No payment ID found in webhook",
-                    "order_id": order.id,
-                    "order_number": order.order_number
-                }
-            
-            payment_id = payments[0]  # Use first payment
-            
-            # Confirm order from webhook (this will set order_status to CONFIRMED, clear cart, and set genetic test flag)
-            # Note: confirm_order_from_webhook is idempotent and handles already-confirmed orders internally
-            try:
-                order = confirm_order_from_webhook(
-                    db=db,
-                    order_id=order.id,
-                    razorpay_order_id=order_id_razorpay,
-                    razorpay_payment_id=payment_id
-                )
-                logger.info(f"Order {order.order_number} confirmed via order.paid webhook. Cart cleared and genetic test flag set.")
-                
-                return {
-                    "status": "success",
-                    "message": "Payment processed successfully",
-                    "order_id": order.id,
-                    "order_number": order.order_number
-                }
-            except ValueError as e:
-                logger.warning(f"Payment verification failed for order {order.order_number}: {str(e)}")
-                return {
-                    "status": "warning",
-                    "message": str(e),
-                    "order_id": order.id,
-                    "order_number": order.order_number
-                }
-        
-        else:
-            # Unhandled event - log but don't fail
-            logger.info(f"Unhandled webhook event: {event}, ignoring")
-            return {
-                "status": "success",
-                "message": f"Event {event} received but not processed"
-            }
-    
-    except HTTPException:
-        raise
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON in webhook payload: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid JSON payload"
-        )
-    except Exception as e:
-        logger.error(f"Error processing webhook: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing webhook: {str(e)}"
-        )
-
