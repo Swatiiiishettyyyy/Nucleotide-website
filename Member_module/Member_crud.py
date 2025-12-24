@@ -232,7 +232,7 @@ def save_member(
                 family_status = None
             
             # Create audit log for restoration
-            from .Member_audit_model import MemberAuditLog
+            # Note: MemberAuditLog is already imported at the top of the file
             audit = MemberAuditLog(
                 user_id=user.id,
                 member_id=deleted_member.id,

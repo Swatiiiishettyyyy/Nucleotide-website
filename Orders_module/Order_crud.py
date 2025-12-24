@@ -33,7 +33,8 @@ def create_order_from_cart(
     user_id: int,
     address_id: Optional[int],
     cart_item_ids: List[int],
-    razorpay_order_id: Optional[str] = None
+    razorpay_order_id: Optional[str] = None,
+    placed_by_member_id: Optional[int] = None
 ) -> Order:
     """
     Create order from cart items.
@@ -175,6 +176,7 @@ def create_order_from_cart(
     order = Order(
         order_number=generate_order_number(),
         user_id=user_id,
+        placed_by_member_id=placed_by_member_id,  # Member profile that was active when order was placed
         address_id=primary_address_id,
         subtotal=subtotal,
         delivery_charge=delivery_charge,

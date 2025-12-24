@@ -94,6 +94,7 @@ def create_order(
     request_data: CreateOrderRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    current_member: Optional[Member] = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
     """
@@ -225,12 +226,14 @@ def create_order(
         cart_item_ids = [item.id for item in cart_items]
         
         # Create order in database
+        placed_by_member_id = current_member.id if current_member else None
         order = create_order_from_cart(
             db=db,
             user_id=current_user.id,
             address_id=primary_address_id,
             cart_item_ids=cart_item_ids,
-            razorpay_order_id=razorpay_order.get("id")
+            razorpay_order_id=razorpay_order.get("id"),
+            placed_by_member_id=placed_by_member_id
         )
         
         logger.info(f"Order {order.order_number} created for user {current_user.id}")
@@ -763,8 +766,12 @@ def get_orders(
             # IMPORTANT: Filter logic based on plan type
             # - For couple/family plans: Keep ALL members in the group (show complete plan)
             # - For single plans: Filter to show only selected member's items
+            # - Show order if member placed it OR member is in the group
             items_to_display = items
             if current_member:
+                # Check if current member placed this order
+                member_placed_order = order.placed_by_member_id == current_member.id if order.placed_by_member_id else False
+                
                 # For couple/family plans, get ALL items from original order for this group
                 # to ensure we show the complete plan with all members
                 if plan_type and plan_type.lower() in ["couple", "family"]:
@@ -779,8 +786,9 @@ def get_orders(
                     # Check if selected member is part of this group
                     member_in_group = any(item.member_id == current_member.id for item in all_group_items)
                     
-                    if not member_in_group:
-                        # Selected member is not in this group, skip this group
+                    # Show if member placed the order OR member is in the group
+                    if not member_placed_order and not member_in_group:
+                        # Selected member neither placed the order nor is in this group, skip this group
                         continue
                     
                     # Use all items from the group (keep original copy, show all members)
@@ -789,8 +797,9 @@ def get_orders(
                     # For single plans, check if member is in the group and filter
                     member_in_group = any(item.member_id == current_member.id for item in items)
                     
-                    if not member_in_group:
-                        # Selected member is not in this group, skip this group
+                    # Show if member placed the order OR member is in the group
+                    if not member_placed_order and not member_in_group:
+                        # Selected member neither placed the order nor is in this group, skip this group
                         continue
                     
                     # Filter to show only the selected member's items for single plans
@@ -1191,8 +1200,12 @@ def get_order(
         # IMPORTANT: Filter logic based on plan type
         # - For couple/family plans: Keep ALL members in the group (show complete plan)
         # - For single plans: Filter to show only selected member's items
+        # - Show order if member placed it OR member is in the group
         items_to_display = items
         if current_member:
+            # Check if current member placed this order
+            member_placed_order = order.placed_by_member_id == current_member.id if order.placed_by_member_id else False
+            
             # For couple/family plans, get ALL items from original order for this group
             # to ensure we show the complete plan with all members
             if plan_type and plan_type.lower() in ["couple", "family"]:
@@ -1207,8 +1220,9 @@ def get_order(
                 # Check if selected member is part of this group
                 member_in_group = any(item.member_id == current_member.id for item in all_group_items)
                 
-                if not member_in_group:
-                    # Selected member is not in this group, skip this group
+                # Show if member placed the order OR member is in the group
+                if not member_placed_order and not member_in_group:
+                    # Selected member neither placed the order nor is in this group, skip this group
                     continue
                 
                 # Use all items from the group (keep original copy, show all members)
@@ -1217,8 +1231,9 @@ def get_order(
                 # For single plans, check if member is in the group and filter
                 member_in_group = any(item.member_id == current_member.id for item in items)
                 
-                if not member_in_group:
-                    # Selected member is not in this group, skip this group
+                # Show if member placed the order OR member is in the group
+                if not member_placed_order and not member_in_group:
+                    # Selected member neither placed the order nor is in this group, skip this group
                     continue
                 
                 # Filter to show only the selected member's items for single plans
@@ -1377,14 +1392,23 @@ def get_order_tracking(
         )
     
     # Filter order items by member if a member is selected
+    # If member placed the order, show all items; otherwise show only items for that member
     order_items_to_process = order.items
     if current_member:
-        order_items_to_process = [item for item in order.items if item.member_id == current_member.id]
-        if not order_items_to_process:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No order items found for the selected member in this order"
-            )
+        # Check if current member placed this order
+        member_placed_order = order.placed_by_member_id == current_member.id if order.placed_by_member_id else False
+        
+        if member_placed_order:
+            # Member placed the order, show all items
+            order_items_to_process = order.items
+        else:
+            # Member didn't place the order, show only items for that member
+            order_items_to_process = [item for item in order.items if item.member_id == current_member.id]
+            if not order_items_to_process:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No order items found for the selected member in this order"
+                )
     
     # Build order items list - clean mapping of member, address, product, and status
     order_items_list = []

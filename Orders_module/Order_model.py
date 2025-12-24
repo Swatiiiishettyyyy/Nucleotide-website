@@ -42,6 +42,8 @@ class Order(Base):
     id = Column(Integer, primary_key=True, index=True)
     order_number = Column(String(50), unique=True, nullable=False, index=True)  # Unique order number
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Member profile that was active when order was placed (for viewing/filtering purposes)
+    placed_by_member_id = Column(Integer, ForeignKey("members.id", ondelete="SET NULL"), nullable=True, index=True)
     # Primary address reference (we use snapshot for order details, but keep FK for reference)
     address_id = Column(Integer, ForeignKey("addresses.id", ondelete="RESTRICT"), nullable=True, index=True)
     
@@ -75,6 +77,7 @@ class Order(Base):
     # Relationships
     user = relationship("User")
     address = relationship("Address")
+    placed_by_member = relationship("Member", foreign_keys=[placed_by_member_id])
 
 
 class OrderItem(Base):
