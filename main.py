@@ -45,7 +45,6 @@ from Category_module.bootstrap import seed_default_categories
 from Banner_module.Banner_model import Banner
 from Consent_module.Consent_model import UserConsent, ConsentProduct
 from Orders_module.Order_model import Order, OrderItem, OrderSnapshot, OrderStatusHistory
-from Member_module.Member_transfer_model import MemberTransferLog
 from GeneticTest_module.GeneticTest_model import GeneticTestParticipant
 
 # Import Google Meet API models to register with SQLAlchemy Base
@@ -71,7 +70,6 @@ from Login_module.Utils.audit_query import router as audit_router
 from Member_module.Member_router import router as member_router
 from Orders_module.Order_router import router as order_router
 from Product_module.Product_router import router as product_router
-from Profile_module.Profile_router import router as profile_router
 
 # Google Meet API router
 try:
@@ -260,7 +258,6 @@ app.add_middleware(
 
 # Include routers
 app.include_router(otp_router)
-app.include_router(profile_router)
 app.include_router(product_router)
 app.include_router(category_router)
 app.include_router(cart_router)
@@ -285,7 +282,6 @@ def root():
         "version": "3.0.0",
         "endpoints": {
             "auth": "/auth",
-            "profile": "/profile",
             "products": "/products",
             "categories": "/categories",
             "cart": "/cart",

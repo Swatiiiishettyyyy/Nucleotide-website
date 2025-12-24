@@ -66,7 +66,7 @@ EXPECTED_TABLES = {
     'address_audits': 'Address_module.Address_audit_model.AddressAudit',
     'session_audit_logs': 'Login_module.Device.Device_session_audit_model.SessionAuditLog',
     'otp_audit_logs': 'Login_module.OTP.OTP_Log_Model.OTPAuditLog',
-    'profile_audit_logs': 'Profile_module.Profile_audit_crud.ProfileAuditLog',
+    'profile_audit_logs': 'Audit_module.Profile_audit_crud.ProfileAuditLog',
 }
 
 
@@ -142,7 +142,7 @@ def import_all_models():
         
         # Profile models
         try:
-            from Profile_module.Profile_audit_crud import ProfileAuditLog
+            from Audit_module.Profile_audit_crud import ProfileAuditLog
             imported_count += 1
             logger.debug("✓ Imported ProfileAuditLog model")
         except ImportError as e:

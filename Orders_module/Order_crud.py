@@ -39,12 +39,13 @@ def create_order_from_cart(
     Create order from cart items.
     Creates snapshots of products, members, and addresses at time of order.
     """
-    # Validate all cart items belong to user
+    # Validate all cart items belong to user (exclude deleted items)
     cart_items = (
         db.query(CartItem)
         .filter(
             CartItem.id.in_(cart_item_ids),
-            CartItem.user_id == user_id
+            CartItem.user_id == user_id,
+            CartItem.is_deleted == False  # Exclude deleted items
         )
         .all()
     )
@@ -124,8 +125,17 @@ def create_order_from_cart(
     # For couple/family products, there are multiple cart item rows but discount applies once per product
     # This matches the cart calculation logic exactly
     for group_key, items in grouped_items.items():
+        # Skip if group is empty (should not happen, but safety check)
+        if not items:
+            continue
+            
         item = items[0]  # Use first item as representative
         product = item.product
+        
+        # Skip if product is deleted or missing
+        if not product:
+            continue
+            
         # Only count once per product group
         subtotal += item.quantity * product.SpecialPrice
         
@@ -464,11 +474,16 @@ def confirm_order_from_webhook(
     try:
         from Cart_module.Cart_model import CartItem
         
-        # Clear all cart items for the user to ensure nothing is missed
+        # Soft delete all cart items for the user to ensure nothing is missed
         # This is safer than matching specific items which might miss items added after order creation
-        deleted_count = db.query(CartItem).filter(
-            CartItem.user_id == order.user_id
-        ).delete()
+        cart_items = db.query(CartItem).filter(
+            CartItem.user_id == order.user_id,
+            CartItem.is_deleted == False
+        ).all()
+        
+        deleted_count = len(cart_items)
+        for item in cart_items:
+            item.is_deleted = True
         
         # Remove applied coupon after successful payment
         from Cart_module.coupon_service import remove_coupon_from_cart

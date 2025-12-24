@@ -100,25 +100,6 @@ def create_or_update_participant(
     return participant
 
 
-def update_participant_on_member_transfer(
-    db: Session,
-    member_id: int,
-    new_user_id: int
-) -> Optional[GeneticTestParticipant]:
-    """
-    Update participant record when member is transferred to new user.
-    Updates user_id but keeps member_id, mobile, name, and test data.
-    """
-    participant = get_participant_by_member_id(db, member_id)
-    
-    if participant:
-        participant.user_id = new_user_id
-        db.flush()
-        logger.info(f"Updated participant user_id to {new_user_id} for member {member_id}")
-    
-    return participant
-
-
 def check_if_member_has_taken_test(
     db: Session,
     member_id: Optional[int] = None,

@@ -54,7 +54,7 @@ def upgrade() -> None:
         from Member_module.Member_audit_model import MemberAuditLog
         from Address_module.Address_audit_model import AddressAudit
         from Cart_module.Cart_audit_model import AuditLog
-        from Profile_module.Profile_audit_crud import ProfileAuditLog
+        from Audit_module.Profile_audit_crud import ProfileAuditLog
         from Login_module.Device.Device_session_audit_model import SessionAuditLog
         from Login_module.OTP.OTP_Log_Model import OTPAuditLog
         from Cart_module.Coupon_model import Coupon, CartCoupon

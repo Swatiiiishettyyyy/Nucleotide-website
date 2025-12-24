@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import secrets
 from typing import Optional
 from .user_model import User
-from Profile_module.Profile_audit_crud import log_profile_update
+from Audit_module.Profile_audit_crud import log_profile_update
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException
 

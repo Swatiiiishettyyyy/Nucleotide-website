@@ -135,9 +135,11 @@ def add_to_cart(
         
         # Check if same product with same members already exists in cart
         # (ignore address differences - addresses can be changed)
+        # Exclude deleted items (is_deleted = True)
         existing_cart_items = db.query(CartItem).filter(
             CartItem.user_id == current_user.id,
-            CartItem.product_id == item.product_id
+            CartItem.product_id == item.product_id,
+            CartItem.is_deleted == False  # Exclude deleted/cleared items
         ).all()
         
         if existing_cart_items:
@@ -180,6 +182,9 @@ def add_to_cart(
         # Generate unique group_id using full UUID for better uniqueness
         group_id = f"{current_user.id}_{product.ProductId}_{uuid.uuid4().hex}"
         
+        # cart_id will be set to the first cart_item.id after creation (simple sequential number)
+        # This ensures all items in the same group share the same simple cart_id
+        
         # Build member_address_map from request (already validated)
         member_address_map = {
             mapping.member_id: mapping.address_id 
@@ -192,12 +197,26 @@ def add_to_cart(
         created_cart_items = []
         
         try:
+            # Verify cart_id column exists in database (safety check)
+            from sqlalchemy import inspect as sqlalchemy_inspect
+            # Use get_bind() for SQLAlchemy 2.0 compatibility
+            bind = db.get_bind() if hasattr(db, 'get_bind') else db.bind
+            inspector = sqlalchemy_inspect(bind)
+            cart_items_columns = {col['name'] for col in inspector.get_columns('cart_items')}
+            if 'cart_id' not in cart_items_columns:
+                logger.error("cart_id column does not exist in cart_items table! Please run migrations.")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Database schema mismatch: cart_id column missing. Please run Alembic migrations."
+                )
+            
             # Create cart items: one row per member with their assigned address
             # Process in the order specified in member_address_map
             for mapping in item.member_address_map:
                 member = members_by_id[mapping.member_id]
                 cart_item = CartItem(
                     user_id=current_user.id,
+                    cart_id=None,  # Will be set after first item gets its ID
                     product_id=item.product_id,
                     address_id=mapping.address_id,
                     member_id=mapping.member_id,
@@ -207,18 +226,38 @@ def add_to_cart(
                 db.add(cart_item)
                 created_cart_items.append(cart_item)
             
+            # Flush to get IDs for all items
+            db.flush()
+            
+            # Set cart_id to the first cart_item.id (simple sequential number)
+            # All items in the same group will share this cart_id
+            if created_cart_items:
+                cart_id = created_cart_items[0].id
+                for cart_item in created_cart_items:
+                    cart_item.cart_id = cart_id
+                # Flush again to save cart_id values
+                db.flush()
+            
             # Commit all items together (transaction safety)
             db.commit()
             
-            # Refresh all created items
+            # Refresh all created items to get database values
             for cart_item in created_cart_items:
                 db.refresh(cart_item)
+                logger.info(f"CartItem {cart_item.id} created with cart_id: {cart_item.cart_id}")
         except Exception as e:
             # Rollback on any error to prevent partial data
             db.rollback()
             raise HTTPException(
                 status_code=500,
                 detail=f"Error adding items to cart: {str(e)}"
+            )
+        
+        # Safety check: ensure cart items were created
+        if not created_cart_items:
+            raise HTTPException(
+                status_code=500,
+                detail="No cart items were created. This should not happen."
             )
         
         # Build member-address mapping for response (preserve order from request)
@@ -260,7 +299,7 @@ def add_to_cart(
             "message": "Product added to cart successfully.",
             "data": {
                 "cart_item_ids": [ci.id for ci in created_cart_items],
-                "cart_id": created_cart_items[0].id,  # Primary cart item ID
+                "cart_id": created_cart_items[0].cart_id,  # Simple cart_id number
                 "product_id": product.ProductId,
                 "address_ids": unique_address_ids,
                 "member_ids": member_ids,
@@ -296,7 +335,8 @@ def update_cart_item(
     
     cart_item = db.query(CartItem).filter(
         CartItem.id == cart_item_id,
-        CartItem.user_id == current_user.id
+        CartItem.user_id == current_user.id,
+        CartItem.is_deleted == False
     ).first()
     
     if not cart_item:
@@ -308,10 +348,11 @@ def update_cart_item(
     try:
         # If item has a group_id, update all items in the group (for couple/family products)
         if group_id:
-            # Update all items in the group
+            # Update all items in the group (exclude deleted items)
             group_items = db.query(CartItem).filter(
                 CartItem.group_id == group_id,
-                CartItem.user_id == current_user.id
+                CartItem.user_id == current_user.id,
+                CartItem.is_deleted == False
             ).all()
             
             for item in group_items:
@@ -395,20 +436,21 @@ def delete_cart_item(
     quantity = cart_item.quantity
     group_id = cart_item.group_id
     
-    # If item has a group_id, delete all items in the group (for couple/family products)
+    # If item has a group_id, soft delete all items in the group (for couple/family products)
     if group_id:
-        # Delete all items in the group
+        # Soft delete all items in the group (exclude already deleted items)
         deleted_items = db.query(CartItem).filter(
             CartItem.group_id == group_id,
-            CartItem.user_id == current_user.id
+            CartItem.user_id == current_user.id,
+            CartItem.is_deleted == False
         ).all()
         
         deleted_count = len(deleted_items)
         for item in deleted_items:
-            db.delete(item)
+            item.is_deleted = True
     else:
-        # Single item, delete just this one
-        db.delete(cart_item)
+        # Single item, soft delete just this one
+        cart_item.is_deleted = True
         deleted_count = 1
     
     db.commit()
@@ -446,11 +488,18 @@ def clear_cart(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Clear all cart items for current user (requires authentication)"""
+    """Clear all cart items for current user (requires authentication) - soft delete"""
     
-    deleted_count = db.query(CartItem).filter(
-        CartItem.user_id == current_user.id
-    ).delete()
+    # Soft delete: set is_deleted = True instead of actually deleting
+    cart_items = db.query(CartItem).filter(
+        CartItem.user_id == current_user.id,
+        CartItem.is_deleted == False
+    ).all()
+    
+    deleted_count = len(cart_items)
+    for item in cart_items:
+        item.is_deleted = True
+    
     db.commit()
     
     # Audit log
@@ -485,23 +534,64 @@ def view_cart(
 ):
     """
     View cart items for current user (requires authentication).
-    If a member is selected, shows only cart items for that member.
+    If a member is selected:
+    - For couple/family products: Shows all items in groups where the member appears
+    - For single products: Shows all cart items (visible to all members)
     Returns cart items with product_id, address_id, cart_id, member_id.
     Groups items by group_id for couple/family products.
     """
+    # Get all cart items for user (don't filter by member yet - need to check plan types)
     query = db.query(CartItem).options(
         joinedload(CartItem.member),
         joinedload(CartItem.address),
         joinedload(CartItem.product)
     ).filter(
-        CartItem.user_id == current_user.id
+        CartItem.user_id == current_user.id,
+        CartItem.is_deleted == False  # Exclude deleted/cleared items
     )
     
-    # Filter by member if a member is selected
-    if current_member:
-        query = query.filter(CartItem.member_id == current_member.id)
+    all_cart_items = query.order_by(CartItem.group_id, CartItem.created_at).all()
     
-    cart_items = query.order_by(CartItem.group_id, CartItem.created_at).all()
+    # If a member is selected, filter based on plan type
+    if current_member:
+        # Group items by group_id first
+        grouped_items = {}
+        for item in all_cart_items:
+            group_key = item.group_id or f"single_{item.id}"
+            if group_key not in grouped_items:
+                grouped_items[group_key] = []
+            grouped_items[group_key].append(item)
+        
+        # Filter groups based on plan type
+        filtered_items = []
+        for group_key, items in grouped_items.items():
+            # Get product plan type from first item (all items in group have same product)
+            first_item = items[0]
+            product = first_item.product
+            
+            if not product:
+                # If product is deleted, skip this group
+                continue
+            
+            plan_type = product.plan_type.value if hasattr(product.plan_type, 'value') else str(product.plan_type)
+            plan_type_lower = plan_type.lower() if plan_type else None
+            
+            # Check if current member is in this group
+            member_in_group = any(item.member_id == current_member.id for item in items)
+            
+            if plan_type_lower in ["couple", "family"]:
+                # For couple/family: if member is in group, show all items in group
+                if member_in_group:
+                    filtered_items.extend(items)
+                # If member not in group, skip the entire group
+            else:
+                # For single: show all single product items to all members
+                filtered_items.extend(items)
+        
+        cart_items = filtered_items
+    else:
+        # No member selected, show all items
+        cart_items = all_cart_items
     
     # Determine if member filter is applied
     member_filter_applied = current_member.id if current_member else None
@@ -542,10 +632,19 @@ def view_cart(
         grouped_items[group_key].append(item)
 
     for group_key, items in grouped_items.items():
+        # Skip if group is empty (should not happen, but safety check)
+        if not items:
+            continue
+            
         # Use first item as representative (all items in group have same product, quantity)
         # Note: addresses may differ per member
         item = items[0]
         product = item.product
+        
+        # Skip if product is deleted or missing
+        if not product:
+            continue
+            
         member_ids = [i.member_id for i in items]
         
         # Build member-address mapping with full details for this group
@@ -592,6 +691,7 @@ def view_cart(
         discount_per_item = product.Price - product.SpecialPrice
 
         cart_item_details.append({
+            "cart_id": item.cart_id,  # Simple cart_id number
             "cart_item_ids": [i.id for i in items],  # All cart item IDs in this group
             "product_id": product.ProductId,
             "address_ids": address_ids,  # List of unique address IDs used
@@ -655,6 +755,10 @@ def view_cart(
     total_product_discount = 0
     processed_groups = set()
     for item in cart_items:
+        # Skip if product is deleted or missing
+        if not item.product:
+            continue
+            
         group_key = item.group_id or f"single_{item.id}"
         if group_key not in processed_groups:
             # Calculate discount once per product group
@@ -674,7 +778,7 @@ def view_cart(
     grand_total = max(0.0, grand_total)
 
     summary = {
-        "cart_id": cart_items[0].id if cart_items else 0,
+        "cart_id": cart_items[0].cart_id if cart_items and cart_items[0].cart_id else (cart_items[0].id if cart_items else 0),
         "total_items": len(grouped_items),  # Number of product groups
         "total_cart_items": len(cart_items),  # Total individual cart items
         "subtotal_amount": subtotal_amount,
@@ -730,9 +834,10 @@ def apply_coupon(
     Shows 'You Save' amount in response.
     """
     try:
-        # Get user's cart items to calculate subtotal
+        # Get user's cart items to calculate subtotal (exclude deleted items)
         cart_items = db.query(CartItem).filter(
-            CartItem.user_id == current_user.id
+            CartItem.user_id == current_user.id,
+            CartItem.is_deleted == False
         ).all()
         
         if not cart_items:
@@ -751,14 +856,27 @@ def apply_coupon(
             grouped_items[group_key].append(item)
         
         for group_key, items in grouped_items.items():
+            # Skip if group is empty (should not happen, but safety check)
+            if not items:
+                continue
+                
             item = items[0]
             product = item.product
+            
+            # Skip if product is deleted or missing
+            if not product:
+                continue
+                
             subtotal_amount += item.quantity * product.SpecialPrice
         
         # Calculate product discount (from product discounts - per product group, not per cart item row)
         total_product_discount = 0.0
         processed_groups = set()
         for item in cart_items:
+            # Skip if product is deleted or missing
+            if not item.product:
+                continue
+                
             group_key = item.group_id or f"single_{item.id}"
             if group_key not in processed_groups:
                 # Calculate discount once per product group

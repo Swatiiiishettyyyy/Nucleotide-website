@@ -193,10 +193,11 @@ def delete_address_api(
     if not address:
         raise HTTPException(status_code=404, detail="Address not found")
     
-    # Check if address is linked to any cart items
+    # Check if address is linked to any cart items (exclude deleted items)
     cart_items = db.query(CartItem).filter(
         CartItem.address_id == address_id,
-        CartItem.user_id == user.id
+        CartItem.user_id == user.id,
+        CartItem.is_deleted == False
     ).all()
     
     if cart_items:

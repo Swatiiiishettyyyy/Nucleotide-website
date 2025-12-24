@@ -99,7 +99,8 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
         
         cart_items = db.query(CartItem).filter(
             CartItem.address_id == req.address_id,
-            CartItem.user_id == user.id
+            CartItem.user_id == user.id,
+            CartItem.is_deleted == False  # Exclude deleted items
         ).all()
         
         if cart_items:

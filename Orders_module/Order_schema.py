@@ -129,7 +129,6 @@ class OrderItemTrackingResponse(BaseModel):
 
 class OrderResponse(BaseModel):
     """Order response model"""
-    order_id: int
     order_number: str
     user_id: int
     address_id: Optional[int] = None

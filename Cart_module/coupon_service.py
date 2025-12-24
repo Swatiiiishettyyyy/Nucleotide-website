@@ -104,7 +104,8 @@ def validate_and_calculate_discount(
             cart_items = db.query(CartItem).options(
                 joinedload(CartItem.product)
             ).filter(
-                CartItem.user_id == user_id
+                CartItem.user_id == user_id,
+                CartItem.is_deleted == False  # Exclude deleted items
             ).all()
         
         if not cart_items:

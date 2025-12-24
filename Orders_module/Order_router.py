@@ -107,10 +107,11 @@ def create_order(
     Note: user_id is automatically fetched from the access token (current_user)
     """
     try:
-        # Validate cart_id exists and belongs to authenticated user
+        # Validate cart_id exists and belongs to authenticated user (exclude deleted items)
         cart_reference = db.query(CartItem).filter(
             CartItem.id == request_data.cart_id,
-            CartItem.user_id == current_user.id
+            CartItem.user_id == current_user.id,
+            CartItem.is_deleted == False
         ).first()
         
         if not cart_reference:
@@ -119,9 +120,10 @@ def create_order(
                 detail="Cart item not found or does not belong to you"
             )
         
-        # Get all cart items for the user
+        # Get all cart items for the user (exclude deleted items)
         cart_items = db.query(CartItem).filter(
-            CartItem.user_id == current_user.id
+            CartItem.user_id == current_user.id,
+            CartItem.is_deleted == False  # Exclude deleted/cleared items
         ).order_by(CartItem.group_id, CartItem.created_at).all()
         
         if not cart_items:
@@ -169,8 +171,17 @@ def create_order(
             grouped_items[group_key].append(item)
         
         for group_key, items in grouped_items.items():
+            # Skip if group is empty (should not happen, but safety check)
+            if not items:
+                continue
+                
             item = items[0]
             product = item.product
+            
+            # Skip if product is deleted or missing
+            if not product:
+                continue
+                
             subtotal += item.quantity * product.SpecialPrice
         
         # Get coupon discount for Razorpay order amount
@@ -182,6 +193,10 @@ def create_order(
         processed_groups = set()
         product_discount = 0.0
         for item in cart_items:
+            # Skip if product is deleted or missing
+            if not item.product:
+                continue
+                
             group_key = item.group_id or f"single_{item.id}"
             if group_key not in processed_groups:
                 discount_per_item = item.product.Price - item.product.SpecialPrice
@@ -277,7 +292,7 @@ def verify_payment(
                 message="Payment verified successfully. Order confirmed.",
                 order_id=order.id,
                 order_number=order.order_number,
-                payment_status=order.payment_status.value,
+                payment_status=order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status),
                 order_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status)
             )
         
@@ -716,6 +731,10 @@ def get_orders(
         
         order_items = []
         for group_key, items in grouped_items.items():
+            # Skip if group is empty (should not happen, but safety check)
+            if not items:
+                continue
+                
             # Use first item as representative for product info
             # All items in this group share the same product and group_id
             first_item = items[0]
@@ -884,7 +903,6 @@ def get_orders(
             continue
         
         result.append({
-            "order_id": order.id,
             "order_number": order.order_number,
             "user_id": order.user_id,
             "address_id": order.address_id,
@@ -894,8 +912,8 @@ def get_orders(
             "coupon_discount": order.coupon_discount,
             "delivery_charge": order.delivery_charge,
             "total_amount": order.total_amount,
-            "payment_status": order.payment_status.value,
-            "order_status": order.order_status.value,
+            "payment_status": order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status),
+            "order_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
             "razorpay_order_id": order.razorpay_order_id,
             "created_at": order.created_at.isoformat() if order.created_at else None,
             "items": order_items
@@ -1141,6 +1159,10 @@ def get_order(
     
     order_items = []
     for group_key, items in grouped_items.items():
+        # Skip if group is empty (should not happen, but safety check)
+        if not items:
+            continue
+            
         # Use first item as representative for product info
         # All items in this group share the same product and group_id
         first_item = items[0]

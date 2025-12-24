@@ -205,20 +205,70 @@ class MemberListResponse(BaseModel):
     data: List[MemberData]
 
 
-class InitiateTransferRequest(BaseModel):
-    member_id: int = Field(..., description="Member ID to transfer", ge=1)
-    phone_number: str = Field(..., description="Member's phone number (10 digits)", min_length=10, max_length=10)
-    
-    @validator('phone_number')
-    def validate_phone(cls, v):
-        if v:
-            v = v.strip().replace(" ", "").replace("-", "")
-            if len(v) != 10 or not v.isdigit():
-                raise ValueError('Phone number must be exactly 10 digits')
-        return v
+class MemberProfileData(BaseModel):
+    """Profile data structure for member photo operations"""
+    user_id: int
+    name: Optional[str]
+    email: Optional[str]
+    mobile: Optional[str]
+    profile_photo_url: Optional[str] = None
+    has_taken_genetic_test: Optional[bool] = False
+
+    class Config:
+        from_attributes = True
+        json_schema_extra = {
+            "example": {
+                "user_id": 1,
+                "name": "John Doe",
+                "email": "john.doe@example.com",
+                "mobile": "9876543210",
+                "profile_photo_url": "profile_photos/1_abc12345.jpg",
+                "has_taken_genetic_test": False
+            }
+        }
 
 
-class InitiateTransferResponse(BaseModel):
+class UploadPhotoResponse(BaseModel):
+    """Response schema for member photo upload"""
     status: str
     message: str
-    transfer_log_id: Optional[int] = None
+    data: MemberProfileData
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "success",
+                "message": "Profile photo uploaded successfully.",
+                "data": {
+                    "user_id": 1,
+                    "name": "John Doe",
+                    "email": "john.doe@example.com",
+                    "mobile": "9876543210",
+                    "profile_photo_url": "profile_photos/1_abc12345.jpg",
+                    "has_taken_genetic_test": False
+                }
+            }
+        }
+
+
+class DeletePhotoResponse(BaseModel):
+    """Response schema for member photo deletion"""
+    status: str
+    message: str
+    data: MemberProfileData
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "success",
+                "message": "Profile photo deleted successfully.",
+                "data": {
+                    "user_id": 1,
+                    "name": "John Doe",
+                    "email": "john.doe@example.com",
+                    "mobile": "9876543210",
+                    "profile_photo_url": None,
+                    "has_taken_genetic_test": False
+                }
+            }
+        }

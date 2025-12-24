@@ -14,7 +14,7 @@ from Login_module.User.user_model import User
 from Login_module.OTP.OTP_Log_Model import OTPAuditLog
 from Cart_module.Cart_audit_model import AuditLog as CartAuditLog
 from Address_module.Address_audit_model import AddressAudit
-from Profile_module.Profile_audit_crud import ProfileAuditLog  # Model is in this file
+from Audit_module.Profile_audit_crud import ProfileAuditLog  # Model is in this file
 from Login_module.Device.Device_session_audit_model import SessionAuditLog
 from Member_module.Member_audit_model import MemberAuditLog
 

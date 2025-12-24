@@ -10,25 +10,24 @@ import enum
 
 class OrderStatus(str, enum.Enum):
     """Order tracking statuses"""
-    CREATED = "created"  # Order exists, not confirmed (initial state)
-    AWAITING_PAYMENT_CONFIRMATION = "awaiting_payment_confirmation"  # Payment initiated, waiting for Razorpay/bank confirmation
-    CONFIRMED = "confirmed"  # Payment verified by webhook, order finalized
-    PAYMENT_FAILED = "payment_failed"  # Payment failed - order not confirmed
-    SCHEDULED = "scheduled"
-    SCHEDULE_CONFIRMED_BY_LAB = "schedule_confirmed_by_lab"
-    SAMPLE_COLLECTED = "sample_collected"
-    SAMPLE_RECEIVED_BY_LAB = "sample_received_by_lab"
-    TESTING_IN_PROGRESS = "testing_in_progress"
-    REPORT_READY = "report_ready"
+    CREATED = "CREATED"  # Order exists, not confirmed (initial state)
+    AWAITING_PAYMENT_CONFIRMATION = "AWAITING_PAYMENT_CONFIRMATION"  # Payment initiated, waiting for Razorpay/bank confirmation
+    CONFIRMED = "CONFIRMED"  # Payment verified by webhook, order finalized
+    PAYMENT_FAILED = "PAYMENT_FAILED"  # Payment failed - order not confirmed
+    SCHEDULED = "SCHEDULED"
+    SCHEDULE_CONFIRMED_BY_LAB = "SCHEDULE_CONFIRMED_BY_LAB"
+    SAMPLE_COLLECTED = "SAMPLE_COLLECTED"
+    SAMPLE_RECEIVED_BY_LAB = "SAMPLE_RECEIVED_BY_LAB"
+    TESTING_IN_PROGRESS = "TESTING_IN_PROGRESS"
+    REPORT_READY = "REPORT_READY"
 
 
 class PaymentStatus(str, enum.Enum):
     """Payment status - tracks money/transaction state"""
-    NOT_INITIATED = "not_initiated"  # Order created, payment not started
-    PENDING = "pending"  # Payment initiated, awaiting completion
-    SUCCESS = "success"  # Frontend verified only (temporary, before webhook)
-    VERIFIED = "verified"  # Webhook confirmed (final, order can be confirmed)
-    FAILED = "failed"  # Payment failed
+    NOT_INITIATED = "NOT_INITIATED"  # Order created, payment not started
+    SUCCESS = "SUCCESS"  # Frontend verified only (temporary, before webhook)
+    VERIFIED = "VERIFIED"  # Webhook confirmed (final, order can be confirmed)
+    FAILED = "FAILED"  # Payment failed
 
 
 class PaymentMethod(str, enum.Enum):
@@ -72,11 +71,6 @@ class Order(Base):
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    
-    # Transfer tracking fields
-    linked_from_order_id = Column(Integer, ForeignKey("orders.id", ondelete="SET NULL"), nullable=True)  # Original order if this is a transferred copy
-    is_transferred_copy = Column(Boolean, nullable=False, default=False, index=True)  # True if this order was created from transfer
-    transferred_at = Column(DateTime(timezone=True), nullable=True)  # When transfer occurred
 
     # Relationships
     user = relationship("User")
@@ -117,10 +111,6 @@ class OrderItem(Base):
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # Transfer tracking fields
-    linked_from_order_item_id = Column(Integer, ForeignKey("order_items.id", ondelete="SET NULL"), nullable=True)  # Original order item if this is a transferred copy
-    transferred_at = Column(DateTime(timezone=True), nullable=True)  # When transfer occurred
-    
     # Relationships
     order = relationship("Order", backref="items")
     user = relationship("User")
@@ -154,10 +144,6 @@ class OrderSnapshot(Base):
     cart_item_data = Column(JSON, nullable=True)  # Original cart item data if needed (optional)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
-    # Transfer tracking fields
-    linked_from_snapshot_id = Column(Integer, ForeignKey("order_snapshots.id", ondelete="SET NULL"), nullable=True)  # Original snapshot if this is a transferred copy
-    transferred_at = Column(DateTime(timezone=True), nullable=True)  # When transfer occurred
     
     # Relationships
     order = relationship("Order", backref="snapshots")

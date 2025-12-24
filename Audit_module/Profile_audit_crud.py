@@ -46,3 +46,4 @@ def log_profile_update(
     db.refresh(log_entry)
 
     return log_entry
+

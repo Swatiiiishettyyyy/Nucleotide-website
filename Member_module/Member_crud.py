@@ -155,7 +155,7 @@ def save_member(
 
     # Check for duplicate member in same category
     if req.member_id == 0:  # New member
-        # Check if member with same name AND relation already exists in same category
+        # First check if active member with same name AND relation already exists in same category
         # This allows same name with different relations (e.g., "John" as self and "John" as child)
         existing = db.query(Member).filter(
             Member.user_id == user.id,
@@ -173,6 +173,83 @@ def save_member(
                     f"in the '{category_name}' category."
                 )
             )
+        
+        # Check if deleted member with same name AND relation exists in same category
+        # If found, restore it instead of creating new member
+        deleted_member = db.query(Member).filter(
+            Member.user_id == user.id,
+            Member.name == req.name,
+            Member.relation == relation_to_store,
+            category_filter,
+            Member.is_deleted == True
+        ).first()
+        
+        if deleted_member:
+            # Store old deleted_at value for audit log before clearing it
+            old_deleted_at = deleted_member.deleted_at.isoformat() if deleted_member.deleted_at else None
+            
+            # Preserve original data that should not be overwritten
+            preserved_profile_photo_url = deleted_member.profile_photo_url
+            preserved_is_self_profile = deleted_member.is_self_profile
+            preserved_created_at = deleted_member.created_at
+            
+            # Restore the deleted member
+            deleted_member.is_deleted = False
+            deleted_member.deleted_at = None
+            
+            # Update fields from request (user may want to update some info)
+            deleted_member.age = req.age
+            deleted_member.gender = req.gender
+            deleted_member.dob = req.dob
+            deleted_member.mobile = req.mobile
+            if hasattr(req, 'email'):
+                deleted_member.email = getattr(req, 'email', None)
+            
+            # Preserve profile photo URL (restore original photo if it existed)
+            deleted_member.profile_photo_url = preserved_profile_photo_url
+            
+            # Preserve is_self_profile flag (don't change primary profile status)
+            deleted_member.is_self_profile = preserved_is_self_profile
+            
+            # Update category and plan type if provided (allows moving to different plan)
+            if category_obj:
+                deleted_member.associated_category = category_name
+                deleted_member.associated_category_id = category_obj.id
+            if plan_type_normalized:
+                deleted_member.associated_plan_type = plan_type_normalized
+            
+            # Update updated_at timestamp
+            from Login_module.Utils.datetime_utils import now_ist
+            deleted_member.updated_at = now_ist()
+            
+            db.commit()
+            db.refresh(deleted_member)
+            
+            # Build family status if applicable
+            if deleted_member.associated_plan_type == "family":
+                family_status = _build_family_plan_status(db, user.id, deleted_member)
+            else:
+                family_status = None
+            
+            # Create audit log for restoration
+            from .Member_audit_model import MemberAuditLog
+            audit = MemberAuditLog(
+                user_id=user.id,
+                member_id=deleted_member.id,
+                member_name=deleted_member.name,
+                member_identifier=f"{deleted_member.name} ({deleted_member.mobile})",
+                event_type="RESTORED",
+                old_data={"is_deleted": True, "deleted_at": old_deleted_at},
+                new_data={"is_deleted": False, "deleted_at": None},
+                ip_address=ip_address,
+                user_agent=user_agent,
+                correlation_id=correlation_id
+            )
+            db.add(audit)
+            db.commit()
+            
+            # Return restored member (skip the rest of the creation logic)
+            return deleted_member, family_status
         
         # If adding to family plan, check if member is already in personal/couple plan
         if plan_type_normalized == "family":

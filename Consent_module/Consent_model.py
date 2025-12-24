@@ -28,10 +28,6 @@ class UserConsent(Base):
     status = Column(String(10), nullable=False, default="yes")  # "yes" or "no"
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
-    
-    # Transfer tracking fields
-    linked_from_consent_id = Column(Integer, ForeignKey("user_consents.id", ondelete="SET NULL"), nullable=True)  # Original consent if this is a transferred copy
-    transferred_at = Column(DateTime(timezone=True), nullable=True)  # When transfer occurred
 
     # Relationships
     user = relationship("User", foreign_keys=[user_id])

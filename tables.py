@@ -85,7 +85,7 @@ def import_all_models():
         
         # Profile models
         try:
-            from Profile_module.Profile_audit_crud import ProfileAuditLog
+            from Audit_module.Profile_audit_crud import ProfileAuditLog
             logger.debug("✓ Imported ProfileAuditLog model")
         except ImportError:
             logger.warning("⚠ Could not import ProfileAuditLog (optional)")

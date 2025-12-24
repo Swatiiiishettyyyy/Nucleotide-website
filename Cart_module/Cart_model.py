@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, ForeignKey, DateTime, func, String
+from sqlalchemy import Column, Integer, ForeignKey, DateTime, func, String, Boolean
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -16,6 +16,9 @@ class CartItem(Base):
     # For couple/family products: link multiple cart items together
     # All items for the same product purchase share the same group_id
     group_id = Column(String(100), nullable=False, index=True)  # UUID or timestamp-based ID
+    
+    # Soft delete flag
+    is_deleted = Column(Boolean, nullable=False, default=False, index=True)  # True if cart item is deleted/cleared
     
     # Note: Coupon tracking is handled by cart_coupons table, not in cart_items
     # This keeps cart items clean and coupons are managed at cart level

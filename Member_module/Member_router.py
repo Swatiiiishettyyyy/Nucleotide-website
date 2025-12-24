@@ -9,10 +9,13 @@ import os
 
 from deps import get_db
 from .Member_schema import (
-    MemberRequest, MemberResponse, MemberListResponse, MemberData, EditMemberRequest
+    MemberRequest, MemberResponse, MemberListResponse, MemberData, EditMemberRequest,
+    UploadPhotoResponse, DeletePhotoResponse, MemberProfileData
 )
+from Audit_module.Profile_audit_crud import log_profile_update
 from .Member_crud import save_member, get_members_by_user
 from .Member_model import Member
+from .Member_s3_service import get_member_photo_s3_service
 from Login_module.Utils.auth_user import get_current_user, get_current_member
 from Login_module.Utils import security
 from Login_module.Utils.datetime_utils import to_ist_isoformat
@@ -689,6 +692,7 @@ def get_current_member_api(
         "status": "success",
         "message": "Current member profile retrieved successfully.",
         "data": {
+            "user_id": current_user.id,
             "member_id": current_member.id,
             "name": current_member.name,
             "relation": str(current_member.relation),
@@ -715,4 +719,309 @@ CONTENT_TYPE_MAP = {
     ".gif": "image/gif",
     ".webp": "image/webp"
 }
+
+
+@router.post("/upload-photo", response_model=UploadPhotoResponse)
+async def upload_member_photo(
+    file: UploadFile = File(...),
+    member_id: Optional[int] = Query(None, description="Optional member ID. If not provided, uses member from token or default member."),
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    current_member=Depends(get_current_member)
+):
+    """
+    Upload profile photo for a member.
+    Accepts image files (jpg, jpeg, png, gif, webp) up to 5MB.
+    
+    If member_id is provided, uploads photo for that member (must belong to current user).
+    If member_id is not provided, uses member from token or default member.
+    """
+    target_member = None
+    
+    # If member_id is provided, validate and use it
+    if member_id is not None:
+        target_member = db.query(Member).filter(
+            Member.id == member_id,
+            Member.user_id == current_user.id,
+            Member.is_deleted == False
+        ).first()
+        
+        if not target_member:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Member with ID {member_id} not found or does not belong to you."
+            )
+    
+    # If member_id not provided, use current member logic
+    if target_member is None:
+        if current_member:
+            target_member = current_member
+        else:
+            # Try to get self profile member first
+            default_member = db.query(Member).filter(
+                Member.user_id == current_user.id,
+                Member.is_self_profile == True,
+                Member.is_deleted == False
+            ).first()
+            
+            # If no self profile, get the first member (oldest by created_at)
+            if not default_member:
+                default_member = db.query(Member).filter(
+                    Member.user_id == current_user.id,
+                    Member.is_deleted == False
+                ).order_by(Member.created_at.asc()).first()
+            
+            if not default_member:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No member found. Please create a member profile first."
+                )
+            
+            target_member = default_member
+    
+    # Validate file extension
+    file_ext = Path(file.filename).suffix.lower() if file.filename else ""
+    if file_ext not in ALLOWED_PHOTO_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid file type. Allowed types: {', '.join(ALLOWED_PHOTO_EXTENSIONS)}"
+        )
+    
+    # Read file content to check size
+    file_content = await file.read()
+    file_size = len(file_content)
+    
+    if file_size > MAX_PHOTO_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File size exceeds maximum allowed size of {MAX_PHOTO_FILE_SIZE // (1024 * 1024)}MB"
+        )
+    
+    if file_size == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File is empty"
+        )
+    
+    # Generate unique filename: timestamp.ext (member_id will be added by S3 service)
+    timestamp = int(uuid.uuid4().hex[:8], 16)  # Use part of UUID as timestamp-like identifier
+    filename = f"{timestamp}{file_ext}"
+    
+    # Determine content type
+    content_type = file.content_type or CONTENT_TYPE_MAP.get(file_ext, "image/jpeg")
+    
+    # Delete old profile photo from S3 if exists
+    if target_member.profile_photo_url:
+        try:
+            s3_service = get_member_photo_s3_service()
+            s3_service.delete_member_photo(target_member.profile_photo_url)
+        except Exception as e:
+            # Log but don't fail if old photo deletion fails
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to delete old member profile photo from S3: {str(e)}")
+    
+    # Upload to S3
+    try:
+        s3_service = get_member_photo_s3_service()
+        profile_photo_url = s3_service.upload_member_photo(
+            member_id=target_member.id,
+            filename=filename,
+            file_content=file_content,
+            content_type=content_type
+        )
+    except ValueError as e:
+        # S3 not configured
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"S3 configuration error: {str(e)}"
+        )
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error uploading member photo to S3: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload photo to S3: {str(e)}"
+        )
+    
+    # Store old data for audit
+    old_data = {
+        "profile_photo_url": target_member.profile_photo_url
+    }
+    
+    # Update member profile with S3 URL
+    target_member.profile_photo_url = profile_photo_url
+    db.commit()
+    db.refresh(target_member)
+    
+    # Check if member has taken genetic test
+    from GeneticTest_module.GeneticTest_crud import get_participant_info
+    participant_info = get_participant_info(db, member_id=target_member.id)
+    has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
+    
+    # Store new data for audit
+    new_data = {
+        "profile_photo_url": target_member.profile_photo_url
+    }
+    
+    # Audit log
+    ip_address = request.client.host if request else None
+    user_agent = request.headers.get("user-agent") if request else None
+    correlation_id = str(uuid.uuid4())
+    
+    log_profile_update(
+        db=db,
+        user_id=current_user.id,
+        old_data=old_data,
+        new_data=new_data,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        correlation_id=correlation_id
+    )
+    
+    data = MemberProfileData(
+        user_id=current_user.id,
+        name=target_member.name,
+        email=current_user.email,
+        mobile=target_member.mobile,
+        profile_photo_url=target_member.profile_photo_url,
+        has_taken_genetic_test=has_taken_genetic_test
+    )
+    
+    return UploadPhotoResponse(
+        status="success",
+        message="Profile photo uploaded successfully.",
+        data=data
+    )
+
+
+@router.delete("/delete-photo", response_model=DeletePhotoResponse)
+async def delete_member_photo(
+    member_id: Optional[int] = Query(None, description="Optional member ID. If not provided, uses member from token or default member."),
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    current_member=Depends(get_current_member)
+):
+    """
+    Delete profile photo for a member.
+    
+    If member_id is provided, deletes photo for that member (must belong to current user).
+    If member_id is not provided, uses member from token or default member.
+    """
+    target_member = None
+    
+    # If member_id is provided, validate and use it
+    if member_id is not None:
+        target_member = db.query(Member).filter(
+            Member.id == member_id,
+            Member.user_id == current_user.id,
+            Member.is_deleted == False
+        ).first()
+        
+        if not target_member:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Member with ID {member_id} not found or does not belong to you."
+            )
+    
+    # If member_id not provided, use current member logic
+    if target_member is None:
+        if current_member:
+            target_member = current_member
+        else:
+            # Try to get self profile member first
+            default_member = db.query(Member).filter(
+                Member.user_id == current_user.id,
+                Member.is_self_profile == True,
+                Member.is_deleted == False
+            ).first()
+            
+            # If no self profile, get the first member (oldest by created_at)
+            if not default_member:
+                default_member = db.query(Member).filter(
+                    Member.user_id == current_user.id,
+                    Member.is_deleted == False
+                ).order_by(Member.created_at.asc()).first()
+            
+            if not default_member:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No member found. Please create a member profile first."
+                )
+            
+            target_member = default_member
+    
+    if not target_member.profile_photo_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No photo exists. Kindly upload the profile photo."
+        )
+    
+    # Store old data for audit
+    old_data = {
+        "profile_photo_url": target_member.profile_photo_url
+    }
+    
+    # Delete file from S3
+    try:
+        s3_service = get_member_photo_s3_service()
+        s3_service.delete_member_photo(target_member.profile_photo_url)
+    except ValueError as e:
+        # S3 not configured - log but don't fail deletion (photo might already be deleted)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"S3 configuration error when deleting member profile photo: {str(e)}")
+    except Exception as e:
+        # Log but don't fail if S3 deletion fails (photo might already be deleted)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Failed to delete member profile photo from S3: {str(e)}")
+    
+    # Remove photo URL from database
+    target_member.profile_photo_url = None
+    db.commit()
+    db.refresh(target_member)
+    
+    # Check if member has taken genetic test
+    from GeneticTest_module.GeneticTest_crud import get_participant_info
+    participant_info = get_participant_info(db, member_id=target_member.id)
+    has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
+    
+    # Store new data for audit
+    new_data = {
+        "profile_photo_url": None
+    }
+    
+    # Audit log
+    ip_address = request.client.host if request else None
+    user_agent = request.headers.get("user-agent") if request else None
+    correlation_id = str(uuid.uuid4())
+    
+    log_profile_update(
+        db=db,
+        user_id=current_user.id,
+        old_data=old_data,
+        new_data=new_data,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        correlation_id=correlation_id
+    )
+    
+    data = MemberProfileData(
+        user_id=current_user.id,
+        name=target_member.name,
+        email=current_user.email,
+        mobile=target_member.mobile,
+        profile_photo_url=None,
+        has_taken_genetic_test=has_taken_genetic_test
+    )
+    
+    return DeletePhotoResponse(
+        status="success",
+        message="Profile photo deleted successfully.",
+        data=data
+    )
 
