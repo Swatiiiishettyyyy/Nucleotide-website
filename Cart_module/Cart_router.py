@@ -229,14 +229,25 @@ def add_to_cart(
             # Flush to get IDs for all items
             db.flush()
             
-            # Set cart_id to the first cart_item.id (simple sequential number)
-            # All items in the same group will share this cart_id
-            if created_cart_items:
+            # Get existing cart_id for this user (if any) - all items for a user share the same cart_id
+            existing_cart = db.query(CartItem).filter(
+                CartItem.user_id == current_user.id,
+                CartItem.is_deleted == False,
+                CartItem.cart_id.isnot(None)
+            ).first()
+            
+            if existing_cart:
+                # User already has a cart, use the existing cart_id
+                cart_id = existing_cart.cart_id
+            else:
+                # First cart item for this user, use the first item's ID as cart_id
                 cart_id = created_cart_items[0].id
-                for cart_item in created_cart_items:
-                    cart_item.cart_id = cart_id
-                # Flush again to save cart_id values
-                db.flush()
+            
+            # Set cart_id for all newly created items (all items for a user share the same cart_id)
+            for cart_item in created_cart_items:
+                cart_item.cart_id = cart_id
+            # Flush again to save cart_id values
+            db.flush()
             
             # Commit all items together (transaction safety)
             db.commit()
@@ -534,9 +545,9 @@ def view_cart(
 ):
     """
     View cart items for current user (requires authentication).
-    If a member is selected:
-    - For couple/family products: Shows all items in groups where the member appears
-    - For single products: Shows all cart items (visible to all members)
+    All cart items are visible to all members of the same user.
+    The cart is the same regardless of which member profile is viewing it.
+    All items for a user share the same cart_id.
     Returns cart items with product_id, address_id, cart_id, member_id.
     Groups items by group_id for couple/family products.
     """
@@ -552,49 +563,9 @@ def view_cart(
     
     all_cart_items = query.order_by(CartItem.group_id, CartItem.created_at).all()
     
-    # If a member is selected, filter based on plan type
-    if current_member:
-        # Group items by group_id first
-        grouped_items = {}
-        for item in all_cart_items:
-            group_key = item.group_id or f"single_{item.id}"
-            if group_key not in grouped_items:
-                grouped_items[group_key] = []
-            grouped_items[group_key].append(item)
-        
-        # Filter groups based on plan type
-        filtered_items = []
-        for group_key, items in grouped_items.items():
-            # Get product plan type from first item (all items in group have same product)
-            first_item = items[0]
-            product = first_item.product
-            
-            if not product:
-                # If product is deleted, skip this group
-                continue
-            
-            plan_type = product.plan_type.value if hasattr(product.plan_type, 'value') else str(product.plan_type)
-            plan_type_lower = plan_type.lower() if plan_type else None
-            
-            # Check if current member is in this group
-            member_in_group = any(item.member_id == current_member.id for item in items)
-            
-            if plan_type_lower in ["couple", "family"]:
-                # For couple/family: if member is in group, show all items in group
-                if member_in_group:
-                    filtered_items.extend(items)
-                # If member not in group, skip the entire group
-            else:
-                # For single: show all single product items to all members
-                filtered_items.extend(items)
-        
-        cart_items = filtered_items
-    else:
-        # No member selected, show all items
-        cart_items = all_cart_items
-    
-    # Determine if member filter is applied
-    member_filter_applied = current_member.id if current_member else None
+    # All cart items are visible to all members of the same user
+    # Cart is the same regardless of which member profile is viewing it
+    cart_items = all_cart_items
     
     if not cart_items:
         # Audit log
@@ -604,15 +575,14 @@ def view_cart(
             user_id=current_user.id,
             action="VIEW",
             entity_type="CART",
-            details={"items_count": 0, "member_filter": member_filter_applied},
+            details={"items_count": 0},
             ip_address=ip,
             user_agent=user_agent
         )
         
-        filter_message = f"Cart is empty for {current_member.name}." if current_member else "Cart is empty."
         return {
             "status": "success",
-            "message": filter_message,
+            "message": "Cart is empty.",
             "data": {
                 "cart_summary": None,
                 "cart_items": []
@@ -777,8 +747,11 @@ def view_cart(
     # Ensure grand total is not negative
     grand_total = max(0.0, grand_total)
 
+    # All items for a user share the same cart_id
+    cart_id = cart_items[0].cart_id if cart_items and cart_items[0].cart_id else (cart_items[0].id if cart_items else 0)
+
     summary = {
-        "cart_id": cart_items[0].cart_id if cart_items and cart_items[0].cart_id else (cart_items[0].id if cart_items else 0),
+        "cart_id": cart_id,  # All items for a user share the same cart_id
         "total_items": len(grouped_items),  # Number of product groups
         "total_cart_items": len(cart_items),  # Total individual cart items
         "subtotal_amount": subtotal_amount,
