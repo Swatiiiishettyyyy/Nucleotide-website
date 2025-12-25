@@ -45,6 +45,7 @@ EXPECTED_TABLES = {
     'products': 'Product_module.Product_model.Product',
     'members': 'Member_module.Member_model.Member',
     'addresses': 'Address_module.Address_model.Address',
+    'carts': 'Cart_module.Cart_model.Cart',
     'cart_items': 'Cart_module.Cart_model.CartItem',
     
     # Coupon tables
@@ -99,10 +100,10 @@ def import_all_models():
         logger.debug("✓ Imported Address and AddressAudit models")
         
         # Cart models
-        from Cart_module.Cart_model import CartItem
+        from Cart_module.Cart_model import CartItem, Cart
         from Cart_module.Cart_audit_model import AuditLog
-        imported_count += 2
-        logger.debug("✓ Imported CartItem and AuditLog models")
+        imported_count += 3
+        logger.debug("✓ Imported CartItem, Cart and AuditLog models")
         
         # Coupon models
         from Cart_module.Coupon_model import Coupon, CartCoupon
@@ -112,9 +113,9 @@ def import_all_models():
         # Order models - IMPORTANT: These must be imported
         # Import order models early to ensure they're registered
         try:
-            from Orders_module.Order_model import Order, OrderItem, OrderSnapshot, OrderStatusHistory
-            imported_count += 4
-            logger.info("✓ Imported Order, OrderItem, OrderSnapshot, OrderStatusHistory models")
+            from Orders_module.Order_model import Order, OrderItem, OrderSnapshot, OrderStatusHistory, Payment, WebhookLog, PaymentTransition
+            imported_count += 7
+            logger.info("✓ Imported Order, OrderItem, OrderSnapshot, OrderStatusHistory, Payment, WebhookLog, PaymentTransition models")
             
             # Verify order tables are registered
             order_table_names = ['orders', 'order_items', 'order_snapshots', 'order_status_history']

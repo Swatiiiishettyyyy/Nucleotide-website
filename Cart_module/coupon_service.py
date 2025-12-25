@@ -77,15 +77,20 @@ def validate_and_calculate_discount(
         return None, 0.0, f"Coupon '{coupon.coupon_code}' is not active (status: {coupon.status.value})"
     
     # Check validity period
-    from Login_module.Utils.datetime_utils import now_ist
+    from Login_module.Utils.datetime_utils import now_ist, to_ist
     now = now_ist()
-    if coupon.valid_from and now < coupon.valid_from:
-        logger.warning(f"Coupon '{coupon.coupon_code}' is not yet valid. Valid from: {coupon.valid_from}, Current: {now}")
-        return None, 0.0, f"Coupon '{coupon.coupon_code}' is not yet valid. Valid from: {coupon.valid_from.strftime('%Y-%m-%d %H:%M:%S')}"
     
-    if coupon.valid_until and now > coupon.valid_until:
-        logger.warning(f"Coupon '{coupon.coupon_code}' has expired. Valid until: {coupon.valid_until}, Current: {now}")
-        return None, 0.0, f"Coupon '{coupon.coupon_code}' has expired. Valid until: {coupon.valid_until.strftime('%Y-%m-%d %H:%M:%S')}"
+    # Normalize coupon datetime fields to IST to avoid timezone comparison issues
+    valid_from_ist = to_ist(coupon.valid_from) if coupon.valid_from else None
+    valid_until_ist = to_ist(coupon.valid_until) if coupon.valid_until else None
+    
+    if valid_from_ist and now < valid_from_ist:
+        logger.warning(f"Coupon '{coupon.coupon_code}' is not yet valid. Valid from: {valid_from_ist}, Current: {now}")
+        return None, 0.0, f"Coupon '{coupon.coupon_code}' is not yet valid. Valid from: {valid_from_ist.strftime('%Y-%m-%d %H:%M:%S')}"
+    
+    if valid_until_ist and now > valid_until_ist:
+        logger.warning(f"Coupon '{coupon.coupon_code}' has expired. Valid until: {valid_until_ist}, Current: {now}")
+        return None, 0.0, f"Coupon '{coupon.coupon_code}' has expired. Valid until: {valid_until_ist.strftime('%Y-%m-%d %H:%M:%S')}"
     
     # Note: user_id validation removed - all coupons are applicable to all users
     # Usage limits are tracked via max_uses and cart_coupons table

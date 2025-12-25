@@ -23,7 +23,7 @@ from Login_module.User.user_model import User
 from Product_module.Product_model import Category, Product
 from Member_module.Member_model import Member
 from Address_module.Address_model import Address
-from Cart_module.Cart_model import CartItem
+from Cart_module.Cart_model import CartItem, Cart
 from Cart_module.Coupon_model import Coupon, CartCoupon
 from Orders_module.Order_model import Order, OrderItem, OrderSnapshot, OrderStatusHistory
 from Cart_module.Coupon_model import Coupon, CartCoupon

@@ -9,7 +9,7 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 from database import SessionLocal
-from .Cart_model import CartItem
+from .Cart_model import CartItem, Cart
 from Product_module.Product_model import Product, PlanType
 from Address_module.Address_model import Address
 from Member_module.Member_model import Member
@@ -17,6 +17,7 @@ from Login_module.User.user_model import User
 from .Cart_schema import CartAdd, CartUpdate, ApplyCouponRequest, CouponCreate
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user, get_current_member
+from Login_module.Utils.datetime_utils import to_ist_isoformat
 from .Cart_audit_crud import create_audit_log
 from .coupon_service import (
     apply_coupon_to_cart,
@@ -36,6 +37,41 @@ def get_client_info(request: Request):
     ip = request.client.host if request.client else None
     user_agent = request.headers.get("user-agent")
     return ip, user_agent
+
+
+def get_or_create_user_cart(db: Session, user_id: int) -> Cart:
+    """
+    Get or create active cart for user.
+    Ensures one active cart per user by deactivating any other active carts.
+    """
+    # Get all active carts for this user
+    active_carts = db.query(Cart).filter(
+        Cart.user_id == user_id,
+        Cart.is_active == True
+    ).all()
+    
+    if len(active_carts) > 1:
+        # Multiple active carts - deactivate all except the first one
+        for c in active_carts[1:]:
+            c.is_active = False
+        cart = active_carts[0]
+        db.flush()
+        logger.warning(f"Found multiple active carts for user {user_id}. Deactivated {len(active_carts) - 1} cart(s).")
+    elif len(active_carts) == 1:
+        # One active cart exists
+        cart = active_carts[0]
+    else:
+        # No active cart exists - create new one
+        cart = Cart(
+            user_id=user_id,
+            is_active=True
+        )
+        db.add(cart)
+        db.flush()
+        db.refresh(cart)
+        logger.info(f"Created new cart {cart.id} for user {user_id}")
+    
+    return cart
 
 
 @router.post("/add")
@@ -182,8 +218,9 @@ def add_to_cart(
         # Generate unique group_id using full UUID for better uniqueness
         group_id = f"{current_user.id}_{product.ProductId}_{uuid.uuid4().hex}"
         
-        # cart_id will be set to the first cart_item.id after creation (simple sequential number)
-        # This ensures all items in the same group share the same simple cart_id
+        # Get or create user's active cart
+        cart = get_or_create_user_cart(db, current_user.id)
+        cart_id = cart.id
         
         # Build member_address_map from request (already validated)
         member_address_map = {
@@ -197,26 +234,13 @@ def add_to_cart(
         created_cart_items = []
         
         try:
-            # Verify cart_id column exists in database (safety check)
-            from sqlalchemy import inspect as sqlalchemy_inspect
-            # Use get_bind() for SQLAlchemy 2.0 compatibility
-            bind = db.get_bind() if hasattr(db, 'get_bind') else db.bind
-            inspector = sqlalchemy_inspect(bind)
-            cart_items_columns = {col['name'] for col in inspector.get_columns('cart_items')}
-            if 'cart_id' not in cart_items_columns:
-                logger.error("cart_id column does not exist in cart_items table! Please run migrations.")
-                raise HTTPException(
-                    status_code=500,
-                    detail="Database schema mismatch: cart_id column missing. Please run Alembic migrations."
-                )
-            
             # Create cart items: one row per member with their assigned address
             # Process in the order specified in member_address_map
             for mapping in item.member_address_map:
                 member = members_by_id[mapping.member_id]
                 cart_item = CartItem(
                     user_id=current_user.id,
-                    cart_id=None,  # Will be set after first item gets its ID
+                    cart_id=cart_id,  # Use cart.id from cart table
                     product_id=item.product_id,
                     address_id=mapping.address_id,
                     member_id=mapping.member_id,
@@ -226,27 +250,11 @@ def add_to_cart(
                 db.add(cart_item)
                 created_cart_items.append(cart_item)
             
+            # Update cart's last_activity_at
+            from Login_module.Utils.datetime_utils import now_ist
+            cart.last_activity_at = now_ist()
+            
             # Flush to get IDs for all items
-            db.flush()
-            
-            # Get existing cart_id for this user (if any) - all items for a user share the same cart_id
-            existing_cart = db.query(CartItem).filter(
-                CartItem.user_id == current_user.id,
-                CartItem.is_deleted == False,
-                CartItem.cart_id.isnot(None)
-            ).first()
-            
-            if existing_cart:
-                # User already has a cart, use the existing cart_id
-                cart_id = existing_cart.cart_id
-            else:
-                # First cart item for this user, use the first item's ID as cart_id
-                cart_id = created_cart_items[0].id
-            
-            # Set cart_id for all newly created items (all items for a user share the same cart_id)
-            for cart_item in created_cart_items:
-                cart_item.cart_id = cart_id
-            # Flush again to save cart_id values
             db.flush()
             
             # Commit all items together (transaction safety)
@@ -288,7 +296,7 @@ def add_to_cart(
             action="ADD",
             entity_type="CART_ITEM",
             entity_id=created_cart_items[0].id,
-            cart_id=created_cart_items[0].id,
+            cart_id=cart_id,  # Use proper cart.id
             details={
                 "product_id": product.ProductId,
                 "plan_type": product.plan_type.value,
@@ -297,7 +305,8 @@ def add_to_cart(
                 "address_ids": unique_address_ids,
                 "member_address_map": member_address_map,
                 "cart_items_created": len(created_cart_items),
-                "group_id": group_id
+                "group_id": group_id,
+                "cart_id": cart_id
             },
             ip_address=ip,
             user_agent=user_agent,
@@ -310,7 +319,7 @@ def add_to_cart(
             "message": "Product added to cart successfully.",
             "data": {
                 "cart_item_ids": [ci.id for ci in created_cart_items],
-                "cart_id": created_cart_items[0].cart_id,  # Simple cart_id number
+                "cart_id": cart_id,  # Proper cart.id from cart table
                 "product_id": product.ProductId,
                 "address_ids": unique_address_ids,
                 "member_ids": member_ids,
@@ -355,6 +364,7 @@ def update_cart_item(
 
     old_quantity = cart_item.quantity
     group_id = cart_item.group_id
+    cart_id = cart_item.cart_id
     
     try:
         # If item has a group_id, update all items in the group (for couple/family products)
@@ -374,6 +384,16 @@ def update_cart_item(
             cart_item.quantity = update.quantity
             updated_count = 1
         
+        # Update cart's last_activity_at
+        if cart_id:
+            cart = db.query(Cart).filter(
+                Cart.id == cart_id,
+                Cart.user_id == current_user.id  # Security: verify cart belongs to user
+            ).first()
+            if cart:
+                from Login_module.Utils.datetime_utils import now_ist
+                cart.last_activity_at = now_ist()
+        
         db.commit()
         db.refresh(cart_item)
 
@@ -388,13 +408,14 @@ def update_cart_item(
             action="UPDATE",
             entity_type="CART_ITEM",
             entity_id=cart_item.id,
-            cart_id=cart_item.id,
+            cart_id=cart_id,  # Use proper cart.id
             details={
                 "product_id": product.ProductId,
                 "old_quantity": old_quantity,
                 "new_quantity": update.quantity,
                 "group_id": group_id,
-                "items_updated": updated_count
+                "items_updated": updated_count,
+                "cart_id": cart_id
             },
             ip_address=ip,
             user_agent=user_agent,
@@ -437,15 +458,17 @@ def delete_cart_item(
     
     cart_item = db.query(CartItem).filter(
         CartItem.id == cart_item_id,
-        CartItem.user_id == current_user.id
+        CartItem.user_id == current_user.id,
+        CartItem.is_deleted == False  # Only allow deleting non-deleted items
     ).first()
     
     if not cart_item:
-        raise HTTPException(status_code=404, detail="Cart item not found")
+        raise HTTPException(status_code=404, detail="Cart item not found or already deleted")
 
     product_id = cart_item.product_id
     quantity = cart_item.quantity
     group_id = cart_item.group_id
+    cart_id = cart_item.cart_id
     
     # If item has a group_id, soft delete all items in the group (for couple/family products)
     if group_id:
@@ -464,6 +487,16 @@ def delete_cart_item(
         cart_item.is_deleted = True
         deleted_count = 1
     
+    # Update cart's last_activity_at
+    if cart_id:
+        cart = db.query(Cart).filter(
+            Cart.id == cart_id,
+            Cart.user_id == current_user.id  # Security: verify cart belongs to user
+        ).first()
+        if cart:
+            from Login_module.Utils.datetime_utils import now_ist
+            cart.last_activity_at = now_ist()
+    
     db.commit()
 
     # Audit log
@@ -475,11 +508,13 @@ def delete_cart_item(
         action="DELETE",
         entity_type="CART_ITEM",
         entity_id=cart_item_id,
+        cart_id=cart_id,  # Use proper cart.id
         details={
             "product_id": product_id,
             "quantity": quantity,
             "group_id": group_id,
-            "items_deleted": deleted_count
+            "items_deleted": deleted_count,
+            "cart_id": cart_id
         },
         ip_address=ip,
         user_agent=user_agent,
@@ -501,28 +536,67 @@ def clear_cart(
 ):
     """Clear all cart items for current user (requires authentication) - soft delete"""
     
-    # Soft delete: set is_deleted = True instead of actually deleting
+    # Get user's active cart first (or create if doesn't exist but has items)
+    cart = db.query(Cart).filter(
+        Cart.user_id == current_user.id,
+        Cart.is_active == True
+    ).first()
+    
+    # Get cart items first to check if user has any
     cart_items = db.query(CartItem).filter(
         CartItem.user_id == current_user.id,
         CartItem.is_deleted == False
     ).all()
     
+    # If cart doesn't exist but user has items, create cart
+    if not cart and cart_items:
+        cart = get_or_create_user_cart(db, current_user.id)
+        # Update items to use the new cart_id
+        for item in cart_items:
+            if not item.cart_id:
+                item.cart_id = cart.id
+    
+    cart_id = cart.id if cart else None
+    
+    # Soft delete: set is_deleted = True instead of actually deleting
+    # Query via cart_id if available, otherwise use all items we found
+    if cart_id and cart_items:
+        # Re-query with cart_id to ensure we get all items
+        cart_items = db.query(CartItem).filter(
+            CartItem.cart_id == cart_id,
+            CartItem.is_deleted == False
+        ).all()
+    
     deleted_count = len(cart_items)
     for item in cart_items:
         item.is_deleted = True
     
+    # Remove applied coupon when cart is cleared
+    # This ensures coupon is not applied to new items added after clearing
+    coupon_removed = remove_coupon_from_cart(db, current_user.id)
+    if coupon_removed:
+        logger.info(f"Removed coupon from cart when clearing cart for user {current_user.id}")
+    
+    # Update cart's last_activity_at
+    if cart:
+        from Login_module.Utils.datetime_utils import now_ist
+        cart.last_activity_at = now_ist()
+    
     db.commit()
     
-    # Audit log
+    # Audit log - now with proper cart_id
     ip, user_agent = get_client_info(request)
     correlation_id = str(uuid.uuid4())
     create_audit_log(
         db=db,
         user_id=current_user.id,
+        cart_id=cart_id,  # Fixed: Now includes cart_id
         action="CLEAR",
         entity_type="CART",
         details={
-            "items_deleted": deleted_count
+            "items_deleted": deleted_count,
+            "cart_id": cart_id,
+            "coupon_removed": coupon_removed  # Track if coupon was removed
         },
         ip_address=ip,
         user_agent=user_agent,
@@ -530,9 +604,13 @@ def clear_cart(
         correlation_id=correlation_id
     )
     
+    message = f"Cleared {deleted_count} item(s) from the cart."
+    if coupon_removed:
+        message += " Applied coupon has been removed."
+    
     return {
         "status": "success",
-        "message": f"Cleared {deleted_count} item(s) from the cart."
+        "message": message
     }
 
 
@@ -551,17 +629,46 @@ def view_cart(
     Returns cart items with product_id, address_id, cart_id, member_id.
     Groups items by group_id for couple/family products.
     """
-    # Get all cart items for user (don't filter by member yet - need to check plan types)
-    query = db.query(CartItem).options(
-        joinedload(CartItem.member),
-        joinedload(CartItem.address),
-        joinedload(CartItem.product)
-    ).filter(
-        CartItem.user_id == current_user.id,
-        CartItem.is_deleted == False  # Exclude deleted/cleared items
-    )
+    # Get user's active cart (or create if doesn't exist and has items)
+    cart = db.query(Cart).filter(
+        Cart.user_id == current_user.id,
+        Cart.is_active == True
+    ).first()
     
-    all_cart_items = query.order_by(CartItem.group_id, CartItem.created_at).all()
+    # Get all cart items for user (don't filter by member yet - need to check plan types)
+    # First try to get items via cart_id if cart exists
+    if cart:
+        query = db.query(CartItem).options(
+            joinedload(CartItem.member),
+            joinedload(CartItem.address),
+            joinedload(CartItem.product)
+        ).filter(
+            CartItem.cart_id == cart.id,
+            CartItem.is_deleted == False  # Exclude deleted/cleared items
+        )
+    else:
+        # Fallback for backward compatibility - query by user_id
+        query = db.query(CartItem).options(
+            joinedload(CartItem.member),
+            joinedload(CartItem.address),
+            joinedload(CartItem.product)
+        ).filter(
+            CartItem.user_id == current_user.id,
+            CartItem.is_deleted == False  # Exclude deleted/cleared items
+        )
+    
+    all_cart_items = query.order_by(CartItem.group_id, CartItem.created_at).unique().all()
+    
+    # If cart doesn't exist but user has items, create cart now
+    if not cart and all_cart_items:
+        cart = get_or_create_user_cart(db, current_user.id)
+        # Update items to use the new cart_id
+        for item in all_cart_items:
+            if not item.cart_id:
+                item.cart_id = cart.id
+        db.flush()  # Flush instead of commit - let the endpoint commit
+    
+    cart_id = cart.id if cart else None
     
     # All cart items are visible to all members of the same user
     # Cart is the same regardless of which member profile is viewing it
@@ -573,9 +680,10 @@ def view_cart(
         create_audit_log(
             db=db,
             user_id=current_user.id,
+            cart_id=cart_id,  # Include cart_id even for empty cart (may be None if no cart exists)
             action="VIEW",
             entity_type="CART",
-            details={"items_count": 0},
+            details={"items_count": 0, "cart_id": cart_id},
             ip_address=ip,
             user_agent=user_agent
         )
@@ -629,7 +737,7 @@ def view_cart(
                 "relation": str(member.relation) if member else None,  # Now a string, no need for .value check
                 "age": member.age if member else None,
                 "gender": member.gender if member else None,
-                "dob": member.dob.isoformat() if member and member.dob else None,
+                "dob": to_ist_isoformat(member.dob) if member and member.dob else None,
                 "mobile": member.mobile if member else None
             }
             
@@ -747,11 +855,12 @@ def view_cart(
     # Ensure grand total is not negative
     grand_total = max(0.0, grand_total)
 
-    # All items for a user share the same cart_id
-    cart_id = cart_items[0].cart_id if cart_items and cart_items[0].cart_id else (cart_items[0].id if cart_items else 0)
+    # Get cart_id from cart or first item
+    if not cart_id and cart_items:
+        cart_id = cart_items[0].cart_id if cart_items[0].cart_id else None
 
     summary = {
-        "cart_id": cart_id,  # All items for a user share the same cart_id
+        "cart_id": cart_id,  # Proper cart.id from cart table
         "total_items": len(grouped_items),  # Number of product groups
         "total_cart_items": len(cart_items),  # Total individual cart items
         "subtotal_amount": subtotal_amount,
@@ -769,12 +878,14 @@ def view_cart(
     create_audit_log(
         db=db,
         user_id=current_user.id,
+        cart_id=cart_id,  # Include cart_id
         action="VIEW",
         entity_type="CART",
         details={
             "items_count": len(cart_items),
             "product_groups": len(grouped_items),
-            "grand_total": grand_total
+            "grand_total": grand_total,
+            "cart_id": cart_id
         },
         ip_address=ip,
         user_agent=user_agent,
@@ -807,17 +918,41 @@ def apply_coupon(
     Shows 'You Save' amount in response.
     """
     try:
+        # Get user's active cart (or create if doesn't exist and has items)
+        cart = db.query(Cart).filter(
+            Cart.user_id == current_user.id,
+            Cart.is_active == True
+        ).first()
+        
         # Get user's cart items to calculate subtotal (exclude deleted items)
-        cart_items = db.query(CartItem).filter(
-            CartItem.user_id == current_user.id,
-            CartItem.is_deleted == False
-        ).all()
+        if cart:
+            cart_items = db.query(CartItem).filter(
+                CartItem.cart_id == cart.id,
+                CartItem.is_deleted == False
+            ).all()
+        else:
+            # Fallback for backward compatibility
+            cart_items = db.query(CartItem).filter(
+                CartItem.user_id == current_user.id,
+                CartItem.is_deleted == False
+            ).all()
+            
+            # If cart doesn't exist but user has items, create cart
+            if cart_items:
+                cart = get_or_create_user_cart(db, current_user.id)
+                # Update items to use the new cart_id
+                for item in cart_items:
+                    if not item.cart_id:
+                        item.cart_id = cart.id
+                db.flush()  # Flush - will be committed with coupon application
         
         if not cart_items:
             raise HTTPException(
                 status_code=400,
                 detail="Cart is empty. Add items to cart before applying coupon."
             )
+        
+        cart_id = cart.id if cart else None
         
         # Calculate subtotal and product discount
         subtotal_amount = 0.0
@@ -887,6 +1022,7 @@ def apply_coupon(
         create_audit_log(
             db=db,
             user_id=current_user.id,
+            cart_id=cart_id,  # Include cart_id
             action="APPLY_COUPON",
             entity_type="CART",
             details={
@@ -894,7 +1030,8 @@ def apply_coupon(
                 "coupon_discount_amount": coupon_discount_amount,
                 "product_discount_amount": total_product_discount,
                 "subtotal": subtotal_amount,
-                "grand_total": grand_total
+                "grand_total": grand_total,
+                "cart_id": cart_id
             },
             ip_address=ip,
             user_agent=user_agent,
@@ -936,6 +1073,18 @@ def remove_coupon(
     Remove applied coupon from cart (requires authentication).
     """
     try:
+        # Get user's active cart for audit log (or create if doesn't exist)
+        cart = db.query(Cart).filter(
+            Cart.user_id == current_user.id,
+            Cart.is_active == True
+        ).first()
+        
+        # If no cart exists, create one (even if empty, for consistency)
+        if not cart:
+            cart = get_or_create_user_cart(db, current_user.id)
+        
+        cart_id = cart.id if cart else None
+        
         # Remove coupon application
         removed = remove_coupon_from_cart(db, current_user.id)
         
@@ -954,9 +1103,10 @@ def remove_coupon(
         create_audit_log(
             db=db,
             user_id=current_user.id,
+            cart_id=cart_id,  # Include cart_id
             action="REMOVE_COUPON",
             entity_type="CART",
-            details={},
+            details={"cart_id": cart_id},
             ip_address=ip,
             user_agent=user_agent,
             username=current_user.name or current_user.mobile,
@@ -990,14 +1140,18 @@ def list_coupons(
         ).all()
         
         coupon_list = []
-        from Login_module.Utils.datetime_utils import now_ist
+        from Login_module.Utils.datetime_utils import now_ist, to_ist
         now = now_ist()
         
         for coupon in coupons:
             # Check if coupon is within validity period
+            # Normalize coupon datetime fields to IST to avoid timezone comparison issues
+            valid_from_ist = to_ist(coupon.valid_from) if coupon.valid_from else None
+            valid_until_ist = to_ist(coupon.valid_until) if coupon.valid_until else None
+            
             is_within_validity = (
-                (not coupon.valid_from or now >= coupon.valid_from) and
-                (not coupon.valid_until or now <= coupon.valid_until)
+                (not valid_from_ist or now >= valid_from_ist) and
+                (not valid_until_ist or now <= valid_until_ist)
             )
             
             if not is_within_validity:
@@ -1022,9 +1176,9 @@ def list_coupons(
                 "max_uses": coupon.max_uses,
                 "current_uses": current_uses,  # Show how many times it's been used
                 "remaining_uses": coupon.max_uses - current_uses if coupon.max_uses else None,
-                "valid_from": coupon.valid_from.isoformat() if coupon.valid_from else None,
-                "valid_until": coupon.valid_until.isoformat() if coupon.valid_until else None,
-                "created_at": coupon.created_at.isoformat() if coupon.created_at else None
+                "valid_from": to_ist_isoformat(coupon.valid_from),
+                "valid_until": to_ist_isoformat(coupon.valid_until),
+                "created_at": to_ist_isoformat(coupon.created_at)
             })
         
         return {
@@ -1092,8 +1246,8 @@ def create_coupon(
                 "min_order_amount": new_coupon.min_order_amount,
                 "max_discount_amount": new_coupon.max_discount_amount,
                 "max_uses": new_coupon.max_uses,
-                "valid_from": new_coupon.valid_from.isoformat() if new_coupon.valid_from else None,
-                "valid_until": new_coupon.valid_until.isoformat() if new_coupon.valid_until else None,
+                "valid_from": to_ist_isoformat(new_coupon.valid_from),
+                "valid_until": to_ist_isoformat(new_coupon.valid_until),
                 "status": new_coupon.status.value
             }
         }

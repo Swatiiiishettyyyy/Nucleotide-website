@@ -198,6 +198,7 @@ class MemberData(BaseModel):
 class MemberResponse(BaseModel):
     status: str
     message: str
+    data: Optional[MemberData] = None
 
 class MemberListResponse(BaseModel):
     status: str

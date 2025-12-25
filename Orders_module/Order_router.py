@@ -3,6 +3,7 @@ Order router - handles order creation, payment, and tracking.
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from typing import List, Optional
 from collections import defaultdict
 import uuid
@@ -11,7 +12,7 @@ import json
 
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user, get_current_member
-from Login_module.Utils.datetime_utils import now_ist
+from Login_module.Utils.datetime_utils import now_ist, to_ist_isoformat
 from Login_module.User.user_model import User
 from Member_module.Member_model import Member
 from .Order_schema import (
@@ -37,8 +38,8 @@ from .Order_crud import (
     mark_payment_failed_or_cancelled
 )
 from .razorpay_service import create_razorpay_order, verify_webhook_signature, get_payment_details
-from .Order_model import OrderStatus, PaymentStatus, Order
-from Cart_module.Cart_model import CartItem
+from .Order_model import OrderStatus, PaymentStatus, PaymentMethod, Order, Payment, PaymentTransition, WebhookLog
+from Cart_module.Cart_model import CartItem, Cart
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -108,24 +109,92 @@ def create_order(
     Note: user_id is automatically fetched from the access token (current_user)
     """
     try:
-        # Validate cart_id exists and belongs to authenticated user (exclude deleted items)
-        cart_reference = db.query(CartItem).filter(
-            CartItem.id == request_data.cart_id,
-            CartItem.user_id == current_user.id,
-            CartItem.is_deleted == False
+        # Get user's active cart first
+        cart = db.query(Cart).filter(
+            Cart.user_id == current_user.id,
+            Cart.is_active == True
         ).first()
         
-        if not cart_reference:
+        # Get all cart items for the user (exclude deleted items)
+        # First try via cart_id if cart exists, otherwise fallback to user_id
+        if cart:
+            cart_items = db.query(CartItem).filter(
+                CartItem.cart_id == cart.id,
+                CartItem.is_deleted == False  # Exclude deleted/cleared items
+            ).order_by(CartItem.group_id, CartItem.created_at).all()
+        else:
+            # Fallback for backward compatibility - query by user_id
+            cart_items = db.query(CartItem).filter(
+                CartItem.user_id == current_user.id,
+                CartItem.is_deleted == False  # Exclude deleted/cleared items
+            ).order_by(CartItem.group_id, CartItem.created_at).all()
+            
+            # If cart doesn't exist but user has items, create cart
+            if cart_items:
+                # Get all active carts for this user
+                active_carts = db.query(Cart).filter(
+                    Cart.user_id == current_user.id,
+                    Cart.is_active == True
+                ).all()
+                
+                if len(active_carts) > 1:
+                    # Multiple active carts - deactivate all except the first
+                    for c in active_carts[1:]:
+                        c.is_active = False
+                    cart = active_carts[0]
+                elif len(active_carts) == 1:
+                    cart = active_carts[0]
+                else:
+                    # No active cart exists - create new one
+                    cart = Cart(
+                        user_id=current_user.id,
+                        is_active=True
+                    )
+                    db.add(cart)
+                    db.flush()
+                    db.refresh(cart)
+                
+                # Update items to use the new cart_id
+                for item in cart_items:
+                    if not item.cart_id:
+                        item.cart_id = cart.id
+                db.flush()  # Flush - will be committed with order creation
+        
+        # Validate that cart has items (more lenient - checks if ANY active items exist)
+        # The cart_id in request is just a reference, we use all active cart items
+        if not cart_items:
+            # Check if the specific cart_item_id exists but is deleted (helpful error message)
+            if request_data.cart_id:
+                deleted_item = db.query(CartItem).filter(
+                    CartItem.id == request_data.cart_id,
+                    CartItem.user_id == current_user.id
+                ).first()
+                
+                if deleted_item:
+                    # Item exists but is soft-deleted (cart was cleared)
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Cart item has been removed. Your cart may have been cleared. Please refresh your cart and try again."
+                    )
+            
+            # No active cart items found
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Cart item not found or does not belong to you"
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cart is empty. Add items to cart before creating order."
             )
         
-        # Get all cart items for the user (exclude deleted items)
-        cart_items = db.query(CartItem).filter(
-            CartItem.user_id == current_user.id,
-            CartItem.is_deleted == False  # Exclude deleted/cleared items
-        ).order_by(CartItem.group_id, CartItem.created_at).all()
+        # Optional: Validate that the provided cart_item_id exists in the active cart items
+        # This is just a sanity check - if it doesn't match, we still proceed with all active items
+        if request_data.cart_id:
+            cart_item_ids = [item.id for item in cart_items]
+            if request_data.cart_id not in cart_item_ids:
+                # The provided cart_item_id is not in current active items
+                # This can happen if cart was cleared and new items added
+                # We'll proceed anyway with all active items (more lenient approach)
+                logger.warning(
+                    f"Cart item ID {request_data.cart_id} not found in active cart items for user {current_user.id}. "
+                    f"Proceeding with all active cart items ({len(cart_items)} items)."
+                )
         
         if not cart_items:
             raise HTTPException(
@@ -211,32 +280,129 @@ def create_order(
         total_amount = subtotal + delivery_charge - coupon_discount
         total_amount = max(0.0, total_amount)  # Ensure not negative
 
-        # Create Razorpay order first
-        razorpay_order = create_razorpay_order(
-            amount=total_amount,
-            currency="INR",
-            receipt=f"order_{current_user.id}_{uuid.uuid4().hex[:8]}",
-            notes={
-                "user_id": str(current_user.id),
-                "address_id": str(primary_address_id) if primary_address_id else "None"
-            }
-        )
-        
         # Get all cart item IDs
         cart_item_ids = [item.id for item in cart_items]
         
-        # Create order in database
-        placed_by_member_id = current_member.id if current_member else None
-        order = create_order_from_cart(
+        # Check for existing order for retry payment scenario
+        from .Order_crud import find_existing_order_for_retry
+        existing_order = find_existing_order_for_retry(
             db=db,
             user_id=current_user.id,
-            address_id=primary_address_id,
-            cart_item_ids=cart_item_ids,
-            razorpay_order_id=razorpay_order.get("id"),
-            placed_by_member_id=placed_by_member_id
+            cart_item_ids=cart_item_ids
         )
         
-        logger.info(f"Order {order.order_number} created for user {current_user.id}")
+        if existing_order:
+            # Reuse existing order - update razorpay_order_id and reset statuses
+            # Don't create new order, just update the existing one
+            
+            # Capture previous status before updating
+            previous_order_status = existing_order.order_status
+            previous_payment_status = existing_order.payment_status
+            
+            # Create new Razorpay order
+            razorpay_order = create_razorpay_order(
+                amount=total_amount,
+                currency="INR",
+                receipt=f"order_{current_user.id}_{uuid.uuid4().hex[:8]}",
+                notes={
+                    "user_id": str(current_user.id),
+                    "address_id": str(primary_address_id) if primary_address_id else "None",
+                    "order_number": existing_order.order_number,
+                    "retry": "true"
+                }
+            )
+            
+            # Update existing order
+            existing_order.order_status = OrderStatus.PENDING_PAYMENT
+            existing_order.payment_status = PaymentStatus.PENDING  # Denormalized
+            existing_order.status_updated_at = now_ist()
+            existing_order.updated_at = now_ist()
+            
+            # Create new payment record for retry
+            from .Order_model import Payment, PaymentTransition
+            new_payment = Payment(
+                order_id=existing_order.id,
+                payment_method=PaymentMethod.RAZORPAY,
+                payment_status=PaymentStatus.PENDING,
+                razorpay_order_id=razorpay_order.get("id"),
+                amount=total_amount,
+                currency="INR",
+                notes=f"Payment retry for order {existing_order.order_number}. Previous status: {previous_payment_status.value}"
+            )
+            db.add(new_payment)
+            db.flush()
+            
+            # Create payment transition
+            payment_transition = PaymentTransition(
+                payment_id=new_payment.id,
+                from_status=None,  # New payment attempt
+                to_status=PaymentStatus.PENDING,
+                transition_reason=f"Payment retry initiated. Previous payment status: {previous_payment_status.value}",
+                triggered_by="system"
+            )
+            db.add(payment_transition)
+            
+            # Update order items status
+            item_previous_statuses = {}
+            for item in existing_order.items:
+                item_previous_statuses[item.id] = item.order_status
+                item.order_status = OrderStatus.PENDING_PAYMENT
+                item.status_updated_at = now_ist()
+            
+            # Create status history for retry
+            from .Order_model import OrderStatusHistory
+            status_history = OrderStatusHistory(
+                order_id=existing_order.id,
+                status=OrderStatus.PENDING_PAYMENT,
+                previous_status=previous_order_status,
+                notes=f"Order retry - new Razorpay order created. Previous status: {previous_order_status.value}, Previous payment status: {previous_payment_status.value}. Payment retry initiated.",
+                changed_by="system"
+            )
+            db.add(status_history)
+            
+            # Create status history for each order item
+            for item in existing_order.items:
+                item_previous_status = item_previous_statuses.get(item.id, OrderStatus.PENDING_PAYMENT)
+                item_status_history = OrderStatusHistory(
+                    order_id=existing_order.id,
+                    order_item_id=item.id,
+                    status=OrderStatus.PENDING_PAYMENT,
+                    previous_status=item_previous_status,
+                    notes="Order item retry - payment retry initiated.",
+                    changed_by="system"
+                )
+                db.add(item_status_history)
+            
+            db.commit()
+            db.refresh(existing_order)
+            
+            logger.info(f"Order {existing_order.order_number} updated for retry payment (user {current_user.id})")
+            order = existing_order
+        else:
+            # No existing order found - create new order
+            # Create Razorpay order first
+            razorpay_order = create_razorpay_order(
+                amount=total_amount,
+                currency="INR",
+                receipt=f"order_{current_user.id}_{uuid.uuid4().hex[:8]}",
+                notes={
+                    "user_id": str(current_user.id),
+                    "address_id": str(primary_address_id) if primary_address_id else "None"
+                }
+            )
+            
+            # Create order in database
+            placed_by_member_id = current_member.id if current_member else None
+            order = create_order_from_cart(
+                db=db,
+                user_id=current_user.id,
+                address_id=primary_address_id,
+                cart_item_ids=cart_item_ids,
+                razorpay_order_id=razorpay_order.get("id"),
+                placed_by_member_id=placed_by_member_id
+            )
+            
+            logger.info(f"Order {order.order_number} created for user {current_user.id}")
         
         return RazorpayOrderResponse(
             order_id=order.id,
@@ -246,6 +412,10 @@ def create_order(
             currency="INR"
         )
     
+    except HTTPException:
+        # Re-raise HTTPException to preserve original status code (404, 400, etc.)
+        db.rollback()
+        raise
     except ValueError as e:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
@@ -268,7 +438,7 @@ def verify_payment(
     """
     Verify Razorpay payment from frontend.
     Provides immediate feedback but does NOT confirm order.
-    Only sets payment_status = SUCCESS (temporary).
+    Sets payment_status = PROCESSING and order_status = PROCESSING (frontend verified, waiting for webhook).
     Order confirmation happens via webhook only.
     Cart clearing happens via webhook only.
     """
@@ -299,7 +469,7 @@ def verify_payment(
                 order_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status)
             )
         
-        # Verify payment (frontend verification - sets SUCCESS, not VERIFIED)
+        # Verify payment (frontend verification - sets PROCESSING, waiting for webhook)
         # Note: verify_payment_frontend commits the transaction internally
         from .Order_crud import verify_payment_frontend
         order = verify_payment_frontend(
@@ -421,18 +591,7 @@ async def razorpay_webhook(
                 detail="Missing webhook signature"
             )
         
-        # Verify webhook signature
-        from .razorpay_service import verify_webhook_signature
-        is_valid = verify_webhook_signature(body_str, webhook_signature)
-        
-        if not is_valid:
-            logger.error("Invalid webhook signature")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid webhook signature"
-            )
-        
-        # Parse webhook payload
+        # Parse webhook payload first (before signature verification for logging)
         try:
             webhook_data = json.loads(body_str)
         except json.JSONDecodeError as e:
@@ -444,6 +603,7 @@ async def razorpay_webhook(
         
         # Extract event type and payload
         event_type = webhook_data.get("event")
+        event_id = webhook_data.get("id")  # Razorpay event ID
         event_payload = webhook_data.get("payload", {}).get("payment", {})
         entity = webhook_data.get("payload", {}).get("payment", {}).get("entity", {})
         
@@ -454,7 +614,34 @@ async def razorpay_webhook(
                 detail="Missing event type"
             )
         
-        logger.info(f"Received webhook event: {event_type}")
+        # Verify webhook signature
+        from .razorpay_service import verify_webhook_signature
+        is_valid = verify_webhook_signature(body_str, webhook_signature)
+        
+        # Log webhook event (before processing)
+        webhook_log = WebhookLog(
+            event_type=event_type,
+            event_id=event_id,
+            payload=webhook_data,
+            signature_valid=is_valid,
+            signature_verification_error=None if is_valid else "Invalid webhook signature",
+            processed=False
+        )
+        db.add(webhook_log)
+        db.flush()  # Get webhook_log.id
+        
+        if not is_valid:
+            webhook_log.processed = True
+            webhook_log.processing_error = "Invalid webhook signature"
+            webhook_log.processed_at = now_ist()
+            db.commit()
+            logger.error("Invalid webhook signature")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid webhook signature"
+            )
+        
+        logger.info(f"Received webhook event: {event_type} (event_id: {event_id})")
         
         # Handle different event types
         if event_type == "payment.captured":
@@ -469,15 +656,46 @@ async def razorpay_webhook(
                     detail="Missing payment_id or order_id in webhook payload"
                 )
             
-            # Find order by razorpay_order_id
-            order = db.query(Order).filter(Order.razorpay_order_id == razorpay_order_id).first()
+            # Extract payment method details from Razorpay payload
+            from .Order_crud import extract_payment_method_from_razorpay_payload
+            payment_method_details, payment_method_metadata = extract_payment_method_from_razorpay_payload(entity)
             
-            if not order:
-                logger.warning(f"Order not found for Razorpay order ID: {razorpay_order_id}")
-                # Return 200 OK so Razorpay doesn't retry (order doesn't exist)
+            # Find payment by razorpay_order_id
+            payment = db.query(Payment).filter(
+                Payment.razorpay_order_id == razorpay_order_id
+            ).order_by(Payment.created_at.desc()).first()
+            
+            if not payment:
+                logger.warning(f"Payment not found for Razorpay order ID: {razorpay_order_id}")
+                # Update webhook log
+                webhook_log.processed = True
+                webhook_log.processing_error = f"Payment not found for Razorpay order ID: {razorpay_order_id}"
+                webhook_log.processed_at = now_ist()
+                db.commit()
+                # Return 200 OK so Razorpay doesn't retry (payment doesn't exist)
                 return WebhookResponse(
                     status="success",
-                    message=f"Order not found for Razorpay order ID: {razorpay_order_id}"
+                    message=f"Payment not found for Razorpay order ID: {razorpay_order_id}"
+                )
+            
+            # Update webhook log with payment info
+            webhook_log.payment_id = payment.id
+            webhook_log.order_id = payment.order_id
+            webhook_log.razorpay_order_id = razorpay_order_id
+            webhook_log.razorpay_payment_id = razorpay_payment_id
+            
+            # Get order
+            order = db.query(Order).filter(Order.id == payment.order_id).first()
+            
+            if not order:
+                logger.warning(f"Order not found for payment ID: {payment.id}")
+                webhook_log.processed = True
+                webhook_log.processing_error = f"Order not found for payment ID: {payment.id}"
+                webhook_log.processed_at = now_ist()
+                db.commit()
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order not found for payment ID: {payment.id}"
                 )
             
             # Confirm order from webhook (idempotent)
@@ -486,8 +704,16 @@ async def razorpay_webhook(
                     db=db,
                     order_id=order.id,
                     razorpay_order_id=razorpay_order_id,
-                    razorpay_payment_id=razorpay_payment_id
+                    razorpay_payment_id=razorpay_payment_id,
+                    webhook_log_id=webhook_log.id,
+                    payment_method_details=payment_method_details,
+                    payment_method_metadata=payment_method_metadata
                 )
+                
+                # Update webhook log as processed
+                webhook_log.processed = True
+                webhook_log.processed_at = now_ist()
+                db.commit()
                 
                 logger.info(f"Order {order.order_number} confirmed by webhook (payment.captured)")
                 
@@ -499,13 +725,21 @@ async def razorpay_webhook(
             except ValueError as e:
                 # Order already confirmed or other validation error
                 logger.info(f"Webhook confirmation skipped: {str(e)}")
+                # Update webhook log as processed (idempotent)
+                webhook_log.processed = True
+                webhook_log.processing_error = str(e)
+                webhook_log.processed_at = now_ist()
+                db.commit()
                 # Return 200 OK (idempotent - already processed)
                 return WebhookResponse(
                     status="success",
                     message=str(e)
                 )
             except Exception as e:
-                # Internal error - return 500 so Razorpay retries
+                # Internal error - update webhook log and return 500 so Razorpay retries
+                webhook_log.processed = False
+                webhook_log.processing_error = str(e)
+                db.commit()
                 logger.error(f"Error confirming order from webhook: {e}", exc_info=True)
                 db.rollback()
                 raise HTTPException(
@@ -525,62 +759,73 @@ async def razorpay_webhook(
                     detail="Missing payment_id or order_id in webhook payload"
                 )
             
-            # Find order by razorpay_order_id
-            order = db.query(Order).filter(Order.razorpay_order_id == razorpay_order_id).first()
+            # Extract payment method details from Razorpay payload (for failed payments too)
+            from .Order_crud import extract_payment_method_from_razorpay_payload
+            payment_method_details, payment_method_metadata = extract_payment_method_from_razorpay_payload(entity)
             
-            if not order:
-                logger.warning(f"Order not found for Razorpay order ID: {razorpay_order_id}")
+            # Find payment by razorpay_order_id
+            payment = db.query(Payment).filter(
+                Payment.razorpay_order_id == razorpay_order_id
+            ).order_by(Payment.created_at.desc()).first()
+            
+            if not payment:
+                logger.warning(f"Payment not found for Razorpay order ID: {razorpay_order_id}")
+                webhook_log.processed = True
+                webhook_log.processing_error = f"Payment not found for Razorpay order ID: {razorpay_order_id}"
+                webhook_log.processed_at = now_ist()
+                db.commit()
                 return WebhookResponse(
                     status="success",
-                    message=f"Order not found for Razorpay order ID: {razorpay_order_id}"
+                    message=f"Payment not found for Razorpay order ID: {razorpay_order_id}"
+                )
+            
+            # Update webhook log with payment info
+            webhook_log.payment_id = payment.id
+            webhook_log.order_id = payment.order_id
+            webhook_log.razorpay_order_id = razorpay_order_id
+            webhook_log.razorpay_payment_id = razorpay_payment_id
+            
+            # Get order
+            order = db.query(Order).filter(Order.id == payment.order_id).first()
+            
+            if not order:
+                logger.warning(f"Order not found for payment ID: {payment.id}")
+                webhook_log.processed = True
+                webhook_log.processing_error = f"Order not found for payment ID: {payment.id}"
+                webhook_log.processed_at = now_ist()
+                db.commit()
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order not found for payment ID: {payment.id}"
                 )
             
             # Only update if order is not already confirmed
             # Never downgrade a confirmed order
             if order.order_status == OrderStatus.CONFIRMED:
                 logger.warning(f"Received payment.failed webhook for confirmed order {order.order_number}. Ignoring (order already confirmed).")
+                webhook_log.processed = True
+                webhook_log.processing_error = f"Order {order.order_number} already confirmed. Payment failure event ignored."
+                webhook_log.processed_at = now_ist()
+                db.commit()
                 return WebhookResponse(
                     status="success",
                     message=f"Order {order.order_number} already confirmed. Payment failure event ignored."
                 )
             
-            # Update payment status to failed
+            # Update payment status to failed using mark_payment_failed_or_cancelled
             try:
-                previous_payment_status = order.payment_status
-                previous_order_status = order.order_status
-                
-                order.payment_status = PaymentStatus.FAILED
-                order.order_status = OrderStatus.PAYMENT_FAILED
-                order.status_updated_at = now_ist()
-                
-                # Update order items status
-                for item in order.items:
-                    item.order_status = OrderStatus.PAYMENT_FAILED
-                    item.status_updated_at = now_ist()
-                
-                # Create status history
-                from .Order_model import OrderStatusHistory
-                status_history = OrderStatusHistory(
+                order = mark_payment_failed_or_cancelled(
+                    db=db,
                     order_id=order.id,
-                    status=OrderStatus.PAYMENT_FAILED,
-                    previous_status=previous_order_status,
-                    notes=f"Payment failed (webhook event: payment.failed). Payment status set to FAILED. Order status set to PAYMENT_FAILED. Previous payment status: {previous_payment_status.value}",
-                    changed_by="system"
+                    payment_status=PaymentStatus.FAILED,
+                    reason=f"Payment failed (webhook event: payment.failed). Event ID: {event_id}",
+                    payment_method_details=payment_method_details,
+                    payment_method_metadata=payment_method_metadata
                 )
-                db.add(status_history)
                 
-                # Create status history for each order item
-                for item in order.items:
-                    item_status_history = OrderStatusHistory(
-                        order_id=order.id,
-                        order_item_id=item.id,
-                        status=OrderStatus.PAYMENT_FAILED,
-                        previous_status=previous_order_status,
-                        notes="Payment failed. Order item payment failed.",
-                        changed_by="system"
-                    )
-                    db.add(item_status_history)
-                
+                # Update webhook log as processed
+                webhook_log.processed = True
+                webhook_log.processed_at = now_ist()
                 db.commit()
                 
                 logger.info(f"Order {order.order_number} marked as failed by webhook")
@@ -591,6 +836,9 @@ async def razorpay_webhook(
                 )
                 
             except Exception as e:
+                webhook_log.processed = False
+                webhook_log.processing_error = str(e)
+                db.commit()
                 logger.error(f"Error processing payment.failed webhook: {e}", exc_info=True)
                 db.rollback()
                 raise HTTPException(
@@ -605,31 +853,65 @@ async def razorpay_webhook(
             
             if not razorpay_order_id:
                 logger.error(f"Missing order_id in order.paid webhook: {webhook_data}")
+                webhook_log.processed = True
+                webhook_log.processing_error = "Missing order_id in webhook payload"
+                webhook_log.processed_at = now_ist()
+                db.commit()
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Missing order_id in webhook payload"
                 )
             
-            # Find order by razorpay_order_id
-            order = db.query(Order).filter(Order.razorpay_order_id == razorpay_order_id).first()
+            # Find payment by razorpay_order_id
+            payment = db.query(Payment).filter(
+                Payment.razorpay_order_id == razorpay_order_id
+            ).order_by(Payment.created_at.desc()).first()
             
-            if not order:
-                logger.warning(f"Order not found for Razorpay order ID: {razorpay_order_id}")
+            if not payment:
+                logger.warning(f"Payment not found for Razorpay order ID: {razorpay_order_id}")
+                webhook_log.processed = True
+                webhook_log.processing_error = f"Payment not found for Razorpay order ID: {razorpay_order_id}"
+                webhook_log.processed_at = now_ist()
+                db.commit()
                 return WebhookResponse(
                     status="success",
-                    message=f"Order not found for Razorpay order ID: {razorpay_order_id}"
+                    message=f"Payment not found for Razorpay order ID: {razorpay_order_id}"
+                )
+            
+            # Update webhook log with payment info
+            webhook_log.payment_id = payment.id
+            webhook_log.order_id = payment.order_id
+            webhook_log.razorpay_order_id = razorpay_order_id
+            
+            # Get order
+            order = db.query(Order).filter(Order.id == payment.order_id).first()
+            
+            if not order:
+                logger.warning(f"Order not found for payment ID: {payment.id}")
+                webhook_log.processed = True
+                webhook_log.processing_error = f"Order not found for payment ID: {payment.id}"
+                webhook_log.processed_at = now_ist()
+                db.commit()
+                return WebhookResponse(
+                    status="success",
+                    message=f"Order not found for payment ID: {payment.id}"
                 )
             
             # Get payment ID from order entity
             payments = order_entity.get("payments", [])
             if not payments:
                 logger.warning(f"No payments found in order.paid webhook for order {order.order_number}")
+                webhook_log.processed = True
+                webhook_log.processing_error = f"No payment ID found in webhook for order {order.order_number}"
+                webhook_log.processed_at = now_ist()
+                db.commit()
                 return WebhookResponse(
                     status="success",
                     message=f"No payment ID found in webhook for order {order.order_number}"
                 )
             
             razorpay_payment_id = payments[0]  # Use first payment
+            webhook_log.razorpay_payment_id = razorpay_payment_id
             
             # Confirm order from webhook (idempotent)
             try:
@@ -637,8 +919,14 @@ async def razorpay_webhook(
                     db=db,
                     order_id=order.id,
                     razorpay_order_id=razorpay_order_id,
-                    razorpay_payment_id=razorpay_payment_id
+                    razorpay_payment_id=razorpay_payment_id,
+                    webhook_log_id=webhook_log.id
                 )
+                
+                # Update webhook log as processed
+                webhook_log.processed = True
+                webhook_log.processed_at = now_ist()
+                db.commit()
                 
                 logger.info(f"Order {order.order_number} confirmed by webhook (order.paid)")
                 
@@ -650,13 +938,21 @@ async def razorpay_webhook(
             except ValueError as e:
                 # Order already confirmed or other validation error
                 logger.info(f"Webhook confirmation skipped: {str(e)}")
+                # Update webhook log as processed (idempotent)
+                webhook_log.processed = True
+                webhook_log.processing_error = str(e)
+                webhook_log.processed_at = now_ist()
+                db.commit()
                 # Return 200 OK (idempotent - already processed)
                 return WebhookResponse(
                     status="success",
                     message=str(e)
                 )
             except Exception as e:
-                # Internal error - return 500 so Razorpay retries
+                # Internal error - update webhook log and return 500 so Razorpay retries
+                webhook_log.processed = False
+                webhook_log.processing_error = str(e)
+                db.commit()
                 logger.error(f"Error confirming order from webhook: {e}", exc_info=True)
                 db.rollback()
                 raise HTTPException(
@@ -667,6 +963,10 @@ async def razorpay_webhook(
         else:
             # Unhandled event type - log and return success (don't retry)
             logger.info(f"Unhandled webhook event type: {event_type}")
+            webhook_log.processed = True
+            webhook_log.processing_error = f"Event {event_type} received but not processed"
+            webhook_log.processed_at = now_ist()
+            db.commit()
             return WebhookResponse(
                 status="success",
                 message=f"Event {event_type} received but not processed"
@@ -685,15 +985,36 @@ async def razorpay_webhook(
         )
 
 
-@router.get("/list", response_model=List[OrderResponse])
+@router.get("/list")
 def get_orders(
     request: Request,
     current_user: User = Depends(get_current_user),
     current_member: Optional[Member] = Depends(get_current_member),
     db: Session = Depends(get_db)
 ):
-    """Get all orders for current user. If a member is selected, shows only orders where that member appears."""
-    orders = get_user_orders(db, current_user.id)
+    """
+    Get all confirmed orders for current user (CONFIRMED status and later).
+    If a member is selected, shows only orders where that member appears.
+    Returns "No orders yet" message if no confirmed orders exist.
+    """
+    # Get all orders for user with eager loading of payments to avoid N+1 queries
+    from sqlalchemy.orm import joinedload
+    all_orders = db.query(Order).options(joinedload(Order.payments)).filter(
+        Order.user_id == current_user.id
+    ).order_by(Order.created_at.desc()).unique().all()
+    
+    # Filter to only show CONFIRMED and later statuses
+    POST_CONFIRMATION_STATUSES = {
+        OrderStatus.CONFIRMED,
+        OrderStatus.SCHEDULED,
+        OrderStatus.SCHEDULE_CONFIRMED_BY_LAB,
+        OrderStatus.SAMPLE_COLLECTED,
+        OrderStatus.SAMPLE_RECEIVED_BY_LAB,
+        OrderStatus.TESTING_IN_PROGRESS,
+        OrderStatus.REPORT_READY
+    }
+    
+    orders = [order for order in all_orders if order.order_status in POST_CONFIRMATION_STATUSES]
     
     result = []
     for order in orders:
@@ -853,7 +1174,7 @@ def get_orders(
                         "relation": member.relation.value if member and hasattr(member.relation, 'value') else (str(member.relation) if member else None),
                         "age": member.age if member else None,
                         "gender": member.gender if member else None,
-                        "dob": member.dob.isoformat() if member and member.dob else None,
+                        "dob": to_ist_isoformat(member.dob) if member and member.dob else None,
                         "mobile": member.mobile if member else None
                     }
                     
@@ -876,8 +1197,8 @@ def get_orders(
                     "quantity": item.quantity,
                     "unit_price": item.unit_price,
                     "order_status": item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status),
-                    "status_updated_at": item.status_updated_at.isoformat() if item.status_updated_at else None,
-                    "scheduled_date": item.scheduled_date.isoformat() if item.scheduled_date else None,
+                    "status_updated_at": to_ist_isoformat(item.status_updated_at),
+                    "scheduled_date": to_ist_isoformat(item.scheduled_date),
                     "technician_name": item.technician_name,
                     "technician_contact": item.technician_contact
                 })
@@ -911,6 +1232,12 @@ def get_orders(
         if not order_items:
             continue
         
+        # Get latest payment record for razorpay_order_id
+        latest_payment = db.query(Payment).filter(
+            Payment.order_id == order.id
+        ).order_by(Payment.created_at.desc()).first()
+        razorpay_order_id = latest_payment.razorpay_order_id if latest_payment else None
+        
         result.append({
             "order_number": order.order_number,
             "user_id": order.user_id,
@@ -923,10 +1250,18 @@ def get_orders(
             "total_amount": order.total_amount,
             "payment_status": order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status),
             "order_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
-            "razorpay_order_id": order.razorpay_order_id,
-            "created_at": order.created_at.isoformat() if order.created_at else None,
+            "razorpay_order_id": razorpay_order_id,
+            "created_at": to_ist_isoformat(order.created_at),
             "items": order_items
         })
+    
+    # If no confirmed orders found, return message instead of empty list
+    if not result:
+        return {
+            "status": "success",
+            "message": "No orders yet",
+            "data": []
+        }
     
     return result
 
@@ -1002,7 +1337,7 @@ def get_orders(
 #                     relation=relation_val,
 #                     age=member_obj.age if member_obj else None,
 #                     gender=member_obj.gender if member_obj else None,
-#                     dob=member_obj.dob.isoformat() if member_obj and member_obj.dob else None,
+#                     dob=to_ist_isoformat(member_obj.dob) if member_obj and member_obj.dob else None,
 #                     mobile=member_obj.mobile if member_obj else None
 #                 )
 #             
@@ -1046,7 +1381,7 @@ def get_orders(
 #                         "status": hist.status.value,
 #                         "previous_status": hist.previous_status.value if hist.previous_status else None,
 #                         "notes": hist.notes,
-#                         "created_at": hist.created_at.isoformat() if hist.created_at else None
+#                         "created_at": to_ist_isoformat(hist.created_at)
 #                     })
 #             
 #             # Sort status history by created_at (most recent first) for display
@@ -1123,7 +1458,12 @@ def get_order(
     Allows viewing orders with any payment status (pending/failed/verified) so users can check their order status.
     """
     # Allow viewing orders with any payment status so users can see pending/failed orders
-    order = get_order_by_number(db, order_number, user_id=current_user.id, include_all_payment_statuses=True)
+    # Eager load payments to avoid N+1 queries
+    from sqlalchemy.orm import joinedload
+    order = db.query(Order).options(joinedload(Order.payments)).filter(
+        Order.order_number == order_number,
+        Order.user_id == current_user.id
+    ).first()
     
     if not order:
         raise HTTPException(
@@ -1287,7 +1627,7 @@ def get_order(
                     "relation": member.relation.value if member and hasattr(member.relation, 'value') else (str(member.relation) if member else None),
                     "age": member.age if member else None,
                     "gender": member.gender if member else None,
-                    "dob": member.dob.isoformat() if member and member.dob else None,
+                    "dob": to_ist_isoformat(member.dob) if member and member.dob else None,
                     "mobile": member.mobile if member else None
                 }
                 
@@ -1310,8 +1650,8 @@ def get_order(
                 "quantity": item.quantity,
                 "unit_price": item.unit_price,
                 "order_status": item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status),
-                "status_updated_at": item.status_updated_at.isoformat() if item.status_updated_at else None,
-                "scheduled_date": item.scheduled_date.isoformat() if item.scheduled_date else None,
+                "status_updated_at": to_ist_isoformat(item.status_updated_at),
+                "scheduled_date": to_ist_isoformat(item.scheduled_date),
                 "technician_name": item.technician_name,
                 "technician_contact": item.technician_contact
             })
@@ -1348,8 +1688,26 @@ def get_order(
             detail="No order items found for the selected member in this order"
         )
     
+    # Get latest payment record for razorpay_order_id (from eager-loaded relationship)
+    latest_payment = max(order.payments, key=lambda p: p.created_at) if order.payments else None
+    razorpay_order_id = latest_payment.razorpay_order_id if latest_payment else None
+    
+    # Get payment timestamps
+    payment_confirmed_at = None
+    payment_failed_at = None
+    if order.payments:
+        # Find confirmed payment (payment_date is set when payment is confirmed)
+        confirmed_payment = next((p for p in order.payments if p.payment_status == PaymentStatus.COMPLETED and p.payment_date), None)
+        if confirmed_payment:
+            payment_confirmed_at = confirmed_payment.payment_date
+        
+        # Find failed payment (updated_at when status is FAILED)
+        failed_payment = next((p for p in order.payments if p.payment_status == PaymentStatus.FAILED and p.updated_at), None)
+        if failed_payment:
+            payment_failed_at = failed_payment.updated_at
+    
+    # Return OrderResponse directly (not wrapped in status/message/data)
     return {
-        "order_id": order.id,
         "order_number": order.order_number,
         "user_id": order.user_id,
         "address_id": order.address_id,
@@ -1359,15 +1717,18 @@ def get_order(
         "coupon_discount": order.coupon_discount,
         "delivery_charge": order.delivery_charge,
         "total_amount": order.total_amount,
-        "payment_status": order.payment_status.value,
-        "order_status": order.order_status.value,
-        "razorpay_order_id": order.razorpay_order_id,
-        "created_at": order.created_at,
+        "payment_status": order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status),
+        "order_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
+        "razorpay_order_id": razorpay_order_id if razorpay_order_id else None,
+        "created_at": to_ist_isoformat(order.created_at),
+        "status_updated_at": to_ist_isoformat(order.status_updated_at),
+        "payment_confirmed_at": to_ist_isoformat(payment_confirmed_at),
+        "payment_failed_at": to_ist_isoformat(payment_failed_at),
         "items": order_items
     }
 
 
-@router.get("/{order_number}/tracking", response_model=OrderTrackingResponse)
+@router.get("/{order_number}/tracking")
 def get_order_tracking(
     order_number: str,
     request: Request,
@@ -1377,19 +1738,48 @@ def get_order_tracking(
 ):
     """
     Get order tracking information for a specific order by order number.
+    Only works for orders with CONFIRMED status and later (SCHEDULED, SAMPLE_COLLECTED, etc.).
     If a member is selected, shows only order items for that member.
-    Returns comprehensive order details with order items grouped by product.
+    Returns "No orders for tracking" if order is not confirmed yet.
+    Shows message "The order has been confirmed and processing has begun" when order reaches CONFIRMED.
     """
     from .Order_schema import OrderItemTracking, MemberDetails, AddressDetails
     from .Order_model import OrderStatus
     
-    # Verify order exists and belongs to user
-    order = get_order_by_number(db, order_number, user_id=current_user.id)
+    # Verify order exists and belongs to user (allow all payment statuses to check order status)
+    # Eager load payments to avoid N+1 queries
+    from sqlalchemy.orm import joinedload
+    order = db.query(Order).options(joinedload(Order.payments)).filter(
+        Order.order_number == order_number,
+        Order.user_id == current_user.id
+    ).first()
+    
     if not order:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Order not found"
-        )
+        return {
+            "status": "success",
+            "message": "No orders for tracking",
+            "data": None
+        }
+    
+    # Check if order is confirmed or later (tracking only available for confirmed orders)
+    POST_CONFIRMATION_STATUSES = {
+        OrderStatus.CONFIRMED,
+        OrderStatus.SCHEDULED,
+        OrderStatus.SCHEDULE_CONFIRMED_BY_LAB,
+        OrderStatus.SAMPLE_COLLECTED,
+        OrderStatus.SAMPLE_RECEIVED_BY_LAB,
+        OrderStatus.TESTING_IN_PROGRESS,
+        OrderStatus.REPORT_READY
+    }
+    
+    if order.order_status not in POST_CONFIRMATION_STATUSES:
+        return {
+            "status": "success",
+            "message": "No orders for tracking",
+            "data": None,
+            "order_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
+            "payment_status": order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status)
+        }
     
     # Filter order items by member if a member is selected
     # If member placed the order, show all items; otherwise show only items for that member
@@ -1405,10 +1795,11 @@ def get_order_tracking(
             # Member didn't place the order, show only items for that member
             order_items_to_process = [item for item in order.items if item.member_id == current_member.id]
             if not order_items_to_process:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="No order items found for the selected member in this order"
-                )
+                return {
+                    "status": "success",
+                    "message": "No orders for tracking",
+                    "data": None
+                }
     
     # Build order items list - clean mapping of member, address, product, and status
     order_items_list = []
@@ -1463,7 +1854,7 @@ def get_order_tracking(
                 relation=relation_val,
                 age=member_obj.age if member_obj else None,
                 gender=member_obj.gender if member_obj else None,
-                dob=member_obj.dob.isoformat() if member_obj and member_obj.dob else None,
+                dob=to_ist_isoformat(member_obj.dob) if member_obj and member_obj.dob else None,
                 mobile=member_obj.mobile if member_obj else None
             )
         
@@ -1507,7 +1898,7 @@ def get_order_tracking(
                     "status": hist.status.value,
                     "previous_status": hist.previous_status.value if hist.previous_status else None,
                     "notes": hist.notes,
-                    "created_at": hist.created_at.isoformat() if hist.created_at else None
+                    "created_at": to_ist_isoformat(hist.created_at)
                 })
         
         # Sort status history by created_at (most recent first) for display
@@ -1529,11 +1920,11 @@ def get_order_tracking(
             address=address,
             current_status=current_status,
             previous_status=previous_status,
-            status_updated_at=item.status_updated_at.isoformat() if item.status_updated_at else None,
-            scheduled_date=item.scheduled_date.isoformat() if item.scheduled_date else None,
+            status_updated_at=to_ist_isoformat(item.status_updated_at),
+            scheduled_date=to_ist_isoformat(item.scheduled_date),
             technician_name=item.technician_name,
             technician_contact=item.technician_contact,
-            created_at=item.created_at.isoformat() if item.created_at else None,
+            created_at=to_ist_isoformat(item.created_at),
             status_history=item_status_history
         ))
     
@@ -1552,25 +1943,51 @@ def get_order_tracking(
     
     product_discount = max(0.0, total_product_prices - order.subtotal) if order.subtotal else None
     
-    return OrderTrackingResponse(
-        order_id=order.id,
-        order_number=order.order_number,
-        order_date=order.created_at.isoformat() if order.created_at else None,
-        payment_status=order.payment_status.value,
-        current_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
-        subtotal=order.subtotal,
-        product_discount=product_discount,
-        coupon_code=order.coupon_code,
-        coupon_discount=order.coupon_discount,
-        delivery_charge=order.delivery_charge,
-        total_amount=order.total_amount,
-        order_items=order_items_list
-    )
+    # Get payment timestamps
+    payment_confirmed_at = None
+    payment_failed_at = None
+    if order.payments:
+        # Find confirmed payment (payment_date is set when payment is confirmed)
+        confirmed_payment = next((p for p in order.payments if p.payment_status == PaymentStatus.COMPLETED and p.payment_date), None)
+        if confirmed_payment:
+            payment_confirmed_at = confirmed_payment.payment_date
+        
+        # Find failed payment (updated_at when status is FAILED)
+        failed_payment = next((p for p in order.payments if p.payment_status == PaymentStatus.FAILED and p.updated_at), None)
+        if failed_payment:
+            payment_failed_at = failed_payment.updated_at
+    
+    # Add confirmation message when order reaches CONFIRMED status
+    confirmation_message = None
+    if order.order_status == OrderStatus.CONFIRMED:
+        confirmation_message = "The order has been confirmed and processing has begun"
+    
+    return {
+        "status": "success",
+        "message": confirmation_message,
+        "data": {
+            "order_id": order.id,
+            "order_number": order.order_number,
+            "order_date": to_ist_isoformat(order.created_at),
+            "payment_status": order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status),
+            "current_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
+            "subtotal": order.subtotal,
+            "product_discount": product_discount,
+            "coupon_code": order.coupon_code,
+            "coupon_discount": order.coupon_discount,
+            "delivery_charge": order.delivery_charge,
+            "total_amount": order.total_amount,
+            "status_updated_at": to_ist_isoformat(order.status_updated_at),
+            "payment_confirmed_at": to_ist_isoformat(payment_confirmed_at),
+            "payment_failed_at": to_ist_isoformat(payment_failed_at),
+            "order_items": [item.dict() for item in order_items_list]
+        }
+    }
 
 
-@router.get("/{order_id}/{order_item_id}/tracking", response_model=OrderItemTrackingResponse)
+@router.get("/{order_number}/{order_item_id}/tracking", response_model=OrderItemTrackingResponse)
 def get_order_item_tracking(
-    order_id: int,
+    order_number: str,
     order_item_id: int,
     request: Request,
     current_user: User = Depends(get_current_user),
@@ -1584,8 +2001,8 @@ def get_order_item_tracking(
     """
     from .Order_model import OrderItem
     
-    # Verify order exists and belongs to user
-    order = get_order_by_id(db, order_id, user_id=current_user.id)
+    # Verify order exists and belongs to user (allow all payment statuses like get_order endpoint)
+    order = get_order_by_number(db, order_number, user_id=current_user.id, include_all_payment_statuses=True)
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1593,17 +2010,28 @@ def get_order_item_tracking(
         )
     
     # Get the specific order item
-    query = db.query(OrderItem).filter(
+    # Allow access if:
+    # 1. Current user is the user who placed the order (always allowed), OR
+    # 2. Current member (if selected) is the member for whom the order was placed
+    
+    query_filters = [
         OrderItem.id == order_item_id,
-        OrderItem.order_id == order_id,
-        OrderItem.user_id == current_user.id
-    )
+        OrderItem.order_id == order.id
+    ]
     
-    # Filter by member if a member is selected
+    # Build access conditions: user who placed OR member for whom it was placed
+    access_conditions = [OrderItem.user_id == current_user.id]
     if current_member:
-        query = query.filter(OrderItem.member_id == current_member.id)
+        # If viewing as a specific member, also allow access if order item is for that member
+        access_conditions.append(OrderItem.member_id == current_member.id)
+        # Filter results to only show items for this member when member context is active
+        query_filters.append(OrderItem.member_id == current_member.id)
     
-    order_item = query.first()
+    # Apply access control: user OR member match
+    # This ensures the endpoint works for both the user who placed and the member for whom it was placed
+    query_filters.append(or_(*access_conditions))
+    
+    order_item = db.query(OrderItem).filter(*query_filters).first()
     
     if not order_item:
         raise HTTPException(
@@ -1635,7 +2063,7 @@ def get_order_item_tracking(
             "relation": member_obj.relation.value if member_obj and hasattr(member_obj.relation, 'value') else (str(member_obj.relation) if member_obj else None),
             "age": member_obj.age if member_obj else None,
             "gender": member_obj.gender if member_obj else None,
-            "dob": member_obj.dob.isoformat() if member_obj and member_obj.dob else None,
+            "dob": to_ist_isoformat(member_obj.dob) if member_obj and member_obj.dob else None,
             "mobile": member_obj.mobile if member_obj else None
         }
     
@@ -1705,7 +2133,7 @@ def get_order_item_tracking(
                 "status": hist.status.value,
                 "previous_status": hist.previous_status.value if hist.previous_status else None,
                 "notes": hist.notes,
-                "created_at": hist.created_at.isoformat() if hist.created_at else None
+                "created_at": to_ist_isoformat(hist.created_at)
             })
     
     # Sort status history by created_at (most recent first) for display
@@ -1716,13 +2144,14 @@ def get_order_item_tracking(
         "order_number": order.order_number,
         "order_item_id": order_item.id,
         "current_status": order_item.order_status.value if hasattr(order_item.order_status, 'value') else str(order_item.order_status),
+        "status_updated_at": to_ist_isoformat(order_item.status_updated_at),
         "status_history": item_status_history,
         "member": member,
         "address": address,
         "product": product,
         "quantity": order_item.quantity,
         "unit_price": order_item.unit_price,
-        "scheduled_date": order_item.scheduled_date.isoformat() if order_item.scheduled_date else None,
+        "scheduled_date": to_ist_isoformat(order_item.scheduled_date),
         "technician_name": order_item.technician_name,
         "technician_contact": order_item.technician_contact
     }
@@ -1733,28 +2162,36 @@ def update_order_status_api(
     order_id: int,
     status_data: UpdateOrderStatusRequest,
     request: Request,
-    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Update order status (typically used by admin/lab technicians).
+    Update order status (no authorization required - typically used by admin/lab technicians).
     Status transitions are flexible - can update from any stage to any stage.
     
-    Valid statuses: created, awaiting_payment_confirmation, confirmed, payment_failed, scheduled, schedule_confirmed_by_lab,
-    sample_collected, sample_received_by_lab, testing_in_progress, report_ready
+    Supports updating:
+    - Order-level status (if order_item_id and address_id are both omitted, updates entire order)
+    - Order-item level status (if order_item_id is provided, updates specific item)
+    - Items by address (if address_id is provided, updates all items with that address)
+    
+    Valid statuses: CART, PENDING, PENDING_PAYMENT, PROCESSING, PAYMENT_FAILED, CONFIRMED, COMPLETED,
+    SCHEDULED, SCHEDULE_CONFIRMED_BY_LAB, SAMPLE_COLLECTED, SAMPLE_RECEIVED_BY_LAB, TESTING_IN_PROGRESS, REPORT_READY
     
     Request body:
     - status: New status to transition to
     - notes: Notes about the status change
-    - order_item_id (optional): Update specific order item
+    - order_item_id (optional): Update specific order item only
     - address_id (optional): Update all items with this address
     - scheduled_date (optional): Scheduled date for technician visit (only needed for statuses like 'scheduled')
     - technician_name (optional): Technician name (only needed for statuses like 'scheduled', 'sample_collected')
     - technician_contact (optional): Technician contact (only needed for statuses like 'scheduled', 'sample_collected')
+    - changed_by (optional): Identifier for who made the change (defaults to 'system')
     
     Note: Technician details (scheduled_date, technician_name, technician_contact) are optional.
     They are typically required for: scheduled, schedule_confirmed_by_lab, sample_collected
-    They are NOT needed for: created, confirmed, sample_received_by_lab, testing_in_progress, report_ready
+    They are NOT needed for: confirmed, sample_received_by_lab, testing_in_progress, report_ready
+    
+    If order_item_id or address_id is provided, only items are updated.
+    If neither is provided, both order-level status and all items are updated.
     """
     try:
         # Validate status
@@ -1766,21 +2203,51 @@ def update_order_status_api(
                 detail=f"Invalid status: {status_data.status}. Valid statuses: {[s.value for s in OrderStatus]}"
             )
         
-        # Verify order exists
-        order = get_order_by_id(db, order_id, user_id=current_user.id)
+        # Verify order exists (no user check - no authorization required)
+        from sqlalchemy.orm import joinedload
+        order = db.query(Order).options(joinedload(Order.items)).filter(Order.id == order_id).first()
         if not order:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Order not found"
             )
         
-        # Update status (supports per-item or per-address updates)
+        # Get changed_by from request or use default
+        changed_by = status_data.changed_by if status_data.changed_by else "system"
+        
+        # Get previous status before update
+        previous_order_status = order.order_status
+        previous_status_updated_at = order.status_updated_at
+        
+        # Capture previous item statuses before update
+        previous_item_statuses = {}
+        items_to_update = []
+        
+        if status_data.order_item_id:
+            # Single item update
+            item = next((item for item in order.items if item.id == status_data.order_item_id), None)
+            if item:
+                previous_item_statuses[item.id] = item.order_status
+                items_to_update = [item]
+        elif status_data.address_id:
+            # Items with specific address
+            for item in order.items:
+                if item.address_id == status_data.address_id:
+                    previous_item_statuses[item.id] = item.order_status
+                    items_to_update.append(item)
+        else:
+            # All items (when updating entire order)
+            for item in order.items:
+                previous_item_statuses[item.id] = item.order_status
+                items_to_update = order.items
+        
+        # Update status (supports per-item, per-address, or entire order updates)
         # Status transitions are flexible - no validation of sequential progression
         order = update_order_status(
             db=db,
             order_id=order_id,
             new_status=new_status,
-            changed_by=str(current_user.id),
+            changed_by=changed_by,
             notes=status_data.notes,
             order_item_id=status_data.order_item_id,
             address_id=status_data.address_id,
@@ -1789,12 +2256,89 @@ def update_order_status_api(
             technician_contact=status_data.technician_contact
         )
         
+        # Refresh order to get updated items
+        db.refresh(order)
+        
+        # Get updated order items information with previous statuses
+        updated_items = []
+        for item in items_to_update:
+            # Refresh item to get latest status
+            db.refresh(item)
+            updated_items.append({
+                "order_item_id": item.id,
+                "current_status": item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status),
+                "previous_status": previous_item_statuses.get(item.id).value if previous_item_statuses.get(item.id) and hasattr(previous_item_statuses.get(item.id), 'value') else (str(previous_item_statuses.get(item.id)) if previous_item_statuses.get(item.id) else None),
+                "status_updated_at": to_ist_isoformat(item.status_updated_at),
+                "scheduled_date": to_ist_isoformat(item.scheduled_date),
+                "technician_name": item.technician_name,
+                "technician_contact": item.technician_contact
+            })
+        
+        # Get the latest status history entries for this update
+        from .Order_model import OrderStatusHistory
+        from sqlalchemy import or_, and_
+        
+        # Get latest order-level history (if entire order was updated)
+        latest_order_history = None
+        if not status_data.order_item_id and not status_data.address_id:
+            latest_order_history = db.query(OrderStatusHistory).filter(
+                and_(
+                    OrderStatusHistory.order_id == order.id,
+                    OrderStatusHistory.order_item_id == None
+                )
+            ).order_by(OrderStatusHistory.created_at.desc()).first()
+        
+        # Get latest item-level history entries for updated items
+        item_history_entries = []
+        if items_to_update:
+            item_ids = [item.id for item in items_to_update]
+            
+            # Get most recent history for each item
+            for item_id in item_ids:
+                latest_item_history = db.query(OrderStatusHistory).filter(
+                    and_(
+                        OrderStatusHistory.order_id == order.id,
+                        OrderStatusHistory.order_item_id == item_id
+                    )
+                ).order_by(OrderStatusHistory.created_at.desc()).first()
+                
+                if latest_item_history:
+                    item_history_entries.append({
+                        "order_item_id": item_id,
+                        "status": latest_item_history.status.value if hasattr(latest_item_history.status, 'value') else str(latest_item_history.status),
+                        "previous_status": latest_item_history.previous_status.value if latest_item_history.previous_status and hasattr(latest_item_history.previous_status, 'value') else (str(latest_item_history.previous_status) if latest_item_history.previous_status else None),
+                        "notes": latest_item_history.notes,
+                        "changed_by": latest_item_history.changed_by,
+                        "created_at": to_ist_isoformat(latest_item_history.created_at)
+                    })
+        
+        # Use order-level history if available, otherwise use item-level
+        status_history_info = None
+        if latest_order_history:
+            status_history_info = {
+                "status": latest_order_history.status.value if hasattr(latest_order_history.status, 'value') else str(latest_order_history.status),
+                "previous_status": latest_order_history.previous_status.value if latest_order_history.previous_status and hasattr(latest_order_history.previous_status, 'value') else (str(latest_order_history.previous_status) if latest_order_history.previous_status else None),
+                "notes": latest_order_history.notes,
+                "changed_by": latest_order_history.changed_by,
+                "created_at": to_ist_isoformat(latest_order_history.created_at)
+            }
+        elif item_history_entries:
+            # If single item updated, return its history
+            # If multiple items updated, return the first item's history as representative
+            status_history_info = item_history_entries[0] if item_history_entries else None
+        
         return {
             "status": "success",
             "message": f"Order status updated to {new_status.value}",
             "order_id": order.id,
             "order_number": order.order_number,
-            "current_status": order.order_status.value
+            "current_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
+            "previous_status": previous_order_status.value if hasattr(previous_order_status, 'value') else str(previous_order_status),
+            "status_updated_at": to_ist_isoformat(order.status_updated_at),
+            "previous_status_updated_at": to_ist_isoformat(previous_status_updated_at),
+            "updated_items": updated_items,
+            "status_history": status_history_info,
+            "item_status_history": item_history_entries if len(item_history_entries) > 1 else None  # Only include if multiple items updated
         }
     
     except HTTPException:

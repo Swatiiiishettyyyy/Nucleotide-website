@@ -62,17 +62,17 @@ def import_all_models():
         logger.debug("✓ Imported Address and AddressAudit models")
         
         # Cart models
-        from Cart_module.Cart_model import CartItem
+        from Cart_module.Cart_model import CartItem, Cart
         from Cart_module.Cart_audit_model import AuditLog
-        logger.debug("✓ Imported CartItem and AuditLog models")
+        logger.debug("✓ Imported CartItem, Cart and AuditLog models")
         
         # Coupon models
         from Cart_module.Coupon_model import Coupon, CartCoupon
         logger.debug("✓ Imported Coupon and CartCoupon models")
         
         # Order models
-        from Orders_module.Order_model import Order, OrderItem, OrderSnapshot, OrderStatusHistory
-        logger.debug("✓ Imported Order models")
+        from Orders_module.Order_model import Order, OrderItem, OrderSnapshot, OrderStatusHistory, Payment, WebhookLog, PaymentTransition
+        logger.debug("✓ Imported Order models (Order, OrderItem, OrderSnapshot, OrderStatusHistory, Payment, WebhookLog, PaymentTransition)")
         
         # Device/Session models
         from Login_module.Device.Device_session_model import DeviceSession

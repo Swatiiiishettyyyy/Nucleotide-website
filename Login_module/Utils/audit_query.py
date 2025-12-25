@@ -8,6 +8,7 @@ from typing import Optional, List
 from datetime import datetime, timedelta
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user
+from Login_module.Utils.datetime_utils import to_ist_isoformat
 from Login_module.User.user_model import User
 
 # Import all audit models
@@ -69,7 +70,7 @@ def get_otp_audit_logs(
                 "ip_address": log.ip_address,
                 "user_agent": log.user_agent,
                 "correlation_id": log.correlation_id,
-                "timestamp": log.timestamp.isoformat() if log.timestamp else None
+                "timestamp": to_ist_isoformat(log.timestamp)
             }
             for log in logs
         ]
@@ -124,7 +125,7 @@ def get_cart_audit_logs(
                 "ip_address": log.ip_address,
                 "user_agent": log.user_agent,
                 "correlation_id": log.correlation_id,
-                "created_at": log.created_at.isoformat() if log.created_at else None
+                "created_at": to_ist_isoformat(log.created_at)
             }
             for log in logs
         ]
@@ -169,7 +170,7 @@ def get_session_audit_logs(
                 "ip_address": log.ip_address,
                 "user_agent": log.user_agent,
                 "correlation_id": log.correlation_id,
-                "timestamp": log.timestamp.isoformat() if log.timestamp else None
+                "timestamp": to_ist_isoformat(log.timestamp)
             }
             for log in logs
         ]

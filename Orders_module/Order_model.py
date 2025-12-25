@@ -10,10 +10,13 @@ import enum
 
 class OrderStatus(str, enum.Enum):
     """Order tracking statuses"""
-    CREATED = "CREATED"  # Order exists, not confirmed (initial state)
-    AWAITING_PAYMENT_CONFIRMATION = "AWAITING_PAYMENT_CONFIRMATION"  # Payment initiated, waiting for Razorpay/bank confirmation
-    CONFIRMED = "CONFIRMED"  # Payment verified by webhook, order finalized
+    CART = "CART"  # Items in cart, no order created yet (conceptual state)
+    PENDING = "PENDING"  # Pending status for order items
+    PENDING_PAYMENT = "PENDING_PAYMENT"  # Order created, waiting for payment
+    PROCESSING = "PROCESSING"  # Frontend verified, waiting for webhook
     PAYMENT_FAILED = "PAYMENT_FAILED"  # Payment failed - order not confirmed
+    CONFIRMED = "CONFIRMED"  # Payment verified by webhook, order finalized
+    COMPLETED = "COMPLETED"  # Order completed
     SCHEDULED = "SCHEDULED"
     SCHEDULE_CONFIRMED_BY_LAB = "SCHEDULE_CONFIRMED_BY_LAB"
     SAMPLE_COLLECTED = "SAMPLE_COLLECTED"
@@ -24,15 +27,16 @@ class OrderStatus(str, enum.Enum):
 
 class PaymentStatus(str, enum.Enum):
     """Payment status - tracks money/transaction state"""
-    NOT_INITIATED = "NOT_INITIATED"  # Order created, payment not started
-    SUCCESS = "SUCCESS"  # Frontend verified only (temporary, before webhook)
-    VERIFIED = "VERIFIED"  # Webhook confirmed (final, order can be confirmed)
+    NONE = "NONE"  # No order exists (null/N/A state)
+    PENDING = "PENDING"  # Order created, payment not started
+    PROCESSING = "PROCESSING"  # Frontend verified, waiting for webhook
     FAILED = "FAILED"  # Payment failed
+    COMPLETED = "COMPLETED"  # Webhook confirmed payment
 
 
 class PaymentMethod(str, enum.Enum):
     """Payment methods (No COD)"""
-    RAZORPAY = "razorpay"
+    RAZORPAY = "RAZORPAY"
     # Add other online payment methods as needed
 
 
@@ -55,16 +59,11 @@ class Order(Base):
     coupon_discount = Column(Float, default=0.0)  # Discount from coupon
     total_amount = Column(Float, nullable=False)  # Final amount paid
     
-    # Payment details
-    payment_method = Column(Enum(PaymentMethod), nullable=False, default=PaymentMethod.RAZORPAY)
-    payment_status = Column(Enum(PaymentStatus), nullable=False, default=PaymentStatus.NOT_INITIATED, index=True)
-    razorpay_order_id = Column(String(255), nullable=False, unique=True, index=True)  # Razorpay order ID
-    razorpay_payment_id = Column(String(255), nullable=True, unique=True, index=True)  # Razorpay payment ID (filled after payment completion)
-    razorpay_signature = Column(String(255), nullable=True)  # Razorpay signature for verification (filled after payment completion)
-    payment_date = Column(DateTime(timezone=True), nullable=True)  # Payment date (filled after payment completion)
+    # Payment status (denormalized for quick queries - actual payment data is in payments table)
+    payment_status = Column(Enum(PaymentStatus), nullable=False, default=PaymentStatus.PENDING, index=True)
     
     # Order status tracking
-    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.CREATED, index=True)
+    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.PENDING_PAYMENT, index=True)
     status_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Additional notes
@@ -104,7 +103,7 @@ class OrderItem(Base):
     unit_price = Column(Float, nullable=False)  # SpecialPrice at time of order (final price per unit)
     
     # Per-item status tracking (for different addresses in couple/family packs)
-    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.CREATED, index=True)
+    order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.PENDING_PAYMENT, index=True)
     status_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Technician and scheduling information (per item, since items can have different addresses)
@@ -171,5 +170,118 @@ class OrderStatusHistory(Base):
     # Relationships
     order = relationship("Order", backref="status_history")
     order_item = relationship("OrderItem", backref="status_history")
+
+
+class Payment(Base):
+    """
+    Payment table - stores payment information separately from orders.
+    One order can have multiple payment attempts (for retries).
+    """
+    __tablename__ = "payments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Payment method
+    payment_method = Column(Enum(PaymentMethod), nullable=False, default=PaymentMethod.RAZORPAY)
+    
+    # Payment method details (extracted from Razorpay webhook)
+    # Examples: "upi", "netbanking", "wallet", "card", "emi", etc.
+    payment_method_details = Column(String(100), nullable=True, index=True)  # e.g., "upi", "netbanking", "wallet", "card"
+    payment_method_metadata = Column(JSON, nullable=True)  # Additional details like VPA, bank name, wallet name, card details, etc.
+    
+    # Payment status
+    payment_status = Column(Enum(PaymentStatus), nullable=False, default=PaymentStatus.PENDING, index=True)
+    
+    # Razorpay details
+    razorpay_order_id = Column(String(255), nullable=False, index=True)  # Razorpay order ID (not unique - can have multiple attempts)
+    razorpay_payment_id = Column(String(255), nullable=True, unique=True, index=True)  # Razorpay payment ID (unique per successful payment)
+    razorpay_signature = Column(String(255), nullable=True)  # Razorpay signature for verification
+    
+    # Payment amount and currency
+    amount = Column(Float, nullable=False)  # Amount paid
+    currency = Column(String(10), nullable=False, default="INR")
+    
+    # Payment date
+    payment_date = Column(DateTime(timezone=True), nullable=True)  # Payment completion date
+    
+    # Additional notes
+    notes = Column(Text, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships
+    order = relationship("Order", backref="payments")
+
+
+class WebhookLog(Base):
+    """
+    Webhook log table - stores all webhook events from Razorpay.
+    Used for debugging, auditing, and reprocessing failed webhooks.
+    """
+    __tablename__ = "webhook_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Webhook event details
+    event_type = Column(String(100), nullable=False, index=True)  # e.g., "payment.captured", "payment.failed"
+    event_id = Column(String(255), nullable=True, unique=True, index=True)  # Razorpay event ID (unique)
+    
+    # Webhook payload (stored as JSON)
+    payload = Column(JSON, nullable=False)  # Full webhook payload
+    
+    # Processing status
+    processed = Column(Boolean, default=False, nullable=False, index=True)  # Whether webhook was processed successfully
+    processing_error = Column(Text, nullable=True)  # Error message if processing failed
+    
+    # Signature verification
+    signature_valid = Column(Boolean, nullable=True)  # Whether signature was valid
+    signature_verification_error = Column(Text, nullable=True)  # Error if signature verification failed
+    
+    # Related order/payment IDs (extracted from payload)
+    order_id = Column(Integer, ForeignKey("orders.id", ondelete="SET NULL"), nullable=True, index=True)
+    payment_id = Column(Integer, ForeignKey("payments.id", ondelete="SET NULL"), nullable=True, index=True)
+    razorpay_order_id = Column(String(255), nullable=True, index=True)
+    razorpay_payment_id = Column(String(255), nullable=True, index=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)  # When webhook was processed
+    
+    # Relationships
+    order = relationship("Order", backref="webhook_logs")
+    payment = relationship("Payment", backref="webhook_logs")
+
+
+class PaymentTransition(Base):
+    """
+    Payment transition table - tracks all payment status changes.
+    Provides audit trail for payment status transitions.
+    """
+    __tablename__ = "payment_transitions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    payment_id = Column(Integer, ForeignKey("payments.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Status transition
+    from_status = Column(Enum(PaymentStatus), nullable=True)  # Previous status (NULL for initial status)
+    to_status = Column(Enum(PaymentStatus), nullable=False, index=True)  # New status
+    
+    # Transition details
+    transition_reason = Column(Text, nullable=True)  # Reason for transition (e.g., "webhook confirmed", "frontend verified")
+    triggered_by = Column(String(100), nullable=False, default="system")  # Who triggered the transition (user_id or "system")
+    
+    # Additional context
+    razorpay_event_id = Column(String(255), nullable=True)  # Razorpay event ID if triggered by webhook
+    webhook_log_id = Column(Integer, ForeignKey("webhook_logs.id", ondelete="SET NULL"), nullable=True)  # Related webhook log
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    
+    # Relationships
+    payment = relationship("Payment", backref="transitions")
+    webhook_log = relationship("WebhookLog", backref="payment_transitions")
 
 

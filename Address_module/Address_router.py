@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from Cart_module.Cart_model import CartItem
 from Login_module.Utils.auth_user import get_current_user
+from Login_module.Utils.datetime_utils import to_ist_isoformat
 from deps import get_db
 from .Address_crud import delete_address, get_addresses_by_user, save_address
 from .Address_schema import (
@@ -254,7 +255,7 @@ def delete_address_api(
         address_identifier=address_identifier,
         action="deleted",
         old_data=old_data,
-        new_data={"is_deleted": True, "deleted_at": address.deleted_at.isoformat() if address.deleted_at else None},
+        new_data={"is_deleted": True, "deleted_at": to_ist_isoformat(address.deleted_at)},
         ip_address=ip_address,
         user_agent=user_agent,
         correlation_id=correlation_id

@@ -7,6 +7,13 @@ import requests
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta, timezone
+import sys
+from pathlib import Path
+# Add parent directory to path to import datetime_utils
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+from Login_module.Utils.datetime_utils import to_ist_isoformat
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
@@ -221,8 +228,8 @@ class GoogleCalendarService:
 
             if is_free:
                 available.append({
-                    "start": current.isoformat(),
-                    "end": slot_end.isoformat()
+                    "start": to_ist_isoformat(current),
+                    "end": to_ist_isoformat(slot_end)
                 })
 
             current += slot_duration

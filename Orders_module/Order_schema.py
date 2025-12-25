@@ -42,11 +42,12 @@ class UpdateOrderStatusRequest(BaseModel):
     """Request to update order status"""
     status: str = Field(..., description="New order status")
     notes: Optional[str] = Field(None, description="Notes about the status change")
-    order_item_id: Optional[int] = Field(None, description="Update specific order item (optional)")
-    address_id: Optional[int] = Field(None, description="Update all items with this address (optional)")
+    order_item_id: Optional[int] = Field(None, description="Update specific order item only (optional). If omitted, updates order-level status and all items.")
+    address_id: Optional[int] = Field(None, description="Update all items with this address (optional). If omitted with order_item_id, updates order-level status and all items.")
     scheduled_date: Optional[datetime] = Field(None, description="Scheduled date for technician visit")
     technician_name: Optional[str] = Field(None, description="Technician name")
     technician_contact: Optional[str] = Field(None, description="Technician contact")
+    changed_by: Optional[str] = Field(None, description="Identifier for who made the change (defaults to 'system')")
 
 
 class MemberDetails(BaseModel):
@@ -107,6 +108,9 @@ class OrderTrackingResponse(BaseModel):
     coupon_discount: float
     delivery_charge: float
     total_amount: float
+    status_updated_at: Optional[str] = None
+    payment_confirmed_at: Optional[str] = None
+    payment_failed_at: Optional[str] = None
     order_items: List[OrderItemTracking]
 
 
@@ -116,6 +120,7 @@ class OrderItemTrackingResponse(BaseModel):
     order_number: str
     order_item_id: int
     current_status: str
+    status_updated_at: Optional[str] = None
     status_history: List[Dict[str, Any]]
     member: Dict[str, Any]
     address: Dict[str, Any]
@@ -140,8 +145,11 @@ class OrderResponse(BaseModel):
     total_amount: float
     payment_status: str
     order_status: str
-    razorpay_order_id: str
+    razorpay_order_id: Optional[str] = None
     created_at: Optional[datetime] = None
+    status_updated_at: Optional[datetime] = None
+    payment_confirmed_at: Optional[datetime] = None
+    payment_failed_at: Optional[datetime] = None
     items: List[Dict[str, Any]]
 
 

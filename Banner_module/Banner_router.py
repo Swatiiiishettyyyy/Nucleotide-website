@@ -18,6 +18,7 @@ from .Banner_schema import (
 )
 from .Banner_s3_service import get_banner_image_s3_service
 from deps import get_db
+from Login_module.Utils.datetime_utils import to_ist_isoformat
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +59,8 @@ def format_banner_response(banner: Banner) -> BannerResponse:
         is_active=banner.is_active,
         start_date=banner.start_date.date().isoformat() if banner.start_date else None,
         end_date=banner.end_date.date().isoformat() if banner.end_date else None,
-        created_at=banner.created_at.isoformat() if banner.created_at else "",
-        updated_at=banner.updated_at.isoformat() if banner.updated_at else None
+        created_at=to_ist_isoformat(banner.created_at) if banner.created_at else "",
+        updated_at=to_ist_isoformat(banner.updated_at)
     )
 
 

@@ -39,14 +39,26 @@ def to_ist_isoformat(dt: Optional[datetime]) -> Optional[str]:
     """
     Convert datetime to IST and return as ISO format string.
     Used for API responses - ensures IST timezone.
+    Also handles date objects (converts to datetime at midnight IST).
     
     Args:
-        dt: Datetime object (timezone-aware or naive)
+        dt: Datetime object (timezone-aware or naive) or date object
     
     Returns:
         ISO format string in IST timezone (e.g., "2024-12-17T14:30:00+05:30"),
+        or date string (e.g., "2024-12-17") for date objects,
         or None if input is None
     """
+    if dt is None:
+        return None
+    
+    # Handle date objects (e.g., DOB fields)
+    from datetime import date
+    if isinstance(dt, date) and not isinstance(dt, datetime):
+        # For date objects, just return ISO format (no timezone needed)
+        return dt.isoformat()
+    
+    # Handle datetime objects
     ist_dt = to_ist(dt)
     if ist_dt is None:
         return None

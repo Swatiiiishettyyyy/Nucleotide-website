@@ -153,9 +153,29 @@ def save_member_api(
         else:
             message = "Member saved. Family plan slots are full (4/4)."
 
+    # Check if member has taken genetic test
+    from GeneticTest_module.GeneticTest_crud import get_participant_info
+    participant_info = get_participant_info(db, member_id=member.id)
+    has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
+    
+    # Prepare member data for response
+    member_data = MemberData(
+        member_id=member.id,
+        name=member.name,
+        relation=str(member.relation),
+        age=member.age,
+        gender=member.gender,
+        dob=member.dob,
+        mobile=member.mobile,
+        email=member.email,
+        profile_photo_url=member.profile_photo_url,
+        has_taken_genetic_test=has_taken_genetic_test
+    )
+    
     response = {
         "status": "success",
-        "message": message
+        "message": message,
+        "data": member_data
     }
     
     # If this is the first member, auto-select it and return new token
@@ -286,6 +306,11 @@ def edit_member_api(
     if not member:
         raise HTTPException(status_code=404, detail="Member not found or does not belong to you")
 
+    # Check if member has taken genetic test
+    from GeneticTest_module.GeneticTest_crud import get_participant_info
+    participant_info = get_participant_info(db, member_id=member.id)
+    has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
+    
     message = "Member updated successfully."
     if family_status:
         mandatory_remaining = family_status.get("mandatory_slots_remaining", 0)
@@ -303,9 +328,24 @@ def edit_member_api(
         else:
             message = "Member updated. Family plan slots are full (4/4)."
 
+    # Prepare member data for response
+    member_data = MemberData(
+        member_id=member.id,
+        name=member.name,
+        relation=str(member.relation),
+        age=member.age,
+        gender=member.gender,
+        dob=member.dob,
+        mobile=member.mobile,
+        email=member.email,
+        profile_photo_url=member.profile_photo_url,
+        has_taken_genetic_test=has_taken_genetic_test
+    )
+
     return {
         "status": "success",
-        "message": message
+        "message": message,
+        "data": member_data
     }
 
 
@@ -337,7 +377,7 @@ def get_member_list(
             "relation": relation_value,  # Read relation as string from database
             "age": m.age,
             "gender": m.gender,
-            "dob": m.dob.isoformat() if m.dob else None,
+            "dob": to_ist_isoformat(m.dob) if m.dob else None,
             "mobile": m.mobile,
             "email": m.email,
             "profile_photo_url": m.profile_photo_url,
@@ -396,13 +436,14 @@ def delete_member_api(
             detail=f"Cannot delete '{member.name}' - At least one member must remain on the account. Add another member before deleting this one."
         )
     
-    # Check if member is linked to any cart items
+    # Check if member is linked to any cart items (exclude deleted items)
     cart_items = (
         db.query(CartItem, Product)
         .join(Product, CartItem.product_id == Product.ProductId)
         .filter(
             CartItem.member_id == member_id,
             CartItem.user_id == user.id,
+            CartItem.is_deleted == False,  # Exclude deleted cart items
             Product.is_deleted == False
         )
         .all()
@@ -444,7 +485,7 @@ def delete_member_api(
         "relation": str(member.relation),  # Now a string, no need for .value check
         "age": member.age,
         "gender": member.gender,
-        "dob": member.dob.isoformat() if member.dob else None,
+        "dob": to_ist_isoformat(member.dob) if member.dob else None,
         "mobile": member.mobile,
         "category": member.associated_category,
         "plan_type": member.associated_plan_type
@@ -472,7 +513,7 @@ def delete_member_api(
         member_identifier=member_identifier,
         event_type="DELETED",
         old_data=old_data,
-        new_data={"is_deleted": True, "deleted_at": member.deleted_at.isoformat() if member.deleted_at else None} if member.deleted_at else {"is_deleted": True},
+        new_data={"is_deleted": True, "deleted_at": to_ist_isoformat(member.deleted_at)} if member.deleted_at else {"is_deleted": True},
         ip_address=ip_address,
         user_agent=user_agent,
         correlation_id=correlation_id
@@ -624,7 +665,7 @@ def select_member_api(
                 "relation": str(member.relation),
                 "age": member.age,
                 "gender": member.gender,
-                "dob": member.dob.isoformat() if member.dob else None,
+                "dob": to_ist_isoformat(member.dob) if member.dob else None,
                 "mobile": member.mobile,
                 "profile_photo_url": member.profile_photo_url
             },
@@ -698,7 +739,7 @@ def get_current_member_api(
             "relation": str(current_member.relation),
             "age": current_member.age,
             "gender": current_member.gender,
-            "dob": current_member.dob.isoformat() if current_member.dob else None,
+            "dob": to_ist_isoformat(current_member.dob) if current_member.dob else None,
             "mobile": current_member.mobile,
             "email": current_member.email,
             "profile_photo_url": current_member.profile_photo_url,
@@ -719,6 +760,189 @@ CONTENT_TYPE_MAP = {
     ".gif": "image/gif",
     ".webp": "image/webp"
 }
+
+
+async def process_member_photo_upload(
+    file: Optional[UploadFile],
+    member: Member,
+    db: Session,
+    current_user,
+    request: Request
+) -> Optional[str]:
+    """
+    Helper function to process member photo upload.
+    Returns the profile_photo_url if upload is successful, None otherwise.
+    Raises HTTPException if validation fails.
+    """
+    if not file:
+        return None
+    
+    # Validate file extension
+    file_ext = Path(file.filename).suffix.lower() if file.filename else ""
+    if file_ext not in ALLOWED_PHOTO_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid file type. Allowed types: {', '.join(ALLOWED_PHOTO_EXTENSIONS)}"
+        )
+    
+    # Read file content to check size
+    file_content = await file.read()
+    file_size = len(file_content)
+    
+    if file_size > MAX_PHOTO_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File size exceeds maximum allowed size of {MAX_PHOTO_FILE_SIZE // (1024 * 1024)}MB"
+        )
+    
+    if file_size == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File is empty"
+        )
+    
+    # Generate unique filename
+    timestamp = int(uuid.uuid4().hex[:8], 16)
+    filename = f"{timestamp}{file_ext}"
+    
+    # Determine content type
+    content_type = file.content_type or CONTENT_TYPE_MAP.get(file_ext, "image/jpeg")
+    
+    # Delete old profile photo from S3 if exists
+    if member.profile_photo_url:
+        try:
+            s3_service = get_member_photo_s3_service()
+            s3_service.delete_member_photo(member.profile_photo_url)
+        except Exception as e:
+            # Log but don't fail if old photo deletion fails
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to delete old member profile photo from S3: {str(e)}")
+    
+    # Upload to S3
+    try:
+        s3_service = get_member_photo_s3_service()
+        profile_photo_url = s3_service.upload_member_photo(
+            member_id=member.id,
+            filename=filename,
+            file_content=file_content,
+            content_type=content_type
+        )
+    except ValueError as e:
+        # S3 not configured
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"S3 configuration error: {str(e)}"
+        )
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error uploading member photo to S3: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload photo to S3: {str(e)}"
+        )
+    
+    # Store old data for audit
+    old_data = {
+        "profile_photo_url": member.profile_photo_url
+    }
+    
+    # Update member profile with S3 URL
+    member.profile_photo_url = profile_photo_url
+    db.commit()
+    db.refresh(member)
+    
+    # Store new data for audit
+    new_data = {
+        "profile_photo_url": member.profile_photo_url
+    }
+    
+    # Audit log
+    ip_address = request.client.host if request else None
+    user_agent = request.headers.get("user-agent") if request else None
+    correlation_id = str(uuid.uuid4())
+    
+    log_profile_update(
+        db=db,
+        user_id=current_user.id,
+        old_data=old_data,
+        new_data=new_data,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        correlation_id=correlation_id
+    )
+    
+    return profile_photo_url
+
+
+async def parse_member_request_and_file(request: Request, req_body: Optional[MemberRequest] = None) -> tuple[MemberRequest, Optional[UploadFile]]:
+    """
+    Parse member request from either JSON body or form data, and extract file if present.
+    Returns tuple of (MemberRequest, Optional[UploadFile]).
+    """
+    content_type = request.headers.get("content-type", "")
+    
+    # If content-type is multipart, expect form data
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        
+        # Extract file if present
+        file = None
+        if "file" in form:
+            file_obj = form["file"]
+            if isinstance(file_obj, UploadFile) and file_obj.filename:
+                file = file_obj
+        
+        name = form.get("name")
+        relation = form.get("relation")
+        age_str = form.get("age")
+        gender = form.get("gender")
+        dob_str = form.get("dob")
+        mobile = form.get("mobile")
+        email = form.get("email")
+        
+        if not name or not relation or not age_str or not gender or not dob_str or not mobile:
+            raise HTTPException(
+                status_code=422,
+                detail="When using multipart/form-data, all required fields (name, relation, age, gender, dob, mobile) must be provided as form fields."
+            )
+        
+        try:
+            age = int(age_str)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid age format. Must be a number.")
+        
+        try:
+            dob_date = datetime.strptime(dob_str, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid date format for dob. Use YYYY-MM-DD format.")
+        
+        req = MemberRequest(
+            member_id=0,
+            name=name,
+            relation=relation,
+            age=age,
+            gender=gender,
+            dob=dob_date,
+            mobile=mobile,
+            email=email if email else None
+        )
+        return req, file
+    else:
+        # JSON body - use req_body if provided (parsed by FastAPI), otherwise parse manually
+        if req_body is not None:
+            req_body.member_id = 0
+            return req_body, None
+        else:
+            # Try to parse from request body if not already parsed
+            try:
+                body = await request.json()
+                req = MemberRequest(**body)
+                req.member_id = 0
+                return req, None
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=f"Invalid JSON body: {str(e)}")
 
 
 @router.post("/upload-photo", response_model=UploadPhotoResponse)

@@ -1,6 +1,7 @@
 from .Member_model import Member
 from .Member_audit_model import MemberAuditLog
 from sqlalchemy.orm import Session
+from Login_module.Utils.datetime_utils import to_ist_isoformat
 from sqlalchemy import or_, text
 from fastapi import HTTPException
 from typing import Any, Dict, Optional, Union
@@ -186,7 +187,7 @@ def save_member(
         
         if deleted_member:
             # Store old deleted_at value for audit log before clearing it
-            old_deleted_at = deleted_member.deleted_at.isoformat() if deleted_member.deleted_at else None
+            old_deleted_at = to_ist_isoformat(deleted_member.deleted_at) if deleted_member.deleted_at else None
             
             # Preserve original data that should not be overwritten
             preserved_profile_photo_url = deleted_member.profile_photo_url
@@ -304,13 +305,14 @@ def save_member(
         from Cart_module.Cart_model import CartItem
         from Product_module.Product_model import Product
         
-        # Check if member is linked to any cart items
+        # Check if member is linked to any cart items (exclude deleted items)
         cart_items = (
             db.query(CartItem, Product)
             .join(Product, CartItem.product_id == Product.ProductId)
             .filter(
                 CartItem.member_id == req.member_id,
                 CartItem.user_id == user.id,
+                CartItem.is_deleted == False,  # Exclude deleted cart items
                 Product.is_deleted == False
             )
             .all()
@@ -521,12 +523,41 @@ def save_member(
         if should_mark_as_self:
             user.name = req.name
             if getattr(req, 'email', None):
-                user.email = req.email
+                new_email = req.email.strip() if req.email else None
+                if new_email:
+                    # Check if email already exists for a different user
+                    from Login_module.User.user_model import User
+                    existing_user = db.query(User).filter(
+                        User.email == new_email,
+                        User.id != user.id  # Exclude current user
+                    ).first()
+                    
+                    if existing_user:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Given email already exists for different user"
+                        )
+                    
+                    # Email is unique, safe to update
+                    user.email = new_email
             # Update profile_photo_url if provided in member (though it's not in MemberRequest schema currently)
             # This allows future extensibility if profile_photo_url is added to the request
             if hasattr(member, 'profile_photo_url') and member.profile_photo_url:
                 user.profile_photo_url = member.profile_photo_url
-            db.flush()  # Flush user updates before committing audit log
+            
+            # Try to flush user updates, catch any IntegrityError
+            try:
+                db.flush()  # Flush user updates before committing audit log
+            except Exception as e:
+                # Check if it's a duplicate email error
+                error_str = str(e).lower()
+                if 'duplicate entry' in error_str and 'email' in error_str:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Given email already exists for different user"
+                    )
+                # Re-raise other exceptions
+                raise
         
         # Audit log for creation
         new_data = {
@@ -535,7 +566,7 @@ def save_member(
             "relation": req.relation,
             "age": req.age,
             "gender": req.gender,
-            "dob": req.dob.isoformat() if req.dob else None,
+            "dob": to_ist_isoformat(req.dob) if req.dob else None,
             "mobile": req.mobile,
             "email": getattr(req, 'email', None),
             "category": category_name,
@@ -567,7 +598,7 @@ def save_member(
             "relation": str(member.relation),  # Now a string, no need for .value check
             "age": member.age,
             "gender": member.gender,
-            "dob": member.dob.isoformat() if member.dob else None,
+            "dob": to_ist_isoformat(member.dob) if member.dob else None,
             "mobile": member.mobile,
             "email": member.email,
             "category": member.associated_category,
@@ -593,9 +624,44 @@ def save_member(
         # Note: category_id and plan_type are not updated on edit to maintain data integrity
         # Note: is_self_profile is not updated on edit to protect primary profile
         
+        # If this is a self-profile member, also update user table fields
+        if member.is_self_profile:
+            user.name = req.name
+            if getattr(req, 'email', None):
+                new_email = req.email.strip() if req.email else None
+                if new_email:
+                    # Check if email already exists for a different user
+                    from Login_module.User.user_model import User
+                    existing_user = db.query(User).filter(
+                        User.email == new_email,
+                        User.id != user.id  # Exclude current user
+                    ).first()
+                    
+                    if existing_user:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Given email already exists for different user"
+                        )
+                    
+                    # Email is unique, safe to update
+                    user.email = new_email
+        
         # Flush changes to database before commit to ensure they're tracked
-        db.flush()
-        db.commit()
+        # Catch any IntegrityError for duplicate email
+        try:
+            db.flush()
+            db.commit()
+        except Exception as e:
+            # Check if it's a duplicate email error
+            error_str = str(e).lower()
+            if 'duplicate entry' in error_str and 'email' in error_str:
+                db.rollback()
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Given email already exists for different user"
+                )
+            # Re-raise other exceptions
+            raise
         db.refresh(member)  # Refresh to get latest values from database
         
         # WORKAROUND: If relation is empty after commit, explicitly update it
@@ -711,7 +777,7 @@ def save_member(
             "relation": str(member.relation),  # Use actual stored value (after any workarounds)
             "age": member.age,  # Use actual stored value
             "gender": member.gender,  # Use actual stored value
-            "dob": member.dob.isoformat() if member.dob else None,  # Use actual stored value
+            "dob": to_ist_isoformat(member.dob) if member.dob else None,  # Use actual stored value
             "mobile": member.mobile,  # Use actual stored value
             "category": member.associated_category,
             "plan_type": member.associated_plan_type
