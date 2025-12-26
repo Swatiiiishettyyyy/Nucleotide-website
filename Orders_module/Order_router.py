@@ -699,6 +699,8 @@ async def razorpay_webhook(
                 )
             
             # Confirm order from webhook (idempotent)
+            # Use savepoint to ensure we can rollback status changes on error
+            savepoint = db.begin_nested()
             try:
                 order = confirm_order_from_webhook(
                     db=db,
@@ -709,6 +711,9 @@ async def razorpay_webhook(
                     payment_method_details=payment_method_details,
                     payment_method_metadata=payment_method_metadata
                 )
+                
+                # Commit the savepoint (status changes are now permanent)
+                savepoint.commit()
                 
                 # Update webhook log as processed
                 webhook_log.processed = True
@@ -724,6 +729,8 @@ async def razorpay_webhook(
                 
             except ValueError as e:
                 # Order already confirmed or other validation error
+                # Rollback savepoint to undo any partial changes
+                savepoint.rollback()
                 logger.info(f"Webhook confirmation skipped: {str(e)}")
                 # Update webhook log as processed (idempotent)
                 webhook_log.processed = True
@@ -736,12 +743,15 @@ async def razorpay_webhook(
                     message=str(e)
                 )
             except Exception as e:
-                # Internal error - update webhook log and return 500 so Razorpay retries
+                # Internal error - rollback savepoint to undo status changes
+                savepoint.rollback()
+                # Update webhook log with error (but no status changes were committed)
                 webhook_log.processed = False
                 webhook_log.processing_error = str(e)
+                webhook_log.processed_at = now_ist()
                 db.commit()
                 logger.error(f"Error confirming order from webhook: {e}", exc_info=True)
-                db.rollback()
+                # Return 500 so Razorpay retries
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"Error processing webhook: {str(e)}"
@@ -813,6 +823,8 @@ async def razorpay_webhook(
                 )
             
             # Update payment status to failed using mark_payment_failed_or_cancelled
+            # Use savepoint to ensure we can rollback status changes on error
+            savepoint = db.begin_nested()
             try:
                 order = mark_payment_failed_or_cancelled(
                     db=db,
@@ -822,6 +834,9 @@ async def razorpay_webhook(
                     payment_method_details=payment_method_details,
                     payment_method_metadata=payment_method_metadata
                 )
+                
+                # Commit the savepoint (status changes are now permanent)
+                savepoint.commit()
                 
                 # Update webhook log as processed
                 webhook_log.processed = True
@@ -836,11 +851,15 @@ async def razorpay_webhook(
                 )
                 
             except Exception as e:
+                # Rollback savepoint to undo status changes
+                savepoint.rollback()
+                # Update webhook log with error (but no status changes were committed)
                 webhook_log.processed = False
                 webhook_log.processing_error = str(e)
+                webhook_log.processed_at = now_ist()
                 db.commit()
                 logger.error(f"Error processing payment.failed webhook: {e}", exc_info=True)
-                db.rollback()
+                # Return 500 so Razorpay retries
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"Error processing webhook: {str(e)}"
@@ -897,31 +916,52 @@ async def razorpay_webhook(
                     message=f"Order not found for payment ID: {payment.id}"
                 )
             
-            # Get payment ID from order entity
-            payments = order_entity.get("payments", [])
-            if not payments:
-                logger.warning(f"No payments found in order.paid webhook for order {order.order_number}")
-                webhook_log.processed = True
-                webhook_log.processing_error = f"No payment ID found in webhook for order {order.order_number}"
-                webhook_log.processed_at = now_ist()
-                db.commit()
-                return WebhookResponse(
-                    status="success",
-                    message=f"No payment ID found in webhook for order {order.order_number}"
-                )
+            # Get payment ID - use from database first (stored during frontend verification)
+            razorpay_payment_id = payment.razorpay_payment_id
             
-            razorpay_payment_id = payments[0]  # Use first payment
+            # Fallback: try to extract from webhook payload if not in database
+            if not razorpay_payment_id:
+                payments = order_entity.get("payments", [])
+                if payments:
+                    razorpay_payment_id = payments[0]  # Use first payment
+                    logger.info(f"Extracted razorpay_payment_id from webhook payload for order {order.order_number}")
+                else:
+                    logger.warning(f"No payment ID found in database or webhook for order {order.order_number}")
+                    webhook_log.processed = True
+                    webhook_log.processing_error = f"No payment ID found in database or webhook for order {order.order_number}"
+                    webhook_log.processed_at = now_ist()
+                    db.commit()
+                    return WebhookResponse(
+                        status="success",
+                        message=f"No payment ID found in database or webhook for order {order.order_number}"
+                    )
+            else:
+                logger.info(f"Using razorpay_payment_id from database for order {order.order_number}: {razorpay_payment_id}")
+            
             webhook_log.razorpay_payment_id = razorpay_payment_id
             
+            # Extract payment method details from Razorpay payload (if available in order.paid event)
+            # For order.paid, payment details might be in a different location - try to get from payment entity if available
+            payment_entity = webhook_data.get("payload", {}).get("payment", {}).get("entity", {})
+            from .Order_crud import extract_payment_method_from_razorpay_payload
+            payment_method_details, payment_method_metadata = extract_payment_method_from_razorpay_payload(payment_entity)
+            
             # Confirm order from webhook (idempotent)
+            # Use savepoint to ensure we can rollback status changes on error
+            savepoint = db.begin_nested()
             try:
                 order = confirm_order_from_webhook(
                     db=db,
                     order_id=order.id,
                     razorpay_order_id=razorpay_order_id,
                     razorpay_payment_id=razorpay_payment_id,
-                    webhook_log_id=webhook_log.id
+                    webhook_log_id=webhook_log.id,
+                    payment_method_details=payment_method_details,
+                    payment_method_metadata=payment_method_metadata
                 )
+                
+                # Commit the savepoint (status changes are now permanent)
+                savepoint.commit()
                 
                 # Update webhook log as processed
                 webhook_log.processed = True
@@ -937,6 +977,8 @@ async def razorpay_webhook(
                 
             except ValueError as e:
                 # Order already confirmed or other validation error
+                # Rollback savepoint to undo any partial changes
+                savepoint.rollback()
                 logger.info(f"Webhook confirmation skipped: {str(e)}")
                 # Update webhook log as processed (idempotent)
                 webhook_log.processed = True
@@ -949,12 +991,15 @@ async def razorpay_webhook(
                     message=str(e)
                 )
             except Exception as e:
-                # Internal error - update webhook log and return 500 so Razorpay retries
+                # Internal error - rollback savepoint to undo status changes
+                savepoint.rollback()
+                # Update webhook log with error (but no status changes were committed)
                 webhook_log.processed = False
                 webhook_log.processing_error = str(e)
+                webhook_log.processed_at = now_ist()
                 db.commit()
                 logger.error(f"Error confirming order from webhook: {e}", exc_info=True)
-                db.rollback()
+                # Return 500 so Razorpay retries
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"Error processing webhook: {str(e)}"
@@ -1001,7 +1046,7 @@ def get_orders(
     from sqlalchemy.orm import joinedload
     all_orders = db.query(Order).options(joinedload(Order.payments)).filter(
         Order.user_id == current_user.id
-    ).order_by(Order.created_at.desc()).unique().all()
+    ).order_by(Order.created_at.desc()).all()
     
     # Filter to only show CONFIRMED and later statuses
     POST_CONFIRMATION_STATUSES = {

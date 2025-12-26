@@ -682,8 +682,10 @@ def confirm_order_from_webhook(
     from sqlalchemy import func as sql_func
     
     # Use SELECT FOR UPDATE to lock the row
+    # Note: .unique() is required when using joinedload on collections to deduplicate parent rows
     order_stmt = select(Order).options(joinedload(Order.items)).where(Order.id == order_id).with_for_update()
-    order = db.execute(order_stmt).scalar_one_or_none()
+    result = db.execute(order_stmt)
+    order = result.scalars().unique().first()
     
     if not order:
         raise ValueError(f"Order {order_id} not found")
@@ -857,7 +859,6 @@ def confirm_order_from_webhook(
         
         # Update cart's last_activity_at
         if cart:
-            from Login_module.Utils.datetime_utils import now_ist
             cart.last_activity_at = now_ist()
         
         # Remove applied coupon after successful payment
@@ -1070,7 +1071,7 @@ def mark_payment_failed_or_cancelled(
         )
         db.add(item_status_history)
     
-    db.commit()
+    db.flush()
     db.refresh(order)
     
     logger.info(f"Payment marked as {payment_status.value} for order {order.order_number} (ID: {order.id}). Previous status: {previous_payment_status.value}")

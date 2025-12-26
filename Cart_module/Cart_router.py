@@ -657,7 +657,7 @@ def view_cart(
             CartItem.is_deleted == False  # Exclude deleted/cleared items
         )
     
-    all_cart_items = query.order_by(CartItem.group_id, CartItem.created_at).unique().all()
+    all_cart_items = query.order_by(CartItem.group_id, CartItem.created_at).all()
     
     # If cart doesn't exist but user has items, create cart now
     if not cart and all_cart_items:
