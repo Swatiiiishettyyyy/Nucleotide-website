@@ -38,7 +38,7 @@ from .Order_crud import (
     mark_payment_failed_or_cancelled
 )
 from .razorpay_service import create_razorpay_order, verify_webhook_signature, get_payment_details
-from .Order_model import OrderStatus, PaymentStatus, PaymentMethod, Order, Payment, PaymentTransition, WebhookLog
+from .Order_model import OrderStatus, PaymentStatus, PaymentMethod, Order, OrderItem, Payment, PaymentTransition, WebhookLog
 from Cart_module.Cart_model import CartItem, Cart
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
@@ -1056,7 +1056,8 @@ def get_orders(
         OrderStatus.SAMPLE_COLLECTED,
         OrderStatus.SAMPLE_RECEIVED_BY_LAB,
         OrderStatus.TESTING_IN_PROGRESS,
-        OrderStatus.REPORT_READY
+        OrderStatus.REPORT_READY,
+        OrderStatus.COMPLETED
     }
     
     orders = [order for order in all_orders if order.order_status in POST_CONFIRMATION_STATUSES]
@@ -2202,9 +2203,9 @@ def get_order_item_tracking(
     }
 
 
-@router.put("/{order_id}/status")
+@router.put("/{order_number}/status")
 def update_order_status_api(
-    order_id: int,
+    order_number: str,
     status_data: UpdateOrderStatusRequest,
     request: Request,
     db: Session = Depends(get_db)
@@ -2215,8 +2216,8 @@ def update_order_status_api(
     
     Supports updating:
     - Order-level status (if order_item_id and address_id are both omitted, updates entire order)
-    - Order-item level status (if order_item_id is provided, updates specific item)
-    - Items by address (if address_id is provided, updates all items with that address)
+    - Order-item level status (if order_item_id is provided, updates specific item and syncs order status)
+    - Items by address (if address_id is provided, updates all items with that address and syncs order status)
     
     Valid statuses: CART, PENDING, PENDING_PAYMENT, PROCESSING, PAYMENT_FAILED, CONFIRMED, COMPLETED,
     SCHEDULED, SCHEDULE_CONFIRMED_BY_LAB, SAMPLE_COLLECTED, SAMPLE_RECEIVED_BY_LAB, TESTING_IN_PROGRESS, REPORT_READY
@@ -2224,8 +2225,8 @@ def update_order_status_api(
     Request body:
     - status: New status to transition to
     - notes: Notes about the status change
-    - order_item_id (optional): Update specific order item only
-    - address_id (optional): Update all items with this address
+    - order_item_id (optional): Update specific order item only (order status will be synced)
+    - address_id (optional): Update all items with this address (order status will be synced)
     - scheduled_date (optional): Scheduled date for technician visit (only needed for statuses like 'scheduled')
     - technician_name (optional): Technician name (only needed for statuses like 'scheduled', 'sample_collected')
     - technician_contact (optional): Technician contact (only needed for statuses like 'scheduled', 'sample_collected')
@@ -2235,7 +2236,8 @@ def update_order_status_api(
     They are typically required for: scheduled, schedule_confirmed_by_lab, sample_collected
     They are NOT needed for: confirmed, sample_received_by_lab, testing_in_progress, report_ready
     
-    If order_item_id or address_id is provided, only items are updated.
+    When order_item_id is provided, the specific item is updated and order status is synced based on all items.
+    When address_id is provided, all items with that address are updated and order status is synced.
     If neither is provided, both order-level status and all items are updated.
     """
     try:
@@ -2248,14 +2250,26 @@ def update_order_status_api(
                 detail=f"Invalid status: {status_data.status}. Valid statuses: {[s.value for s in OrderStatus]}"
             )
         
-        # Verify order exists (no user check - no authorization required)
+        # Verify order exists by order_number (no user check - no authorization required)
         from sqlalchemy.orm import joinedload
-        order = db.query(Order).options(joinedload(Order.items)).filter(Order.id == order_id).first()
+        order = db.query(Order).options(joinedload(Order.items)).filter(Order.order_number == order_number).first()
         if not order:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found"
+                detail=f"Order not found with order number: {order_number}"
             )
+        
+        # Validate order_item_id belongs to this order if provided
+        if status_data.order_item_id:
+            order_item = db.query(OrderItem).filter(
+                OrderItem.id == status_data.order_item_id,
+                OrderItem.order_id == order.id
+            ).first()
+            if not order_item:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Order item {status_data.order_item_id} not found in order {order_number}"
+                )
         
         # Get changed_by from request or use default
         changed_by = status_data.changed_by if status_data.changed_by else "system"
@@ -2290,7 +2304,7 @@ def update_order_status_api(
         # Status transitions are flexible - no validation of sequential progression
         order = update_order_status(
             db=db,
-            order_id=order_id,
+            order_id=order.id,
             new_status=new_status,
             changed_by=changed_by,
             notes=status_data.notes,

@@ -43,9 +43,10 @@ from Category_module.bootstrap import seed_default_categories
 
 # Import models to register with SQLAlchemy Base
 from Banner_module.Banner_model import Banner
-from Consent_module.Consent_model import UserConsent, ConsentProduct
+from Consent_module.Consent_model import UserConsent, ConsentProduct, PartnerConsent
 from Orders_module.Order_model import Order, OrderItem, OrderSnapshot, OrderStatusHistory
 from GeneticTest_module.GeneticTest_model import GeneticTestParticipant
+from PhoneChange_module.PhoneChange_model import PhoneChangeRequest, PhoneChangeAuditLog
 
 # Import Google Meet API models to register with SQLAlchemy Base
 try:
@@ -70,6 +71,7 @@ from Login_module.Utils.audit_query import router as audit_router
 from Member_module.Member_router import router as member_router
 from Orders_module.Order_router import router as order_router
 from Product_module.Product_router import router as product_router
+from PhoneChange_module.PhoneChange_router import router as phone_change_router
 
 # Google Meet API router
 try:
@@ -268,6 +270,7 @@ app.include_router(member_router)
 app.include_router(order_router)
 app.include_router(audit_router)
 app.include_router(session_router)
+app.include_router(phone_change_router)
 
 # Include Google Meet API router if available
 if gmeet_router:
@@ -292,7 +295,8 @@ def root():
             "orders": "/orders",
             "audit": "/audit",
             "sessions": "/sessions",
-            "gmeet": "/gmeet"
+            "gmeet": "/gmeet",
+            "phone-change": "/api/phone-change"
         },
         "docs": "/docs",
         "redoc": "/redoc"

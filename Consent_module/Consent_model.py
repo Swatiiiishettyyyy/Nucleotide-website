@@ -69,6 +69,28 @@ class PartnerConsent(Base):
     # Final consent status (only "yes" if both user and partner consented)
     final_status = Column(String(10), nullable=False, default="no")  # "yes" only if both said yes
     
+    # Request state machine fields (added in migration 038)
+    # Status flow: PENDING_REQUEST -> OTP_SENT -> CONSENT_GIVEN (OTP verification automatically grants consent)
+    # OTP_VERIFIED is deprecated but kept for backward compatibility with old records
+    request_status = Column(String(20), nullable=False, default="PENDING_REQUEST")  # PENDING_REQUEST, OTP_SENT, OTP_VERIFIED (deprecated), CONSENT_GIVEN, DECLINED, EXPIRED, CANCELLED, REVOKED_BY_PARTNER
+    request_id = Column(String(50), nullable=True, unique=True, index=True)  # Unique request identifier for OTP flow
+    
+    # OTP tracking fields
+    otp_expires_at = Column(DateTime(timezone=True), nullable=True)  # When OTP expires
+    otp_sent_at = Column(DateTime(timezone=True), nullable=True)  # When OTP was sent
+    
+    # Request expiration fields
+    request_expires_at = Column(DateTime(timezone=True), nullable=True)  # When the entire request expires
+    last_request_created_at = Column(DateTime(timezone=True), nullable=True)  # Last time a request was created (for cooldown)
+    
+    # Rate limiting fields
+    failed_attempts = Column(Integer, nullable=False, default=0)  # Number of failed OTP verification attempts
+    resend_count = Column(Integer, nullable=False, default=0)  # Number of times OTP was resent
+    total_attempts = Column(Integer, nullable=False, default=1)  # Total number of requests for this consent
+    
+    # Revocation tracking
+    revoked_at = Column(DateTime(timezone=True), nullable=True)  # When consent was revoked by partner
+    
     # Metadata
     consent_source = Column(String(20), nullable=False, default="product")  # "product" or "partner_otp"
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -85,4 +107,3 @@ class PartnerConsent(Base):
     __table_args__ = (
         Index('idx_user_member_product', 'user_member_id', 'product_id', unique=True),
     )
-

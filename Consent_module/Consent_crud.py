@@ -240,27 +240,52 @@ def get_manage_consent_page_data(db: Session, member_id: int) -> List[dict]:
     """
     Get all consent products with their consent status for manage consent page.
     Returns list of consent products with consent status.
+    For Product 11, queries partner_consents table instead of user_consents.
     """
+    from .Partner_consent_crud import get_partner_consent_status_by_member
+    
     # Get all consent products
     all_consent_products = db.query(ConsentProduct).all()
     
-    # Get member's existing consents
+    # Get member's existing consents (for regular products)
     member_consents = get_member_consents(db, member_id)
     consent_map = {consent.product_id: consent for consent in member_consents}
     
+    # Get partner consent status for product_id 11 (if exists)
+    from .Partner_consent_crud import get_partner_consent_status_by_member
+    partner_consent_status = get_partner_consent_status_by_member(db, member_id, product_id=11)
+    
     result = []
     for consent_product in all_consent_products:
-        consent = consent_map.get(consent_product.id)
-        
-        # Check specific product consent
-        has_consent = consent is not None and consent.status == "yes"
-        consent_status = consent.status if consent else "no"
-        created_at = consent.created_at if consent else None
-        updated_at = consent.updated_at if consent else None
+        # Special handling for Product 11 (partner consent)
+        if consent_product.id == 11:
+            # Use partner_consent_status already fetched above
+            if partner_consent_status and partner_consent_status.get("has_consent"):
+                has_consent = True
+                consent_status = "yes"
+                created_at = partner_consent_status.get("created_at")
+                updated_at = partner_consent_status.get("updated_at")
+                # For product 11, use the member_id passed to the function
+                member_id_value = member_id
+            else:
+                has_consent = False
+                consent_status = "no"
+                created_at = None
+                updated_at = None
+                member_id_value = None
+        else:
+            # Regular products (1-10, 12-17)
+            consent = consent_map.get(consent_product.id)
+            has_consent = consent is not None and consent.status == "yes"
+            consent_status = consent.status if consent else "no"
+            created_at = consent.created_at if consent else None
+            updated_at = consent.updated_at if consent else None
+            member_id_value = consent.member_id if consent else None
         
         result.append({
             "product_id": consent_product.id,
             "product_name": consent_product.name,
+            "member_id": member_id_value,
             "has_consent": has_consent,
             "consent_status": consent_status,
             "created_at": created_at,

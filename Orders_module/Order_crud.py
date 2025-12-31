@@ -1321,8 +1321,11 @@ def _sync_order_status(db: Session, order: Order):
     # Get all item statuses
     item_statuses = [item.order_status for item in order.items]
     
+    # Special case: If all items have reached REPORT_READY, mark order as COMPLETED
+    if len(set(item_statuses)) == 1 and item_statuses[0] == OrderStatus.REPORT_READY:
+        target_status = OrderStatus.COMPLETED
     # Determine target status
-    if len(set(item_statuses)) == 1:
+    elif len(set(item_statuses)) == 1:
         target_status = item_statuses[0]
     else:
         from collections import Counter
@@ -1336,6 +1339,15 @@ def _sync_order_status(db: Session, order: Order):
         if order.order_status != OrderStatus.PENDING_PAYMENT:
             return  # Keep current status
         target_status = OrderStatus.CONFIRMED
+    
+    # Don't set to COMPLETED if payment is not completed
+    if target_status == OrderStatus.COMPLETED and order.payment_status != PaymentStatus.COMPLETED:
+        # If payment is not completed, cannot mark order as COMPLETED
+        # Keep current status or use REPORT_READY if all items are REPORT_READY
+        if all(status == OrderStatus.REPORT_READY for status in item_statuses):
+            target_status = OrderStatus.REPORT_READY
+        else:
+            return  # Keep current status
     
     # Don't set to CONFIRMED or post-payment statuses if payment is not completed
     POST_PAYMENT_STATUSES = {
@@ -1360,9 +1372,25 @@ def _sync_order_status(db: Session, order: Order):
             # Keep current status or use PENDING_PAYMENT
             target_status = order.order_status if order.order_status else OrderStatus.PENDING_PAYMENT
     
-    # Update order status
-    order.order_status = target_status
-    order.status_updated_at = now_ist()
+    # Only update if status actually changed
+    if order.order_status != target_status:
+        previous_order_status = order.order_status
+        order.order_status = target_status
+        order.status_updated_at = now_ist()
+        
+        # Create status history entry if order was auto-marked as COMPLETED
+        # (when all items reached REPORT_READY)
+        if target_status == OrderStatus.COMPLETED and previous_order_status != OrderStatus.COMPLETED:
+            # Check if all items are REPORT_READY (the condition that triggered COMPLETED)
+            if all(item.order_status == OrderStatus.REPORT_READY for item in order.items):
+                status_history = OrderStatusHistory(
+                    order_id=order.id,
+                    status=OrderStatus.COMPLETED,
+                    previous_status=previous_order_status,
+                    notes="Order automatically marked as COMPLETED - all order items have reached REPORT_READY stage.",
+                    changed_by="system"
+                )
+                db.add(status_history)
 
 
 def get_order_by_id(db: Session, order_id: int, user_id: Optional[int] = None, include_all_payment_statuses: bool = False) -> Optional[Order]:

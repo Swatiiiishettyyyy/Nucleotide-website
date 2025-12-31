@@ -487,6 +487,12 @@ def delete_cart_item(
         cart_item.is_deleted = True
         deleted_count = 1
     
+    # Remove applied coupon when cart item is deleted
+    # This ensures coupon is not applied to remaining items after deletion
+    coupon_removed = remove_coupon_from_cart(db, current_user.id)
+    if coupon_removed:
+        logger.info(f"Removed coupon from cart when deleting cart item for user {current_user.id}")
+    
     # Update cart's last_activity_at
     if cart_id:
         cart = db.query(Cart).filter(
@@ -514,7 +520,8 @@ def delete_cart_item(
             "quantity": quantity,
             "group_id": group_id,
             "items_deleted": deleted_count,
-            "cart_id": cart_id
+            "cart_id": cart_id,
+            "coupon_removed": coupon_removed  # Track if coupon was removed
         },
         ip_address=ip,
         user_agent=user_agent,
@@ -522,9 +529,13 @@ def delete_cart_item(
         correlation_id=correlation_id
     )
 
+    message = f"Cart item(s) deleted successfully. {deleted_count} item(s) removed."
+    if coupon_removed:
+        message += " Applied coupon has been removed."
+
     return {
         "status": "success",
-        "message": f"Cart item(s) deleted successfully. {deleted_count} item(s) removed."
+        "message": message
     }
 
 
