@@ -22,7 +22,7 @@ class CartAdd(BaseModel):
         # Check for duplicate member_ids
         member_ids = [mapping.member_id for mapping in v]
         if len(member_ids) != len(set(member_ids)):
-            raise ValueError('Duplicate member IDs are not allowed. Each member can only be added once per product.')
+            raise ValueError('You cannot add the same family member twice for this product. Each family member can only be added once.')
         
         return v
 

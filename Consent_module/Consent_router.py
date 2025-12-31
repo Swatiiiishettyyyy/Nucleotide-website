@@ -82,7 +82,7 @@ def record_user_consent(
     if req.product_id == 11:
         raise HTTPException(
             status_code=400,
-            detail="Product ID 11 requires partner consent. Please use /consent/partner-request endpoint."
+            detail="This product requires partner consent. Please use the partner consent option."
         )
     
     try:
@@ -122,7 +122,7 @@ def record_user_consent(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error recording consent: {str(e)}")
+        raise HTTPException(status_code=500, detail="Something went wrong while saving your consent. Please try again.")
 
 
 @router.get("/manage", response_model=ManageConsentPageResponse)
@@ -165,7 +165,7 @@ def get_manage_consent_page(
             "data": result
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving manage consent data: {str(e)}")
+        raise HTTPException(status_code=500, detail="Something went wrong while loading your consent settings. Please try again.")
 
 
 @router.put("/manage", response_model=ManageConsentResponse)
@@ -242,7 +242,7 @@ def update_manage_consent(
             "data": result
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error updating manage consent: {str(e)}")
+        raise HTTPException(status_code=500, detail="Something went wrong while updating your consent. Please try again.")
 
 
 # ============================================================================
@@ -287,14 +287,14 @@ def initiate_partner_consent_request(
             if active_request.partner_mobile != req.partner_mobile:
                 raise HTTPException(
                     status_code=400,
-                    detail="Active request exists for a different partner. Please cancel the existing request first."
+                    detail="You already have an active request for a different partner. Cancel the existing request first."
                 )
             
             # Check resend limit
             if active_request.resend_count >= MAX_RESENDS:
                 raise HTTPException(
                     status_code=400,
-                    detail="Maximum OTP resend attempts reached. Please wait for request to expire and create a new request."
+                    detail="You've reached the maximum number of OTP resends. Please wait for the request to expire and try again."
                 )
             
             # Resend OTP
@@ -315,7 +315,7 @@ def initiate_partner_consent_request(
             if not check_daily_attempt_limit(db, current_member.id, req.product_id):
                 raise HTTPException(
                     status_code=400,
-                    detail="Maximum daily request attempts reached. Please try again tomorrow."
+                    detail="You've reached the daily limit for partner consent requests. Please try again tomorrow."
                 )
             
             # Create partner consent request
@@ -361,7 +361,7 @@ def initiate_partner_consent_request(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error initiating partner consent request: {str(e)}")
+        raise HTTPException(status_code=500, detail="Something went wrong while creating the partner consent request. Please try again.")
 
 
 @router.post("/partner-verify-otp", response_model=PartnerVerifyOTPResponse)
@@ -398,7 +398,7 @@ def verify_partner_otp_endpoint(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error verifying OTP: {str(e)}")
+        raise HTTPException(status_code=500, detail="Something went wrong while verifying the OTP. Please try again.")
 @router.post("/partner-resend-otp", response_model=PartnerResendOTPResponse)
 def resend_partner_otp_endpoint(
     req: PartnerResendOTPRequest,
@@ -448,7 +448,7 @@ def resend_partner_otp_endpoint(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error resending OTP: {str(e)}")
+        raise HTTPException(status_code=500, detail="Something went wrong while resending the OTP. Please try again.")
 
 
 @router.post("/partner-cancel-request", response_model=PartnerCancelRequestResponse)
@@ -489,7 +489,7 @@ def cancel_partner_consent_request_endpoint(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error cancelling request: {str(e)}")
+        raise HTTPException(status_code=500, detail="Something went wrong while canceling the request. Please try again.")
 
 
 @router.get("/partner-status/{request_id}", response_model=PartnerConsentStatusResponse)
@@ -513,5 +513,5 @@ def get_partner_consent_status_endpoint(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving request status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Something went wrong while checking the request status. Please try again.")
 

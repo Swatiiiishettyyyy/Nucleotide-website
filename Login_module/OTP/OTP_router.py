@@ -117,7 +117,7 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
             )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="OTP expired or not found"
+                detail="The OTP code has expired. Please request a new one."
             )
 
         # Compare plaintext (fast check)
@@ -137,7 +137,7 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
             
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid OTP. Please try again."
+                detail="The OTP code you entered is incorrect. Please try again."
             )
         
         # Remove OTP from Redis after successful verification (only for normal flow)
@@ -243,7 +243,7 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
             logger.error(f"Error creating access token: {e}", exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error generating access token. {str(e)}"
+                detail="Something went wrong while logging you in. Please try again."
             )
 
         logger.info(f"OTP verified successfully for user {user.id} from IP {client_ip}")
@@ -271,7 +271,7 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
         logger.error(f"Unexpected error during OTP verification: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An unexpected error occurred during verification: {str(e)}"
+            detail="Something went wrong while verifying your OTP. Please try again."
         )
 
 

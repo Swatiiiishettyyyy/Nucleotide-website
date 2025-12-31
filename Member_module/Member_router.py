@@ -67,7 +67,7 @@ def generate_token_with_member(
             logger.error(f"Member {selected_member_id} not found, doesn't belong to user {user_id}, or is deleted")
             raise HTTPException(
                 status_code=404,
-                detail="Member not found or doesn't belong to you"
+                detail="We couldn't find this family member profile, or it doesn't belong to your account."
             )
     
     from dotenv import load_dotenv
@@ -125,7 +125,7 @@ def save_member_api(
         correlation_id=correlation_id
     )
     if not member:
-        raise HTTPException(status_code=404, detail="Failed to create member")
+        raise HTTPException(status_code=404, detail="We couldn't create the family member profile. Please try again.")
 
     # Check if this is the first member for the user (check BEFORE creating to avoid race condition)
     # Count existing non-deleted members before the one we just created

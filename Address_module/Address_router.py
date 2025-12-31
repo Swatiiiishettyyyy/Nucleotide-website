@@ -36,7 +36,7 @@ def save_address_api(
     correlation_id = str(uuid.uuid4())
     address = save_address(db, user, req, request=request, correlation_id=correlation_id)
     if not address:
-        raise HTTPException(status_code=404, detail="Address not found for editing")
+        raise HTTPException(status_code=404, detail="We couldn't find the address you're trying to edit.")
 
     return {
         "status": "success",
@@ -91,7 +91,7 @@ def edit_address_api(
     ).first()
     
     if not existing_address:
-        raise HTTPException(status_code=404, detail="Address not found or does not belong to you")
+        raise HTTPException(status_code=404, detail="We couldn't find this address, or it doesn't belong to your account.")
     
     # Autofill: Merge existing address data with request data (request takes precedence)
     # Convert request to dict, keeping only non-None values
@@ -117,7 +117,7 @@ def edit_address_api(
     # Save address (this will validate city name against excel sheet and update the address)
     address = save_address(db, user, complete_req, request=request, correlation_id=correlation_id)
     if not address:
-        raise HTTPException(status_code=404, detail="Address not found or does not belong to you")
+        raise HTTPException(status_code=404, detail="We couldn't find this address, or it doesn't belong to your account.")
 
     return {
         "status": "success",
@@ -192,7 +192,7 @@ def delete_address_api(
     ).first()
     
     if not address:
-        raise HTTPException(status_code=404, detail="Address not found")
+        raise HTTPException(status_code=404, detail="We couldn't find this address.")
     
     # Check if address is linked to any cart items (exclude deleted items)
     cart_items = db.query(CartItem).filter(

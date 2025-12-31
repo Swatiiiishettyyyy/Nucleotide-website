@@ -106,7 +106,7 @@ def confirm_old_number(
     if not session_token:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to generate session token"
+            detail="We couldn't find your verification session. Please start the process again."
         )
     
     return ConfirmOldNumberResponse(
@@ -189,7 +189,7 @@ def confirm_new_number(
     if not phone_change_request or not phone_change_request.new_phone:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to complete phone number change"
+            detail="We couldn't complete your phone number change. Please try again."
         )
     
     return ConfirmNewNumberResponse(

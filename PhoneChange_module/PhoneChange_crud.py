@@ -86,7 +86,7 @@ def check_rate_limit(db: Session, user_id: int) -> Tuple[bool, Optional[str]]:
     ).count()
     
     if recent_requests >= MAX_REQUESTS_PER_DAY:
-        return False, f"Maximum {MAX_REQUESTS_PER_DAY} phone change requests per day. Please try again tomorrow."
+        return False, "You've reached the daily limit for phone number changes. Please try again tomorrow."
     
     return True, None
 
@@ -224,7 +224,7 @@ def verify_old_number_initiate(
     
     # Validate old phone matches user's current phone
     if user.mobile != old_phone:
-        return None, None, "Phone number does not match your current number"
+        return None, None, "The phone number you entered doesn't match your current number. Please check and try again."
     
     # Check rate limit
     allowed, error = check_rate_limit(db, user_id)
@@ -321,7 +321,7 @@ def verify_old_number_confirm(
         ).order_by(PhoneChangeRequest.created_at.desc()).first()
         
         if not request:
-            return None, None, "No active phone change request found. Please start the process again."
+            return None, None, "We couldn't find your phone change request. Please start the process again."
         
         # Log that we used fallback lookup (for debugging)
         logger.info(f"Request ID {request_id} not found, using fallback lookup for user {user_id}. Found request ID {request.id}")
@@ -343,7 +343,7 @@ def verify_old_number_confirm(
             cooldown_ist = to_ist(request.cooldown_until) if request.cooldown_until else None
             if cooldown_ist and cooldown_ist > now_ist():
                 remaining = int((cooldown_ist - now_ist()).total_seconds())
-                return None, None, f"Account locked. Please try again in {remaining} seconds."
+                return None, None, "Your account is temporarily locked. Please try again in a few minutes."
             else:
                 # Cooldown expired, reset
                 request.status = PhoneChangeStatus.OLD_NUMBER_PENDING.value
@@ -351,9 +351,9 @@ def verify_old_number_confirm(
                 request.cooldown_until = None
                 db.flush()
         elif request.status in [PhoneChangeStatus.FAILED_OLD_OTP.value, PhoneChangeStatus.EXPIRED.value, PhoneChangeStatus.CANCELLED.value]:
-            return None, None, f"Request is {request.status}. Please start a new phone change process."
+            return None, None, "Your previous request has expired. Please start again."
         else:
-            return None, None, f"Invalid request status: {request.status}. Please start a new phone change process."
+            return None, None, "Your previous request has expired. Please start again."
     
     # Check attempts
     if request.old_phone_otp_attempts >= MAX_OTP_ATTEMPTS:
@@ -365,7 +365,7 @@ def verify_old_number_confirm(
             PhoneChangeStatus.FAILED_OLD_OTP.value, False, "Max OTP attempts reached",
             None, ip_address
         )
-        return None, None, f"Maximum {MAX_OTP_ATTEMPTS} attempts exceeded. Please try again in {COOLDOWN_SECONDS // 60} minutes."
+        return None, None, "You've entered the wrong OTP code too many times. Please wait 15 minutes and try again."
     
     # Get OTP from Redis
     country_code = "+91"
@@ -383,7 +383,7 @@ def verify_old_number_confirm(
             request.status, False, "OTP expired",
             None, ip_address
         )
-        return None, None, "OTP has expired. Please request a new one."
+        return None, None, "The OTP code has expired. Please request a new one."
     
     # Verify OTP
     if stored_otp != otp:
@@ -400,7 +400,7 @@ def verify_old_number_confirm(
                 PhoneChangeStatus.LOCKED.value, False, "Max attempts reached",
                 {"remaining_attempts": 0}, ip_address
             )
-            return None, None, f"Maximum {MAX_OTP_ATTEMPTS} attempts exceeded. Please try again in {COOLDOWN_SECONDS // 60} minutes."
+            return None, None, "You've entered the wrong OTP code too many times. Please wait 15 minutes and try again."
         
         db.commit()
         create_audit_log(
@@ -408,7 +408,7 @@ def verify_old_number_confirm(
             request.status, False, "Invalid OTP",
             {"remaining_attempts": remaining_attempts}, ip_address
         )
-        return None, None, f"Invalid OTP. {remaining_attempts} attempts remaining."
+        return None, None, f"The OTP code you entered is incorrect. You have {remaining_attempts} more attempts."
     
     # OTP verified successfully
     session_token = generate_session_token()
@@ -452,7 +452,7 @@ def verify_new_number_initiate(
     ).first()
     
     if not request:
-        return None, None, "Invalid or expired session token"
+        return None, None, "Your verification session has expired. Please start again."
     
     # Check session token expiry
     expires_at_ist = to_ist(request.expires_at) if request.expires_at else None
@@ -464,19 +464,19 @@ def verify_new_number_initiate(
             PhoneChangeStatus.EXPIRED.value, False, "Session token expired",
             None, ip_address
         )
-        return None, None, "Session expired. Please start the process again."
+        return None, None, "Your verification session has expired. Please start again."
     
     # Normalize phone
     new_phone = normalize_phone(new_phone)
     
     # Validate new phone is different from old phone
     if new_phone == request.old_phone:
-        return None, None, "New number cannot be the same as current number"
+        return None, None, "Your new phone number cannot be the same as your current number."
     
     # Check if new phone already exists in users table
     existing_user = db.query(User).filter(User.mobile == new_phone).first()
     if existing_user:
-        return None, None, "This phone number is already registered"
+        return None, None, "This phone number is already registered with another account."
     
     # Generate OTP
     otp = otp_manager.generate_otp(length=OTP_LENGTH)
@@ -665,7 +665,7 @@ def verify_new_number_confirm(
             PhoneChangeStatus.FAILED_DB_UPDATE.value, False, str(e),
             None, ip_address
         )
-        return None, "Failed to update phone number. Please try again."
+        return None, "We couldn't complete your phone number change. Please try again."
     except Exception as e:
         db.rollback()
         logger.error(f"Unexpected error during phone change: {e}", exc_info=True)
@@ -676,7 +676,7 @@ def verify_new_number_confirm(
             PhoneChangeStatus.FAILED_DB_UPDATE.value, False, str(e),
             None, ip_address
         )
-        return None, "An error occurred. Please try again."
+        return None, "We couldn't complete your phone number change. Please try again."
 
 
 def cancel_phone_change(
@@ -701,7 +701,7 @@ def cancel_phone_change(
         return None, "Either session_token or request_id must be provided"
     
     if not request:
-        return None, "Request not found"
+        return None, "We couldn't find your phone change request."
     
     # Only cancel if not already completed/cancelled/expired
     if request.status not in [

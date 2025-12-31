@@ -43,7 +43,7 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
         )
         raise HTTPException(
             status_code=422,
-            detail="Sample cannot be collected in your location."
+            detail="Sample cannot be collected in your location. Please choose a different location."
         )
     
     logger.info(f"Address validation passed for city: '{req.city}'")
@@ -113,7 +113,7 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
             products_str = ", ".join(product_names) if product_names else "items"
             raise HTTPException(
                 status_code=422,
-                detail=f"This address is associated with {len(cart_items)} cart item(s) for product(s): {products_str}. Please remove these items from your cart before editing the address."
+                detail=f"Cannot edit this address right now. It's being used in your cart for {products_str}. Remove from cart first."
             )
         
         # Store old data before update

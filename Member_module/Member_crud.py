@@ -170,8 +170,7 @@ def save_member(
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"Member '{req.name}' with relation '{req.relation}' already exists "
-                    f"in the '{category_name}' category."
+                    f"'{req.name}' with relation '{req.relation}' already exists in the '{category_name}' category. This member is already there."
                 )
             )
         
@@ -341,7 +340,7 @@ def save_member(
             
             raise HTTPException(
                 status_code=422,
-                detail=f"Member '{req.name}' is associated with {len(cart_items)} cart item(s) for product(s): {conflict_details}. Please remove these items from your cart before editing the member."
+                detail=f"Cannot edit '{req.name}' right now. This member is in your cart for {conflict_details}. Remove from cart first."
             )
     
     if req.member_id == 0:

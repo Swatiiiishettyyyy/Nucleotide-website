@@ -92,7 +92,7 @@ def add_to_cart(
         # Check if product exists
         product = db.query(Product).filter(Product.ProductId == item.product_id, Product.is_deleted == False).first()
         if not product:
-            raise HTTPException(status_code=404, detail="Product not found")
+            raise HTTPException(status_code=404, detail="We couldn't find this product.")
 
         category_name = product.category.name if product.category else "this category"
         
@@ -115,7 +115,7 @@ def add_to_cart(
             missing_ids = [aid for aid in unique_address_ids if aid not in found_ids]
             raise HTTPException(
                 status_code=422,
-                detail=f"Address(es) {missing_ids} not found or do not belong to you."
+                detail="One or more addresses you selected are not found or don't belong to your account."
             )
         
         # Validate members exist and belong to user
@@ -127,7 +127,7 @@ def add_to_cart(
         if len(members) != num_members:
             raise HTTPException(
                 status_code=422,
-                detail="One or more member IDs not found for this user."
+                detail="One or more family members you selected are not found in your account."
             )
         
         # Check if any of these members are already in cart for another product
@@ -151,6 +151,7 @@ def add_to_cart(
         
         if conflicting_members:
             conflicts = []
+            member_names = []
             for cart_item, existing_product, member_obj in conflicting_members:
                 conflicts.append({
                     "member_id": member_obj.id,
@@ -159,12 +160,19 @@ def add_to_cart(
                     "existing_product_name": existing_product.Name,
                     "existing_plan_type": existing_product.plan_type.value if hasattr(existing_product.plan_type, "value") else str(existing_product.plan_type),
                 })
+                member_names.append(member_obj.name)
+            
+            # Create user-friendly message with specific member names
+            if len(member_names) == 1:
+                message = f"'{member_names[0]}' is already added to another product in '{category_name}'. This member is already there. Remove '{member_names[0]}' from the other product first or choose a different member."
+            else:
+                members_str = ", ".join([f"'{name}'" for name in member_names[:-1]]) + f", and '{member_names[-1]}'"
+                message = f"These members ({members_str}) are already added to another product in '{category_name}'. These members are already there. Remove from the other product first or choose different members."
+            
             raise HTTPException(
                 status_code=422,
                 detail={
-                    "message": (
-                        f"Members already associated with another product in '{category_name}' category."
-                    ),
+                    "message": message,
                     "conflicts": conflicts
                 }
             )
@@ -192,25 +200,25 @@ def add_to_cart(
                 if existing_member_ids == requested_member_ids:
                     raise HTTPException(
                         status_code=422,
-                        detail="This product with the same members is already in your cart."
+                        detail="This product with the same family members is already in your cart."
                     )
         
         # Validate member count matches product plan type
         if product.plan_type == PlanType.SINGLE and num_members != 1:
             raise HTTPException(
                 status_code=422,
-                detail=f"Single plan requires exactly 1 member, got {num_members}."
+                detail=f"Single plan requires exactly 1 family member. You selected {num_members}."
             )
         elif product.plan_type == PlanType.COUPLE and num_members != 2:
             raise HTTPException(
                 status_code=422,
-                detail=f"Couple plan requires exactly 2 members, got {num_members}."
+                detail=f"Couple plan requires exactly 2 family members. You selected {num_members}."
             )
         elif product.plan_type == PlanType.FAMILY:
             if num_members < 3 or num_members > 4:
                 raise HTTPException(
                     status_code=422,
-                    detail=f"Family plan requires 3-4 members (3 mandatory + 1 optional), got {num_members}."
+                    detail=f"Family plan requires 3 to 4 family members (3 required + 1 optional). You selected {num_members}."
                 )
         
         ip, user_agent = get_client_info(request)
@@ -269,7 +277,7 @@ def add_to_cart(
             db.rollback()
             raise HTTPException(
                 status_code=500,
-                detail=f"Error adding items to cart: {str(e)}"
+                detail="Something went wrong while adding items to your cart. Please try again."
             )
         
         # Safety check: ensure cart items were created
@@ -337,7 +345,7 @@ def add_to_cart(
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error adding to cart: {str(e)}")
+        raise HTTPException(status_code=500, detail="We couldn't add items to your cart. Please try again.")
 
 
 @router.put("/update/{cart_item_id}")
@@ -360,7 +368,7 @@ def update_cart_item(
     ).first()
     
     if not cart_item:
-        raise HTTPException(status_code=404, detail="Cart item not found")
+        raise HTTPException(status_code=404, detail="We couldn't find this item in your cart to update.")
 
     old_quantity = cart_item.quantity
     group_id = cart_item.group_id
@@ -440,7 +448,7 @@ def update_cart_item(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f"Error updating cart item: {str(e)}"
+            detail="Something went wrong while updating your cart item. Please try again."
         )
 
 
@@ -463,7 +471,7 @@ def delete_cart_item(
     ).first()
     
     if not cart_item:
-        raise HTTPException(status_code=404, detail="Cart item not found or already deleted")
+        raise HTTPException(status_code=404, detail="This item has already been removed from your cart.")
 
     product_id = cart_item.product_id
     quantity = cart_item.quantity
@@ -960,7 +968,7 @@ def apply_coupon(
         if not cart_items:
             raise HTTPException(
                 status_code=400,
-                detail="Cart is empty. Add items to cart before applying coupon."
+                detail="Your cart is empty. Please add items to your cart before applying a coupon."
             )
         
         cart_id = cart.id if cart else None
@@ -1071,7 +1079,7 @@ def apply_coupon(
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error applying coupon: {str(e)}")
+        raise HTTPException(status_code=500, detail="Something went wrong while applying the coupon. Please try again.")
 
 
 @router.delete("/remove-coupon")
@@ -1130,7 +1138,7 @@ def remove_coupon(
         }
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error removing coupon: {str(e)}")
+        raise HTTPException(status_code=500, detail="Something went wrong while removing the coupon. Please try again.")
 
 
 @router.get("/list-coupons")
@@ -1201,7 +1209,7 @@ def list_coupons(
             }
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error listing coupons: {str(e)}")
+        raise HTTPException(status_code=500, detail="Something went wrong while loading available coupons. Please try again.")
 
 
 @router.post("/create-coupon")
@@ -1267,5 +1275,5 @@ def create_coupon(
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error creating coupon: {str(e)}")
+        raise HTTPException(status_code=500, detail="Something went wrong while creating the coupon. Please try again.")
 

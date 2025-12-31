@@ -30,14 +30,14 @@ def get_current_user(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired access token: {str(e)}"
+            detail="Your login session has expired. Please log in again."
         )
 
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Token does not contain user info"
+            detail="Your account information is missing. Please log in again."
         )
 
     # Validate and update session
@@ -48,12 +48,12 @@ def get_current_user(
             if not session:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Session not found"
+                    detail="We couldn't verify your account. Please log in again."
                 )
             if not session.is_active:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Session has been logged out"
+                    detail="You have been logged out. Please log in again."
                 )
             # Update last_active timestamp
             update_last_active(db, int(session_id))
@@ -62,7 +62,7 @@ def get_current_user(
         except (ValueError, Exception) as e:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid session"
+                detail="We couldn't verify your account. Please log in again."
             )
 
     try:
@@ -70,19 +70,19 @@ def get_current_user(
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid user ID format in token"
+            detail="We couldn't verify your account. Please log in again."
         )
 
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            detail="We couldn't find your account. Please try logging in again."
         )
 
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is inactive"
+            detail="Your account has been deactivated. Please contact support."
         )
 
     return user

@@ -174,13 +174,13 @@ def create_order(
                     # Item exists but is soft-deleted (cart was cleared)
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Cart item has been removed. Your cart may have been cleared. Please refresh your cart and try again."
+                        detail="This item has been removed from your cart. Please refresh and try again."
                     )
             
             # No active cart items found
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cart is empty. Add items to cart before creating order."
+                detail="Your cart is empty. Please add items to your cart before placing an order."
             )
         
         # Optional: Validate that the provided cart_item_id exists in the active cart items
@@ -199,7 +199,7 @@ def create_order(
         if not cart_items:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cart is empty. Add items to cart before creating order."
+                detail="Your cart is empty. Please add items to your cart before placing an order."
             )
         
         # Get unique addresses from cart items
@@ -208,7 +208,7 @@ def create_order(
         if not unique_cart_address_ids:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Cart items must have valid address IDs"
+                detail="Your cart items need valid addresses. Please check your addresses and try again."
             )
         
         # Use the first address from cart items as primary address
@@ -225,7 +225,7 @@ def create_order(
         if not address:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Address ID {primary_address_id} not found or does not belong to you"
+                detail="We couldn't find this address, or it doesn't belong to your account."
             )
         
         # Calculate total amount (will be recalculated in create_order_from_cart with coupon)

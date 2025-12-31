@@ -108,7 +108,7 @@ def record_consent(
     # Validate consent product exists
     consent_product = db.query(ConsentProduct).filter(ConsentProduct.id == product_id).first()
     if not consent_product:
-        raise HTTPException(status_code=404, detail=f"Consent product with ID {product_id} not found")
+        raise HTTPException(status_code=404, detail="We couldn't find this product. Please try again.")
     
     # Check if consent already exists (member-scoped)
     existing_consent = get_consent_by_member_and_product(db, member_id, product_id)

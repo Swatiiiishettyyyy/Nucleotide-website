@@ -102,7 +102,7 @@ def validate_partner_eligibility(
     if partner_mobile == current_user_mobile:
         raise HTTPException(
             status_code=400,
-            detail="Partner mobile cannot be the same as your mobile number"
+            detail="You cannot use your own phone number as the partner's number."
         )
     
     # Step 1: Check if partner is a registered user
@@ -139,7 +139,7 @@ def validate_partner_eligibility(
     # Step 3: Partner is neither user nor member - REJECT
     raise HTTPException(
         status_code=400,
-        detail="Partner must be a registered user or a member under your account"
+        detail="The partner must be a registered user or added as a family member in your account."
     )
 
 
@@ -291,10 +291,10 @@ def create_partner_consent_request(
     # Validate product
     consent_product = db.query(ConsentProduct).filter(ConsentProduct.id == product_id).first()
     if not consent_product:
-        raise HTTPException(status_code=404, detail=f"Consent product with ID {product_id} not found")
+        raise HTTPException(status_code=404, detail="We couldn't find this product. Please try again.")
     
     if product_id != 11:
-        raise HTTPException(status_code=400, detail="Partner consent is only for product_id 11")
+        raise HTTPException(status_code=400, detail="Partner consent is only available for the Child Simulator product.")
     
     # Validate partner eligibility
     partner_info = validate_partner_eligibility(db, user_id, user_mobile, partner_mobile)
@@ -374,7 +374,7 @@ def send_partner_otp(
     Returns the OTP (for testing/debugging - in production, OTP should be sent via SMS).
     """
     if not consent.request_id:
-        raise HTTPException(status_code=400, detail="Request ID is missing")
+        raise HTTPException(status_code=400, detail="We couldn't find your consent request. Please try again.")
     
     # Generate OTP
     otp = otp_manager.generate_otp(length=4)
@@ -387,7 +387,7 @@ def send_partner_otp(
         otp_manager._redis_client.set(otp_key, otp, ex=otp_expiry_seconds)
     except Exception as e:
         logger.error(f"Failed to store OTP in Redis: {e}")
-        raise HTTPException(status_code=500, detail="Failed to store OTP")
+        raise HTTPException(status_code=500, detail="Something went wrong while creating the partner consent request. Please try again.")
     
     # Update consent record
     now = now_ist()
@@ -417,28 +417,28 @@ def verify_partner_otp(
     # Find consent record
     consent = get_partner_consent_by_request_id(db, request_id)
     if not consent:
-        raise HTTPException(status_code=404, detail="Request not found")
+        raise HTTPException(status_code=404, detail="We couldn't find your consent request. Please try again.")
     
     # Validate partner mobile matches
     if consent.partner_mobile != partner_mobile:
-        raise HTTPException(status_code=400, detail="Partner mobile does not match")
+        raise HTTPException(status_code=400, detail="The partner's phone number doesn't match. Please check and try again.")
     
     # Check request status
     if consent.request_status not in ["PENDING_REQUEST", "OTP_SENT", "OTP_VERIFIED"]:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot verify OTP. Request status is {consent.request_status}"
+            detail="This request has expired. Please create a new request."
         )
     
     # Check request expiration (1 hour)
     if check_request_expiration(consent):
         consent.request_status = "EXPIRED"
         db.commit()
-        raise HTTPException(status_code=400, detail="Request has expired")
+        raise HTTPException(status_code=400, detail="This request has expired. Please create a new request.")
     
     # Check OTP expiration (3 minutes)
     if check_otp_expiration(consent):
-        raise HTTPException(status_code=400, detail="OTP has expired")
+        raise HTTPException(status_code=400, detail="The OTP code has expired. Please request a new one.")
     
     # Get OTP from Redis
     otp_key = _partner_otp_key(request_id)
@@ -447,10 +447,10 @@ def verify_partner_otp(
         stored_otp = otp_manager._redis_client.get(otp_key)
     except Exception as e:
         logger.error(f"Failed to get OTP from Redis: {e}")
-        raise HTTPException(status_code=500, detail="Failed to verify OTP")
+        raise HTTPException(status_code=500, detail="Something went wrong while verifying the OTP. Please try again.")
     
     if not stored_otp:
-        raise HTTPException(status_code=400, detail="OTP not found or expired")
+        raise HTTPException(status_code=400, detail="The OTP code is missing or has expired. Please request a new one.")
     
     # Verify OTP
     if stored_otp != otp:
@@ -462,14 +462,14 @@ def verify_partner_otp(
             db.commit()
             raise HTTPException(
                 status_code=400,
-                detail="Maximum OTP verification attempts reached. Request expired."
+                detail="You've entered the wrong OTP code too many times. This request has expired."
             )
         
         db.commit()
         remaining = MAX_FAILED_ATTEMPTS - consent.failed_attempts
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid OTP. {remaining} attempt(s) remaining."
+            detail=f"The OTP code you entered is incorrect. You have {remaining} more attempt(s)."
         )
     
     # OTP verified successfully
@@ -499,37 +499,37 @@ def resend_partner_otp(
     # Find consent record
     consent = get_partner_consent_by_request_id(db, request_id)
     if not consent:
-        raise HTTPException(status_code=404, detail="Request not found")
+        raise HTTPException(status_code=404, detail="We couldn't find your consent request. Please try again.")
     
     # Validate user is the requester
     if consent.user_member_id != user_member_id:
-        raise HTTPException(status_code=403, detail="Only the requester can resend OTP")
+        raise HTTPException(status_code=403, detail="Only the person who created the request can resend the OTP.")
     
     # Check request status - block if consent already given
     if consent.request_status == "CONSENT_GIVEN":
         raise HTTPException(
             status_code=400,
-            detail="Cannot resend OTP. Partner has already verified OTP and consent has been granted."
+            detail="Cannot resend OTP. The partner has already verified and given consent."
         )
     
     # Also block if OTP_VERIFIED (for backward compatibility with old records)
     if consent.request_status == "OTP_VERIFIED":
         raise HTTPException(
             status_code=400,
-            detail="Cannot resend OTP. Partner has already verified OTP."
+            detail="Cannot resend OTP. The partner has already verified the OTP."
         )
     
     # Check request expiration
     if check_request_expiration(consent):
         consent.request_status = "EXPIRED"
         db.commit()
-        raise HTTPException(status_code=400, detail="Request has expired")
+        raise HTTPException(status_code=400, detail="This request has expired. Please create a new request.")
     
     # Check rate limiting
     if consent.resend_count >= MAX_RESENDS:
         raise HTTPException(
             status_code=400,
-            detail="Maximum OTP resend attempts reached. Please wait for request to expire and create a new request."
+            detail="You've reached the maximum number of OTP resends. Please wait for the request to expire and try again."
         )
     
     # Increment resend count
@@ -552,23 +552,23 @@ def cancel_partner_consent_request(
     # Find consent record
     consent = get_partner_consent_by_request_id(db, request_id)
     if not consent:
-        raise HTTPException(status_code=404, detail="Request not found")
+        raise HTTPException(status_code=404, detail="We couldn't find your consent request. Please try again.")
     
     # Validate user is the requester
     if consent.user_member_id != user_member_id:
-        raise HTTPException(status_code=403, detail="Only the requester can cancel the request")
+        raise HTTPException(status_code=403, detail="Only the person who created the request can cancel it.")
     
     # Check request status
     if consent.request_status == "CONSENT_GIVEN":
         raise HTTPException(
             status_code=400,
-            detail="Cannot cancel request. Partner has already given consent."
+            detail="Cannot cancel this request. The partner has already given consent."
         )
     
     if consent.request_status == "REVOKED_BY_PARTNER":
         raise HTTPException(
             status_code=400,
-            detail="Request has already been revoked by partner."
+            detail="This request has already been cancelled by the partner."
         )
     
     # Log warning for OTP_VERIFIED (for backward compatibility with old records)
@@ -612,7 +612,7 @@ def revoke_partner_consent(
     
     # Verify partner mobile matches
     if consent.partner_mobile != partner_mobile:
-        raise HTTPException(status_code=400, detail="Partner mobile does not match")
+        raise HTTPException(status_code=400, detail="The partner's phone number doesn't match. Please check and try again.")
     
     # Verify OTP from Redis (required for security)
     if not consent.request_id:
@@ -624,7 +624,7 @@ def revoke_partner_consent(
         stored_otp = otp_manager._redis_client.get(otp_key)
     except Exception as e:
         logger.error(f"Failed to get OTP from Redis: {e}")
-        raise HTTPException(status_code=500, detail="Failed to verify OTP")
+        raise HTTPException(status_code=500, detail="Something went wrong while verifying the OTP. Please try again.")
     
     if not stored_otp:
         raise HTTPException(
@@ -663,7 +663,7 @@ def get_partner_consent_status(
     """
     consent = get_partner_consent_by_request_id(db, request_id)
     if not consent:
-        raise HTTPException(status_code=404, detail="Request not found")
+        raise HTTPException(status_code=404, detail="We couldn't find your consent request. Please try again.")
     
     # Check expiration on-demand
     if consent.request_status in ["PENDING_REQUEST", "OTP_SENT", "OTP_VERIFIED"]:

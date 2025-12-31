@@ -92,7 +92,7 @@ def update_user_profile(
         db.rollback()
         raise HTTPException(
             status_code=400,
-            detail="Email or Mobile already exists"
+            detail="This email or phone number is already registered with another account."
         )
 
     except Exception as e:
