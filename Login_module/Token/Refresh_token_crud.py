@@ -168,9 +168,14 @@ def is_token_family_revoked(
 ) -> bool:
     """
     Check if a token family has been revoked (token reuse detection).
+    
+    A token family is considered revoked if ANY token in it was revoked.
+    This indicates that token rotation occurred, making all previous tokens
+    in the family invalid (reuse detection).
+    
+    Returns True if the family has been revoked (rotation occurred),
+    False if the family is still active (no rotation yet).
     """
-    # If any token in the family is revoked, check if ALL are revoked
-    # If all tokens in a family are revoked, the family is considered revoked
     all_tokens = db.query(RefreshToken).filter(
         RefreshToken.token_family_id == token_family_id
     ).all()
@@ -178,9 +183,11 @@ def is_token_family_revoked(
     if not all_tokens:
         return False
     
-    # Family is revoked if all tokens are revoked
-    all_revoked = all(token.is_revoked for token in all_tokens)
-    return all_revoked
+    # Family is revoked if ANY token is revoked (rotation occurred)
+    # This detects reuse: if an old token is used after rotation,
+    # at least one token in the family will be revoked
+    any_revoked = any(token.is_revoked for token in all_tokens)
+    return any_revoked
 
 
 def cleanup_expired_tokens(db: Session) -> int:
