@@ -65,6 +65,7 @@ def create_device_session(
             browser_info=browser_info,
             last_active=now_ist(),
             is_active=True,
+            refresh_token_family_id=None,  # Will be set after refresh token creation
 
             # backward-compat
             session_key=session_token,
@@ -75,6 +76,17 @@ def create_device_session(
         db.add(ds)
         db.commit()
         db.refresh(ds)
+        
+        # Verify session was created successfully
+        if not ds.id:
+            db.rollback()
+            raise Exception("Session ID was not generated after commit")
+
+        logger.info(
+            f"Device session created successfully | "
+            f"User ID: {user_id} | Session ID: {ds.id} | Platform: {device_platform} | "
+            f"Device ID: {device_id} | IP: {ip} | Correlation ID: {correlation_id}"
+        )
 
         # Audit log
         try:
@@ -90,7 +102,7 @@ def create_device_session(
                 correlation_id=correlation_id
             )
         except Exception as e:
-            logger.warning(f"Failed to create session audit log: {e}")
+            logger.warning(f"Failed to create session audit log for session {ds.id}: {e}")
 
         return ds
 
@@ -102,7 +114,16 @@ def create_device_session(
 
 
 def get_device_session(db: Session, session_id: int) -> Optional[DeviceSession]:
-    return db.query(DeviceSession).filter(DeviceSession.id == session_id).first()
+    """
+    Get device session by ID.
+    Returns session even if inactive (caller should check is_active).
+    Returns None if session doesn't exist.
+    """
+    try:
+        return db.query(DeviceSession).filter(DeviceSession.id == session_id).first()
+    except Exception as e:
+        logger.error(f"Database error getting device session {session_id}: {str(e)}", exc_info=True)
+        raise
 
 
 

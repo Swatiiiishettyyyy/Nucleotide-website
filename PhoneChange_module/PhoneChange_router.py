@@ -98,12 +98,20 @@ def confirm_old_number(
     )
     
     if error:
+        logger.warning(
+            f"Phone change confirm old number failed | "
+            f"User ID: {current_user.id} | Request ID: {request.request_id} | Error: {error} | IP: {ip_address}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=error
         )
     
     if not session_token:
+        logger.error(
+            f"Phone change confirm old number failed - Session token not generated | "
+            f"User ID: {current_user.id} | Request ID: {request.request_id} | IP: {ip_address}"
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="We couldn't find your verification session. Please start the process again."
@@ -140,6 +148,10 @@ def verify_new_number(
     )
     
     if error:
+        logger.warning(
+            f"Phone change verify new number failed | "
+            f"User ID: {current_user.id} | New Phone: {request.new_phone} | Error: {error} | IP: {ip_address}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=error
@@ -181,12 +193,20 @@ def confirm_new_number(
     )
     
     if error:
+        logger.warning(
+            f"Phone change confirm new number failed | "
+            f"User ID: {current_user.id} | Error: {error} | IP: {ip_address}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=error
         )
     
     if not phone_change_request or not phone_change_request.new_phone:
+        logger.error(
+            f"Phone change confirm new number failed - Missing phone change request or new phone | "
+            f"User ID: {current_user.id} | IP: {ip_address}"
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="We couldn't complete your phone number change. Please try again."
@@ -222,6 +242,11 @@ def cancel_phone_change(
     )
     
     if error:
+        logger.warning(
+            f"Phone change cancellation failed | "
+            f"User ID: {current_user.id} | Session Token: {request.session_token} | "
+            f"Request ID: {request.request_id} | Error: {error} | IP: {ip_address}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=error

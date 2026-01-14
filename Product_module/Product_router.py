@@ -1,14 +1,18 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
+import logging
 
 from .Product_model import Product, PlanType
 from deps import get_db
+from Login_module.Utils.rate_limiter import get_client_ip
 from .Product_schema import (
     ProductCreate,
     ProductListResponse,
     ProductSingleResponse,
 )
 from .category_service import resolve_category
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/products", tags=["Products"])
 
@@ -52,10 +56,15 @@ def get_products(db: Session = Depends(get_db)):
 
 
 @router.get("/detail/{ProductId}", response_model=ProductSingleResponse)
-def get_product_detail(ProductId: int, db: Session = Depends(get_db)):
+def get_product_detail(ProductId: int, request: Request, db: Session = Depends(get_db)):
+    client_ip = get_client_ip(request) if request else None
     product = db.query(Product).filter(Product.ProductId == ProductId, Product.is_deleted == False).first()
 
     if not product:
+        logger.warning(
+            f"Product detail failed - Product not found | "
+            f"Product ID: {ProductId} | IP: {client_ip}"
+        )
         raise HTTPException(status_code=404, detail="Product not found")
 
     return {

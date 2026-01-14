@@ -32,8 +32,8 @@ class PhoneChangeRequest(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     
     # Phone numbers
-    old_phone = Column(String(20), nullable=False)
-    new_phone = Column(String(20), nullable=True)  # Set when new number verification starts
+    old_phone = Column(String(20), nullable=False)  # Note: Stored as plaintext for OTP, but can be up to 20 chars
+    new_phone = Column(String(20), nullable=True)  # Set when new number verification starts - Note: Stored as plaintext for OTP
     
     # Status tracking
     status = Column(String(50), nullable=False, default=PhoneChangeStatus.OLD_NUMBER_PENDING.value, index=True)

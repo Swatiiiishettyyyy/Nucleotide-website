@@ -4,15 +4,16 @@ from dotenv import load_dotenv
 import os
 import redis
 import logging
+from config import settings
 
-# Load .env file
+# Load .env file (for Redis config and other non-settings variables)
 load_dotenv()
 
-# Read OTP-related environment variables
-OTP_EXPIRY_SECONDS = int(os.getenv("OTP_EXPIRY_SECONDS", 120))  # 2 minutes
-OTP_MAX_REQUESTS_PER_HOUR = int(os.getenv("OTP_MAX_REQUESTS_PER_HOUR", 15))  # 15 per hour
-OTP_MAX_FAILED_ATTEMPTS = int(os.getenv("OTP_MAX_FAILED_ATTEMPTS", 5))  # Block after 5 failed attempts
-OTP_BLOCK_DURATION_SECONDS = int(os.getenv("OTP_BLOCK_DURATION_SECONDS", 600))  # 10 minutes block
+# Read OTP-related environment variables - use settings directly (loaded from .env via Pydantic)
+OTP_EXPIRY_SECONDS = settings.OTP_EXPIRY_SECONDS
+OTP_MAX_REQUESTS_PER_HOUR = settings.OTP_MAX_REQUESTS_PER_HOUR
+OTP_MAX_FAILED_ATTEMPTS = settings.OTP_MAX_FAILED_ATTEMPTS
+OTP_BLOCK_DURATION_SECONDS = settings.OTP_BLOCK_DURATION_SECONDS
 
 # Redis configuration
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -23,34 +24,69 @@ REDIS_DB = int(os.getenv("REDIS_DB", 0))
 
 logger = logging.getLogger(__name__)
 
-# Initialize Redis connection
-try:
-    _redis_client = redis.Redis(
-        host=REDIS_HOST,
-        port=REDIS_PORT,
-        username=REDIS_USERNAME,
-        password=REDIS_PASSWORD,
-        db=REDIS_DB,
-        decode_responses=True,
-        socket_connect_timeout=5,
-        socket_timeout=5,
-        retry_on_timeout=True,
-        health_check_interval=30,
-        max_connections=50,  # Connection pool size
-        socket_keepalive=True
-    )
-    # Test connection
-    _redis_client.ping()
-    logger.info(f"✅ Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
-except redis.ConnectionError as e:
-    logger.error(f"❌ Redis connection failed: {e}")
-    raise
-except redis.AuthenticationError as e:
-    logger.error(f"❌ Redis authentication failed: {e}")
-    raise
-except Exception as e:
-    logger.error(f"❌ Redis initialization error: {e}")
-    raise
+# Initialize Redis connection (lazy initialization - don't ping at startup)
+_redis_client = None
+_redis_available = False
+
+def _init_redis_client():
+    """Initialize Redis client (called on first use, not at module import)"""
+    global _redis_client, _redis_available
+    
+    if _redis_client is not None:
+        return _redis_client
+    
+    try:
+        _redis_client = redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            username=REDIS_USERNAME,
+            password=REDIS_PASSWORD,
+            db=REDIS_DB,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+            retry_on_timeout=True,
+            health_check_interval=30,
+            max_connections=50,  # Connection pool size
+            socket_keepalive=True
+        )
+        # Test connection (non-blocking - don't fail startup if Redis is down)
+        try:
+            _redis_client.ping()
+            _redis_available = True
+            logger.info(f"✅ Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
+        except (redis.ConnectionError, redis.TimeoutError, Exception) as e:
+            _redis_available = False
+            logger.warning(f"⚠️ Redis connection test failed (app will continue): {e}")
+            logger.warning("⚠️ OTP functionality will be limited while Redis is unavailable")
+        return _redis_client
+    except Exception as e:
+        _redis_available = False
+        logger.error(f"❌ Redis initialization error (app will continue): {e}")
+        logger.warning("⚠️ OTP functionality will be limited while Redis is unavailable")
+        # Don't raise - allow app to start without Redis
+        return None
+
+def _get_redis_client():
+    """Get Redis client (lazy initialization)"""
+    if _redis_client is None:
+        _init_redis_client()
+    return _redis_client
+
+def _is_redis_available():
+    """Check if Redis is available and connected"""
+    global _redis_available
+    if not _redis_available:
+        # Try to reconnect
+        client = _get_redis_client()
+        if client:
+            try:
+                client.ping()
+                _redis_available = True
+                logger.info("✅ Redis connection restored")
+            except Exception:
+                _redis_available = False
+    return _redis_available
 
 
 def _otp_key(country_code: str, mobile: str) -> str:
@@ -78,10 +114,15 @@ def generate_otp(length: int = 4) -> str:
 
 def store_otp(country_code: str, mobile: str, otp: str, expires_in: int = None):
     """Store OTP in Redis with TTL"""
+    client = _get_redis_client()
+    if not client or not _is_redis_available():
+        logger.error("Cannot store OTP: Redis is not available")
+        raise redis.ConnectionError("Redis is not available")
+    
     try:
         key = _otp_key(country_code, mobile)
         ex = expires_in or OTP_EXPIRY_SECONDS
-        _redis_client.set(key, otp, ex=ex)
+        client.set(key, otp, ex=ex)
     except redis.RedisError as e:
         logger.error(f"Redis error storing OTP: {e}")
         raise
@@ -89,8 +130,13 @@ def store_otp(country_code: str, mobile: str, otp: str, expires_in: int = None):
 
 def get_otp(country_code: str, mobile: str) -> Optional[str]:
     """Get OTP from Redis"""
+    client = _get_redis_client()
+    if not client or not _is_redis_available():
+        logger.warning("Cannot get OTP: Redis is not available")
+        return None
+    
     try:
-        return _redis_client.get(_otp_key(country_code, mobile))
+        return client.get(_otp_key(country_code, mobile))
     except redis.RedisError as e:
         logger.error(f"Redis error getting OTP: {e}")
         return None
@@ -98,8 +144,13 @@ def get_otp(country_code: str, mobile: str) -> Optional[str]:
 
 def delete_otp(country_code: str, mobile: str):
     """Delete OTP from Redis"""
+    client = _get_redis_client()
+    if not client or not _is_redis_available():
+        logger.warning("Cannot delete OTP: Redis is not available")
+        return
+    
     try:
-        _redis_client.delete(_otp_key(country_code, mobile))
+        client.delete(_otp_key(country_code, mobile))
     except redis.RedisError as e:
         logger.error(f"Redis error deleting OTP: {e}")
 

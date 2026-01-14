@@ -15,6 +15,7 @@ openpyxl==3.1.5
 alembic
 boto3
 python-multipart
+bcrypt
 # Google API packages for gmeet_api
 google-api-python-client>=2.100.0
 google-auth-oauthlib>=1.1.0

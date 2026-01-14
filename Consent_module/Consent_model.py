@@ -19,7 +19,7 @@ class UserConsent(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_phone = Column(String(20), nullable=False, index=True)
+    user_phone = Column(String(100), nullable=False, index=True)  # Increased to 100 for encrypted phone numbers
     member_id = Column(Integer, ForeignKey("members.id", ondelete="RESTRICT"), nullable=False, index=True)
     product_id = Column(Integer, ForeignKey("consent_products.id", ondelete="CASCADE"), nullable=False, index=True)
     product = Column(String(100), nullable=True)  # Product name (denormalized for quick access)
@@ -56,14 +56,14 @@ class PartnerConsent(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     user_member_id = Column(Integer, ForeignKey("members.id", ondelete="RESTRICT"), nullable=False, index=True)
     user_name = Column(String(100), nullable=False)
-    user_mobile = Column(String(20), nullable=False, index=True)
+    user_mobile = Column(String(100), nullable=False, index=True)  # Increased to 100 for encrypted phone numbers
     user_consent = Column(String(10), nullable=False, default="no")  # "yes" or "no"
     
     # Partner info - the spouse/partner who needs to consent
     partner_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)  # Partner's user_id if they have account
     partner_member_id = Column(Integer, ForeignKey("members.id", ondelete="SET NULL"), nullable=True, index=True)  # Partner's member_id if exists
     partner_name = Column(String(100), nullable=True)  # Partner's name
-    partner_mobile = Column(String(20), nullable=False, index=True)  # Partner's mobile (required for OTP)
+    partner_mobile = Column(String(100), nullable=False, index=True)  # Partner's mobile (required for OTP) - Increased to 100 for encrypted phone numbers
     partner_consent = Column(String(10), nullable=False, default="no")  # "yes" or "no"
     
     # Final consent status (only "yes" if both user and partner consented)

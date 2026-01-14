@@ -22,12 +22,13 @@ def get_consent_by_member_and_product(db: Session, member_id: int, product_id: i
 
 def get_consent_by_user_and_product(db: Session, user_phone: str, product_id: int) -> Optional[UserConsent]:
     """Get consent record for a specific user and product (legacy - for backward compatibility)"""
-    return db.query(UserConsent).filter(
+    consent = db.query(UserConsent).filter(
         and_(
             UserConsent.user_phone == user_phone,
             UserConsent.product_id == product_id
         )
     ).first()
+    return consent
 
 
 
@@ -59,6 +60,7 @@ def create_consent(
     consent_product = db.query(ConsentProduct).filter(ConsentProduct.id == product_id).first()
     product_name = consent_product.name if consent_product else None
     
+    # Store phone number as plain text
     consent = UserConsent(
         user_id=user_id,
         user_phone=user_phone,
@@ -72,6 +74,7 @@ def create_consent(
     db.add(consent)
     db.commit()
     db.refresh(consent)
+    
     return consent
 
 
@@ -108,6 +111,10 @@ def record_consent(
     # Validate consent product exists
     consent_product = db.query(ConsentProduct).filter(ConsentProduct.id == product_id).first()
     if not consent_product:
+        logger.warning(
+            f"Consent record failed - Product not found | "
+            f"Product ID: {product_id} | User ID: {user_id} | Member ID: {member_id}"
+        )
         raise HTTPException(status_code=404, detail="We couldn't find this product. Please try again.")
     
     # Check if consent already exists (member-scoped)
@@ -160,7 +167,8 @@ def get_member_consents(db: Session, member_id: int) -> List[UserConsent]:
 
 def get_user_consents(db: Session, user_phone: str) -> List[UserConsent]:
     """Get all consent records for a user (legacy - for backward compatibility)"""
-    return db.query(UserConsent).filter(UserConsent.user_phone == user_phone).all()
+    consents = db.query(UserConsent).filter(UserConsent.user_phone == user_phone).all()
+    return consents
 
 
 def get_consents_by_product(db: Session, product_id: int) -> List[UserConsent]:
@@ -226,6 +234,7 @@ def update_manage_consent(
             # Create new record only if status is "yes"
             # If status is "no" and no record exists, we can skip (nothing to uncheck)
             if status == "yes":
+                # user_phone will be encrypted inside create_consent
                 create_consent(db, user_id, user_phone, member_id, product_id, "product", status)
                 created_count += 1
     

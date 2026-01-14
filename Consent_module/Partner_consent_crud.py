@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime, timedelta
 from Login_module.OTP import otp_manager
 from Login_module.Utils.datetime_utils import now_ist, to_ist, IST
+from Login_module.Utils.phone_encryption import decrypt_phone
 
 from .Consent_model import PartnerConsent, ConsentProduct
 from Login_module.User.user_model import User
@@ -59,7 +60,8 @@ def get_partner_consent_by_request_id(
 
 def find_partner_user_by_mobile(db: Session, partner_mobile: str) -> Optional[User]:
     """Find user account by mobile number"""
-    return db.query(User).filter(User.mobile == partner_mobile).first()
+    user = db.query(User).filter(User.mobile == partner_mobile).first()
+    return user
 
 
 def find_partner_member_by_user_id(db: Session, partner_user_id: int) -> Optional[Member]:
@@ -75,13 +77,14 @@ def find_partner_member_by_user_id(db: Session, partner_user_id: int) -> Optiona
 
 def find_partner_member_under_same_user(db: Session, user_id: int, partner_mobile: str) -> Optional[Member]:
     """Find partner as member under same user account"""
-    return db.query(Member).filter(
+    member = db.query(Member).filter(
         and_(
             Member.user_id == user_id,
             Member.mobile == partner_mobile,
             Member.is_deleted == False
         )
     ).first()
+    return member
 
 
 def validate_partner_eligibility(
@@ -312,6 +315,10 @@ def create_partner_consent_request(
     now = now_ist()
     request_expires_at = now + timedelta(hours=REQUEST_EXPIRY_HOURS)
     
+    # Encrypt phone numbers before storing
+    encrypted_user_mobile = encrypt_phone(user_mobile)
+    encrypted_partner_mobile = encrypt_phone(partner_mobile)
+    
     if existing_consent and existing_consent.request_status in ["EXPIRED", "CANCELLED", "DECLINED", "REVOKED_BY_PARTNER"]:
         # Update existing record
         existing_consent.request_id = request_id
@@ -319,7 +326,8 @@ def create_partner_consent_request(
         existing_consent.partner_consent = "pending"
         existing_consent.final_status = "no"
         existing_consent.request_status = "PENDING_REQUEST"
-        existing_consent.partner_mobile = partner_mobile
+        existing_consent.partner_mobile = encrypted_partner_mobile  # Store encrypted
+        existing_consent.user_mobile = encrypted_user_mobile  # Store encrypted
         existing_consent.partner_user_id = partner_info["partner_user_id"]
         existing_consent.partner_member_id = partner_info["partner_member_id"]
         existing_consent.partner_name = partner_name
@@ -333,6 +341,11 @@ def create_partner_consent_request(
         
         db.commit()
         db.refresh(existing_consent)
+        # Decrypt before returning
+        if existing_consent.user_mobile:
+            existing_consent.user_mobile = decrypt_phone(existing_consent.user_mobile)
+        if existing_consent.partner_mobile:
+            existing_consent.partner_mobile = decrypt_phone(existing_consent.partner_mobile)
         return existing_consent
     else:
         # Create new record
@@ -341,12 +354,12 @@ def create_partner_consent_request(
             user_id=user_id,
             user_member_id=user_member_id,
             user_name=user_name,
-            user_mobile=user_mobile,
+            user_mobile=encrypted_user_mobile,  # Store encrypted
             user_consent="yes",
             partner_user_id=partner_info["partner_user_id"],
             partner_member_id=partner_info["partner_member_id"],
             partner_name=partner_name,
-            partner_mobile=partner_mobile,
+            partner_mobile=encrypted_partner_mobile,  # Store encrypted
             partner_consent="pending",
             final_status="no",
             request_status="PENDING_REQUEST",
@@ -362,6 +375,11 @@ def create_partner_consent_request(
         db.add(partner_consent)
         db.commit()
         db.refresh(partner_consent)
+        # Decrypt before returning
+        if partner_consent.user_mobile:
+            partner_consent.user_mobile = decrypt_phone(partner_consent.user_mobile)
+        if partner_consent.partner_mobile:
+            partner_consent.partner_mobile = decrypt_phone(partner_consent.partner_mobile)
         return partner_consent
 
 
@@ -419,8 +437,11 @@ def verify_partner_otp(
     if not consent:
         raise HTTPException(status_code=404, detail="We couldn't find your consent request. Please try again.")
     
+    # Decrypt stored partner_mobile for comparison
+    decrypted_partner_mobile = decrypt_phone(consent.partner_mobile) if consent.partner_mobile else None
+    
     # Validate partner mobile matches
-    if consent.partner_mobile != partner_mobile:
+    if decrypted_partner_mobile != partner_mobile:
         raise HTTPException(status_code=400, detail="The partner's phone number doesn't match. Please check and try again.")
     
     # Check request status
@@ -599,10 +620,13 @@ def revoke_partner_consent(
     if not otp:
         raise HTTPException(status_code=400, detail="OTP is required for revoking consent")
     
+    # Encrypt partner_mobile before querying
+    encrypted_partner_mobile = encrypt_phone(partner_mobile)
+    
     # Find consent record by partner_mobile and status CONSENT_GIVEN
     consent = db.query(PartnerConsent).filter(
         and_(
-            PartnerConsent.partner_mobile == partner_mobile,
+            PartnerConsent.partner_mobile == encrypted_partner_mobile,
             PartnerConsent.request_status == "CONSENT_GIVEN"
         )
     ).first()
@@ -610,8 +634,9 @@ def revoke_partner_consent(
     if not consent:
         raise HTTPException(status_code=404, detail="No active consent found for this partner mobile")
     
-    # Verify partner mobile matches
-    if consent.partner_mobile != partner_mobile:
+    # Decrypt for comparison (already verified by query, but keeping for safety)
+    decrypted_consent_mobile = decrypt_phone(consent.partner_mobile) if consent.partner_mobile else None
+    if decrypted_consent_mobile != partner_mobile:
         raise HTTPException(status_code=400, detail="The partner's phone number doesn't match. Please check and try again.")
     
     # Verify OTP from Redis (required for security)
@@ -671,6 +696,9 @@ def get_partner_consent_status(
             consent.request_status = "EXPIRED"
             db.commit()
     
+    # Decrypt phone numbers before returning
+    decrypted_partner_mobile = decrypt_phone(consent.partner_mobile) if consent.partner_mobile else None
+    
     return {
         "request_id": consent.request_id,
         "user_member_id": consent.user_member_id,
@@ -679,7 +707,7 @@ def get_partner_consent_status(
         "user_consent": consent.user_consent,
         "partner_consent": consent.partner_consent,
         "final_status": consent.final_status,
-        "partner_mobile": consent.partner_mobile,
+        "partner_mobile": decrypted_partner_mobile,
         "partner_name": consent.partner_name,
         "request_expires_at": consent.request_expires_at.isoformat() if consent.request_expires_at else None,
         "otp_expires_at": consent.otp_expires_at.isoformat() if consent.otp_expires_at else None,

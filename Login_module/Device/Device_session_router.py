@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
+import logging
 
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user
@@ -18,6 +19,8 @@ from .Device_session_crud import (
 )
 from Login_module.OTP.OTP_router import MAX_ACTIVE_SESSIONS
 from Login_module.Utils.rate_limiter import get_client_ip
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
@@ -149,21 +152,35 @@ def revoke_session(
     """
     # Verify session belongs to user
     from .Device_session_crud import get_device_session
+    client_ip = get_client_ip(request)
     session = get_device_session(db, session_id)
     
     if not session:
+        logger.warning(
+            f"Session revocation failed - Session not found | "
+            f"Session ID: {session_id} | User ID: {current_user.id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found"
         )
     
     if session.user_id != current_user.id:
+        logger.warning(
+            f"Session revocation failed - Unauthorized access attempt | "
+            f"Session ID: {session_id} | Session User ID: {session.user_id} | "
+            f"Requesting User ID: {current_user.id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only revoke your own sessions"
         )
     
     if not session.is_active:
+        logger.warning(
+            f"Session revocation failed - Session already inactive | "
+            f"Session ID: {session_id} | User ID: {current_user.id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Session is already inactive"
@@ -185,6 +202,10 @@ def revoke_session(
     )
     
     if not deactivated:
+        logger.error(
+            f"Session revocation failed - Database error | "
+            f"Session ID: {session_id} | User ID: {current_user.id} | IP: {ip_address}"
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to revoke session"
@@ -223,8 +244,13 @@ def revoke_all_sessions(
     
     # Get all active sessions
     active_sessions = get_user_active_sessions(db, current_user.id)
+    client_ip = get_client_ip(request)
     
     if not active_sessions:
+        logger.warning(
+            f"Revoke all sessions failed - No active sessions found | "
+            f"User ID: {current_user.id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No active sessions found"
@@ -254,6 +280,10 @@ def revoke_all_sessions(
             revoked_count += 1
     
     if revoked_count == 0:
+        logger.warning(
+            f"Revoke all sessions failed - No sessions revoked (only current session exists) | "
+            f"User ID: {current_user.id} | Current Session ID: {current_session_id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No sessions were revoked (only current session exists)"

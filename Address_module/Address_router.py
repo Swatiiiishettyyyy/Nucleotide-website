@@ -1,5 +1,6 @@
 import uuid
 from typing import List
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session
 from Cart_module.Cart_model import CartItem
 from Login_module.Utils.auth_user import get_current_user
 from Login_module.Utils.datetime_utils import to_ist_isoformat
+from Login_module.Utils.rate_limiter import get_client_ip
 from deps import get_db
 from .Address_crud import delete_address, get_addresses_by_user, save_address
 from .Address_schema import (
@@ -15,6 +17,8 @@ from .Address_schema import (
     AddressResponse,
     EditAddressRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/address", tags=["Address"])
 
@@ -34,8 +38,13 @@ def save_address_api(
     """
     # Generate correlation ID for request tracing
     correlation_id = str(uuid.uuid4())
+    client_ip = get_client_ip(request)
     address = save_address(db, user, req, request=request, correlation_id=correlation_id)
     if not address:
+        logger.error(
+            f"Address save failed - Unable to create/update address | "
+            f"User ID: {user.id} | Address ID: {req.address_id} | IP: {client_ip}"
+        )
         raise HTTPException(status_code=404, detail="We couldn't find the address you're trying to edit.")
 
     return {
@@ -91,6 +100,11 @@ def edit_address_api(
     ).first()
     
     if not existing_address:
+        client_ip = get_client_ip(request)
+        logger.warning(
+            f"Address edit failed - Address not found or unauthorized | "
+            f"Address ID: {address_id} | User ID: {user.id} | IP: {client_ip}"
+        )
         raise HTTPException(status_code=404, detail="We couldn't find this address, or it doesn't belong to your account.")
     
     # Autofill: Merge existing address data with request data (request takes precedence)
@@ -115,8 +129,13 @@ def edit_address_api(
     correlation_id = str(uuid.uuid4())
     
     # Save address (this will validate city name against excel sheet and update the address)
+    client_ip = get_client_ip(request)
     address = save_address(db, user, complete_req, request=request, correlation_id=correlation_id)
     if not address:
+        logger.error(
+            f"Address edit failed - Save operation failed | "
+            f"Address ID: {address_id} | User ID: {user.id} | IP: {client_ip}"
+        )
         raise HTTPException(status_code=404, detail="We couldn't find this address, or it doesn't belong to your account.")
 
     return {

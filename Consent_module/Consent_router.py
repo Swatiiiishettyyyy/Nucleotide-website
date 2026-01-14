@@ -9,6 +9,7 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 from Login_module.Utils.auth_user import get_current_user, get_current_member
+from Login_module.Utils.phone_encryption import decrypt_phone
 from Login_module.User.user_model import User
 from Member_module.Member_model import Member
 from .Consent_model import ConsentProduct
@@ -72,7 +73,13 @@ def record_user_consent(
     consent_source automatically defaults to "product" if not provided.
     Requires an active member profile to be selected.
     """
+    client_ip = request.client.host if request and request.client else None
+    
     if not current_member:
+        logger.warning(
+            f"Consent record failed - No member profile selected | "
+            f"User ID: {current_user.id} | Product ID: {req.product_id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=400,
             detail="No member profile selected. Please select a member profile first."
@@ -80,6 +87,10 @@ def record_user_consent(
     
     # Route product_id 11 to partner consent endpoint
     if req.product_id == 11:
+        logger.warning(
+            f"Consent record failed - Product requires partner consent | "
+            f"User ID: {current_user.id} | Member ID: {current_member.id} | Product ID: {req.product_id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=400,
             detail="This product requires partner consent. Please use the partner consent option."
@@ -122,6 +133,13 @@ def record_user_consent(
     except HTTPException:
         raise
     except Exception as e:
+        client_ip = request.client.host if request and request.client else None
+        logger.error(
+            f"Consent record failed - Unexpected error | "
+            f"User ID: {current_user.id} | Member ID: {current_member.id if current_member else None} | "
+            f"Product ID: {req.product_id} | Error: {str(e)} | IP: {client_ip}",
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail="Something went wrong while saving your consent. Please try again.")
 
 
@@ -137,6 +155,9 @@ def get_manage_consent_page(
     Requires an active member profile to be selected.
     """
     if not current_member:
+        logger.warning(
+            f"Consent management failed - No member profile selected | User ID: {current_user.id}"
+        )
         raise HTTPException(
             status_code=400,
             detail="No member profile selected. Please select a member profile first."
@@ -165,6 +186,12 @@ def get_manage_consent_page(
             "data": result
         }
     except Exception as e:
+        logger.error(
+            f"Consent management failed - Unexpected error loading consent page | "
+            f"User ID: {current_user.id} | Member ID: {current_member.id if current_member else None} | "
+            f"Error: {str(e)}",
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail="Something went wrong while loading your consent settings. Please try again.")
 
 
@@ -183,7 +210,13 @@ def update_manage_consent(
     Note: Product 11 (partner consent) cannot be updated via this endpoint.
     Use /consent/partner-request endpoint for Product 11 (OTP-based flow).
     """
+    client_ip = request.client.host if request and request.client else None
+    
     if not current_member:
+        logger.warning(
+            f"Consent update failed - No member profile selected | "
+            f"User ID: {current_user.id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=400,
             detail="No member profile selected. Please select a member profile first."
@@ -242,6 +275,13 @@ def update_manage_consent(
             "data": result
         }
     except Exception as e:
+        client_ip = request.client.host if request and request.client else None
+        logger.error(
+            f"Consent update failed - Unexpected error | "
+            f"User ID: {current_user.id} | Member ID: {current_member.id} | "
+            f"Error: {str(e)} | IP: {client_ip}",
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail="Something went wrong while updating your consent. Please try again.")
 
 
@@ -382,6 +422,9 @@ def verify_partner_otp_endpoint(
             otp=req.otp
         )
         
+        # Decrypt partner_mobile before returning (stored encrypted in database)
+        decrypted_partner_mobile = decrypt_phone(consent.partner_mobile) if consent.partner_mobile else None
+        
         return {
             "status": "success",
             "message": "OTP verified successfully. Partner consent has been automatically recorded.",
@@ -390,7 +433,7 @@ def verify_partner_otp_endpoint(
                 "user_member_id": consent.user_member_id,
                 "partner_member_id": consent.partner_member_id,
                 "request_status": consent.request_status,
-                "partner_mobile": consent.partner_mobile,
+                "partner_mobile": decrypted_partner_mobile,
                 "partner_consent": consent.partner_consent,
                 "final_status": consent.final_status
             }

@@ -18,19 +18,18 @@ from ..Utils.auth_user import get_current_user
 from ..Utils.rate_limiter import get_client_ip
 from . import otp_manager
 from ..User.user_session_crud import get_user_by_mobile, create_user
+from ..User.user_model import User
 from ..Device.Device_session_crud import create_device_session, deactivate_session_by_token
 from . import OTP_crud
 
-from dotenv import load_dotenv
-import os
-
-load_dotenv()
+from config import settings
 
 logger = logging.getLogger(__name__)
 
-OTP_EXPIRY_SECONDS = int(os.getenv("OTP_EXPIRY_SECONDS", 120))  # 2 minutes
-ACCESS_TOKEN_EXPIRE_SECONDS = int(os.getenv("ACCESS_TOKEN_EXPIRE_SECONDS", 86400))  # 1 day
-MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", 4))  # Max 4 active sessions per user
+# Use settings directly (loaded from .env via Pydantic)
+OTP_EXPIRY_SECONDS = settings.OTP_EXPIRY_SECONDS
+ACCESS_TOKEN_EXPIRE_SECONDS = settings.ACCESS_TOKEN_EXPIRE_SECONDS
+MAX_ACTIVE_SESSIONS = settings.MAX_ACTIVE_SESSIONS
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -71,7 +70,7 @@ def send_otp(request: SendOTPRequest, http_request: Request, db: Session = Depen
     return SendOTPResponse(status="success", message=message, data=data)
 
 
-@router.post("/verify-otp", response_model=VerifyOTPResponse)
+@router.post("/verify-otp")
 def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(get_db)):
     """
     Verify OTP and create user session.
@@ -105,6 +104,10 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
         # Fetch OTP from Redis (plaintext)
         stored = otp_manager.get_otp(req.country_code, req.mobile)
         if not stored:
+            logger.warning(
+                f"OTP verification failed - OTP expired or not found | "
+                f"Phone: {phone_number} | Device: {req.device_id} | IP: {client_ip}"
+            )
             OTP_crud.create_otp_audit_log(
                 db=db,
                 event_type="FAILED",
@@ -122,7 +125,11 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
 
         # Compare plaintext (fast check)
         if stored != req.otp:
-            logger.warning(f"Invalid OTP attempt for {phone_number} from IP {client_ip}")
+            logger.warning(
+                f"OTP verification failed - Invalid OTP | "
+                f"Phone: {phone_number} | Device: {req.device_id} | IP: {client_ip} | "
+                f"Attempted OTP: {req.otp[:2]}** (masked)"
+            )
             
             OTP_crud.create_otp_audit_log(
                 db=db,
@@ -146,18 +153,91 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
     # OTP verified successfully (both normal and bypass)
     try:
         # Get or create user
+        # If phone exists and OTP is correct, verification should pass
         try:
             user = get_user_by_mobile(db, req.mobile)
             is_new_user = False
             if not user:
+                # No user found - try to create new one
                 user = create_user(db, mobile=req.mobile)
-                is_new_user = True
+                if user:
+                    is_new_user = True
+                    logger.info(
+                        f"New user created during OTP verification | "
+                        f"User ID: {user.id} | Phone: {phone_number} | IP: {client_ip}"
+                    )
+                else:
+                    # create_user returned None (IntegrityError but couldn't find user)
+                    # Try get_user_by_mobile one more time with fresh session
+                    logger.warning("create_user returned None. Retrying get_user_by_mobile...")
+                    db.expire_all()
+                    user = get_user_by_mobile(db, req.mobile)
+                    if user:
+                        is_new_user = False
+                        logger.info(
+                            f"Existing user found on retry during OTP verification | "
+                            f"User ID: {user.id} | Phone: {phone_number} | IP: {client_ip}"
+                        )
+                    else:
+                        # Still not found - try final fallback search
+                        logger.warning("User not found after retry. Performing final fallback search...")
+                        db.expire_all()
+                        from Login_module.User.user_model import User as UserModel
+                        all_users = db.query(UserModel).all()
+                        mobile_normalized = str(req.mobile).strip()
+                        logger.info(f"Final fallback: Searching through {len(all_users)} users")
+                        for u in all_users:
+                            if u.mobile:
+                                db_mobile_normalized = str(u.mobile).strip()
+                                # Try exact match
+                                if db_mobile_normalized == mobile_normalized:
+                                    user = u
+                                    is_new_user = False
+                                    logger.info(f"Found user (ID: {user.id}) in final fallback search (exact match)")
+                                    break
+                                # Try last 10 digits match
+                                elif len(mobile_normalized) > 10 and len(db_mobile_normalized) >= 10:
+                                    if db_mobile_normalized[-10:] == mobile_normalized[-10:]:
+                                        user = u
+                                        is_new_user = False
+                                        logger.info(f"Found user (ID: {user.id}) in final fallback search (last 10 digits)")
+                                        break
+            else:
+                logger.info(
+                    f"Existing user found during OTP verification | "
+                    f"User ID: {user.id} | Phone: {phone_number} | IP: {client_ip}"
+                )
+        except HTTPException:
+            # Re-raise HTTP exceptions
+            raise
         except Exception as e:
+            # If user creation fails for any reason, try one more time to get existing user
+            logger.warning(f"Error getting/creating user: {e}. Trying to get existing user...")
+            db.expire_all()
+            user = get_user_by_mobile(db, req.mobile)
+            if not user:
+                # If still no user found, raise error
+                db.rollback()
+                logger.error(
+                    f"OTP verification failed - Cannot get or create user | "
+                    f"Phone: {phone_number} | IP: {client_ip} | Error: {str(e)}",
+                    exc_info=True
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Unable to create or find user. Please try again."
+                )
+        
+        # Ensure we have a user at this point
+        if not user:
             db.rollback()
-            logger.error(f"Error getting/creating user: {e}", exc_info=True)
+            logger.error(
+                f"OTP verification failed - No user found after all attempts | "
+                f"Phone: {phone_number} | IP: {client_ip}"
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Database error: Unable to get or create user. {str(e)}"
+                detail="Unable to retrieve user account. Please contact support."
             )
         
         # Member transfer to independent user functionality removed
@@ -198,7 +278,12 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
             )
         except Exception as e:
             db.rollback()
-            logger.error(f"Error creating device session: {e}", exc_info=True)
+            logger.error(
+                f"OTP verification failed - Database error creating device session | "
+                f"User ID: {user.id} | Phone: {phone_number} | Device: {req.device_id} | "
+                f"IP: {client_ip} | Error: {str(e)}",
+                exc_info=True
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Database error: Unable to create session. {str(e)}"
@@ -225,44 +310,259 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
             # Log but don't fail login if member query fails
             logger.warning(f"Error fetching default member during login: {e}")
         
-        # Build token data
-        token_data = {
+        # Determine if web or mobile platform
+        device_platform = session.device_platform or "unknown"
+        is_web = device_platform.lower() in ["web", "desktop_web"]
+        
+        # Generate token family ID for refresh token rotation tracking
+        token_family_id = str(uuid.uuid4())
+        
+        # Verify session has valid ID before creating token
+        if not session or not session.id:
+            db.rollback()
+            logger.error(
+                f"OTP verification failed - Session ID is None or session is None | "
+                f"User ID: {user.id} | Session: {session} | Session ID: {session.id if session else 'None'} | IP: {client_ip}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Session creation failed. Please try again."
+            )
+        
+        # Ensure session_id is a valid integer that can be converted back
+        try:
+            session_id_int = int(session.id)
+        except (ValueError, TypeError) as e:
+            db.rollback()
+            logger.error(
+                f"OTP verification failed - Session ID is not a valid integer | "
+                f"User ID: {user.id} | Session ID: {session.id} (type: {type(session.id)}) | IP: {client_ip} | Error: {str(e)}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Session creation failed. Please try again."
+            )
+        
+        # Build access token data
+        access_token_data = {
             "sub": str(user.id),
-            "session_id": str(session.id),
-            "device_platform": session.device_platform
+            "session_id": str(session.id),  # Store as string, but ensure it's a valid integer string
+            "device_platform": device_platform
         }
+        
+        logger.info(
+            f"Creating access token | User ID: {user.id} | Session ID: {session.id} (int: {session_id_int}) | "
+            f"Token data: {access_token_data} | IP: {client_ip}"
+        )
         
         # Add selected_member_id if default member exists
         if default_member:
-            token_data["selected_member_id"] = str(default_member.id)
+            access_token_data["selected_member_id"] = str(default_member.id)
         
+        # Generate access token (15 minutes)
+        from config import settings
         try:
-            token = security.create_access_token(token_data, expires_delta=ACCESS_TOKEN_EXPIRE_SECONDS)
+            access_token = security.create_access_token(
+                access_token_data,
+                expires_delta=settings.ACCESS_TOKEN_EXPIRE_SECONDS
+            )
         except Exception as e:
             db.rollback()
-            logger.error(f"Error creating access token: {e}", exc_info=True)
+            logger.error(
+                f"OTP verification failed - Error creating access token | "
+                f"User ID: {user.id} | Session ID: {session.id} | IP: {client_ip} | "
+                f"Error: {str(e)}",
+                exc_info=True
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Something went wrong while logging you in. Please try again."
             )
-
-        logger.info(f"OTP verified successfully for user {user.id} from IP {client_ip}")
-
-        data = VerifiedData(
+        
+        # Generate refresh token with token family ID
+        refresh_expiry_days = settings.REFRESH_TOKEN_EXPIRE_DAYS_WEB if is_web else settings.REFRESH_TOKEN_EXPIRE_DAYS_MOBILE
+        refresh_token_data = {
+            "sub": str(user.id),
+            "session_id": str(session.id),
+            "token_family_id": token_family_id,
+            "device_platform": device_platform
+        }
+        
+        try:
+            refresh_token = security.create_refresh_token(
+                refresh_token_data,
+                expires_delta_days=refresh_expiry_days
+            )
+        except Exception as e:
+            db.rollback()
+            logger.error(
+                f"OTP verification failed - Error creating refresh token | "
+                f"User ID: {user.id} | Session ID: {session.id} | IP: {client_ip} | "
+                f"Error: {str(e)}",
+                exc_info=True
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Something went wrong while logging you in. Please try again."
+            )
+        
+        # Store refresh token hash in database
+        from Login_module.Token.Refresh_token_crud import create_refresh_token
+        from Login_module.Utils.datetime_utils import now_ist
+        from datetime import timedelta
+        
+        refresh_expires_at = now_ist() + timedelta(days=refresh_expiry_days)
+        
+        try:
+            create_refresh_token(
+                db=db,
+                user_id=user.id,
+                session_id=session.id,
+                token_family_id=token_family_id,
+                refresh_token=refresh_token,
+                expires_at=refresh_expires_at,
+                ip_address=client_ip,
+                user_agent=user_agent
+            )
+        except Exception as e:
+            db.rollback()
+            logger.error(
+                f"OTP verification failed - Error storing refresh token | "
+                f"User ID: {user.id} | Session ID: {session.id} | IP: {client_ip} | "
+                f"Error: {str(e)}",
+                exc_info=True
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Something went wrong while logging you in. Please try again."
+            )
+        
+        # Link token_family_id to device_session
+        session.refresh_token_family_id = token_family_id
+        db.commit()
+        db.refresh(session)
+        
+        # Audit log token creation
+        from Login_module.Token.Token_audit_crud import log_token_event
+        log_token_event(
+            db=db,
+            event_type="TOKEN_CREATED",
             user_id=user.id,
-            name=user.name,
-            mobile=user.mobile,
-            email=user.email,
-            access_token=token,
-            token_type="Bearer",
-            expires_in=ACCESS_TOKEN_EXPIRE_SECONDS
+            session_id=session.id,
+            token_family_id=token_family_id,
+            reason=f"Tokens created after OTP verification. Platform: {device_platform}. IP: {client_ip}",
+            ip_address=client_ip,
+            user_agent=user_agent,
+            correlation_id=correlation_id
         )
-
-        return VerifyOTPResponse(
-            status="success",
-            message="OTP verified successfully.",
-            data=data
+        
+        logger.info(
+            f"OTP verified successfully for user {user.id} from IP {client_ip} | "
+            f"Platform: {device_platform} | Session ID: {session.id} | Family ID: {token_family_id} | "
+            f"Access Token contains: user_id={access_token_data.get('sub')}, session_id={access_token_data.get('session_id')}"
         )
+        
+        # Prepare response data based on platform
+        if is_web:
+            # Web: Set cookies, return user info and CSRF token in body (NO tokens in JSON)
+            from Login_module.Utils.csrf import generate_csrf_token_with_secret
+            csrf_token = generate_csrf_token_with_secret(user.id, session.id)
+            
+            # Create response with cookies (web)
+            from fastapi.responses import JSONResponse
+            from fastapi import Response
+            
+            # Get mobile number (plain text) - ensure it's a string, not None
+            mobile = user.mobile if user.mobile else ""
+            
+            # Build response data
+            response_data = VerifiedData(
+                user_id=user.id,
+                name=user.name,
+                mobile=mobile,
+                email=user.email,
+                csrf_token=csrf_token
+            )
+            
+            response_obj = VerifyOTPResponse(
+                status="success",
+                message="OTP verified successfully.",
+                data=response_data
+            )
+            
+            # Set cookies in response
+            cookie_domain = settings.COOKIE_DOMAIN if settings.COOKIE_DOMAIN else None
+            cookie_secure = settings.COOKIE_SECURE
+            
+            # Serialize response object to dict
+            try:
+                response_dict = response_obj.dict() if hasattr(response_obj, 'dict') else response_obj.model_dump()
+            except Exception as e:
+                logger.error(f"Error serializing response_obj: {e}, using manual dict")
+                response_dict = {
+                    "status": "success",
+                    "message": "OTP verified successfully.",
+                    "data": {
+                        "user_id": user.id,
+                        "name": user.name,
+                        "mobile": mobile,
+                        "email": user.email,
+                        "csrf_token": csrf_token
+                    }
+                }
+            
+            # Create JSONResponse with cookies
+            response = JSONResponse(content=response_dict)
+            
+            # Access token cookie - path: "/", expires when access token expires
+            access_token_max_age = settings.ACCESS_TOKEN_EXPIRE_SECONDS
+            response.set_cookie(
+                key="access_token",
+                value=access_token,
+                path="/",
+                httponly=True,
+                secure=cookie_secure,
+                samesite="lax",
+                domain=cookie_domain,
+                max_age=access_token_max_age
+            )
+            
+            # Refresh token cookie - path restricted to /auth/refresh for security
+            refresh_token_max_age = int(settings.REFRESH_TOKEN_EXPIRE_DAYS_WEB * 24 * 60 * 60)
+            response.set_cookie(
+                key="refresh_token",
+                value=refresh_token,
+                path="/auth/refresh",
+                httponly=True,
+                secure=cookie_secure,
+                samesite="strict",
+                domain=cookie_domain,
+                max_age=refresh_token_max_age
+            )
+            
+            logger.info(f"Returning web response for user {user.id}")
+            return response
+        else:
+            # Mobile: Return both tokens in JSON response body (no cookies)
+            # Get mobile number (plain text) - ensure it's a string, not None
+            mobile = user.mobile if user.mobile else ""
+            
+            data = VerifiedData(
+                user_id=user.id,
+                name=user.name,
+                mobile=mobile,
+                email=user.email,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                token_type="Bearer",
+                expires_in=settings.ACCESS_TOKEN_EXPIRE_SECONDS
+            )
+            
+            return VerifyOTPResponse(
+                status="success",
+                message="OTP verified successfully.",
+                data=data
+            )
     except HTTPException:
         # Re-raise HTTP exceptions as-is
         raise
@@ -275,78 +575,5 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
         )
 
 
-class LogoutResponse(BaseModel):
-    status: str = "success"
-    message: str
-
-
-@router.post("/logout", response_model=LogoutResponse)
-def logout(
-    request: Request,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Logout from current device/session.
-    Only deletes the current session; other sessions remain active.
-    """
-    # Extract token from Authorization header
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authorization header"
-        )
-    
-    token = auth_header.split(" ")[1]
-    
-    # Decode token to get session_id
-    try:
-        payload = security.decode_access_token(token)
-        session_id = payload.get("session_id")
-        if not session_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Token does not contain session info"
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {str(e)}"
-        )
-    
-    # Deactivate session
-    from ..Device.Device_session_crud import deactivate_session
-    from ..Utils.rate_limiter import get_client_ip
-    
-    ip_address = get_client_ip(request)
-    user_agent = request.headers.get("user-agent")
-    correlation_id = str(uuid.uuid4())
-    
-    try:
-        deactivated = deactivate_session(
-            db=db,
-            session_id=int(session_id),
-            reason="User logout",
-            ip_address=ip_address,
-            user_agent=user_agent,
-            correlation_id=correlation_id
-        )
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid session ID format"
-        )
-    
-    if not deactivated:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found or already inactive"
-        )
-    
-    return LogoutResponse(
-        status="success",
-        message="Logged out successfully from this device."
-    )
+# NOTE: /auth/logout endpoint is now in Auth_token_router.py
+# Old logout endpoint removed - use /auth/logout instead (handles dual-token strategy)

@@ -172,12 +172,22 @@ def create_order(
                 
                 if deleted_item:
                     # Item exists but is soft-deleted (cart was cleared)
+                    client_ip = get_client_info(request) if request else None
+                    logger.warning(
+                        f"Order creation failed - Cart item was removed | "
+                        f"User ID: {current_user.id} | Cart Item ID: {request_data.cart_id} | IP: {client_ip}"
+                    )
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="This item has been removed from your cart. Please refresh and try again."
                     )
             
             # No active cart items found
+            client_ip = get_client_info(request) if request else None
+            logger.warning(
+                f"Order creation failed - Empty cart | "
+                f"User ID: {current_user.id} | IP: {client_ip}"
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Your cart is empty. Please add items to your cart before placing an order."
@@ -197,6 +207,11 @@ def create_order(
                 )
         
         if not cart_items:
+            client_ip = get_client_info(request) if request else None
+            logger.warning(
+                f"Order creation failed - Empty cart | "
+                f"User ID: {current_user.id} | IP: {client_ip}"
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Your cart is empty. Please add items to your cart before placing an order."
@@ -206,6 +221,11 @@ def create_order(
         unique_cart_address_ids = {item.address_id for item in cart_items if item.address_id}
         
         if not unique_cart_address_ids:
+            client_ip = get_client_info(request) if request else None
+            logger.warning(
+                f"Order creation failed - Cart items missing valid addresses | "
+                f"User ID: {current_user.id} | IP: {client_ip}"
+            )
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Your cart items need valid addresses. Please check your addresses and try again."
@@ -223,6 +243,11 @@ def create_order(
         ).first()
         
         if not address:
+            client_ip = get_client_info(request) if request else None
+            logger.warning(
+                f"Order creation failed - Address not found or unauthorized | "
+                f"User ID: {current_user.id} | Address ID: {primary_address_id} | IP: {client_ip}"
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="We couldn't find this address, or it doesn't belong to your account."
@@ -418,10 +443,20 @@ def create_order(
         raise
     except ValueError as e:
         db.rollback()
+        client_ip = get_client_info(request) if request else None
+        logger.warning(
+            f"Order creation failed - Validation error | "
+            f"User ID: {current_user.id} | Error: {str(e)} | IP: {client_ip}"
+        )
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except Exception as e:
         db.rollback()
-        logger.error(f"Error creating order: {e}", exc_info=True)
+        client_ip = get_client_info(request) if request else None
+        logger.error(
+            f"Order creation failed - Unexpected error | "
+            f"User ID: {current_user.id} | Error: {str(e)} | IP: {client_ip}",
+            exc_info=True
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error creating order: {str(e)}"
@@ -444,14 +479,24 @@ def verify_payment(
     """
     try:
         # First, verify order belongs to user BEFORE payment verification (security check)
+        client_ip = get_client_info(request) if request else None
         order = db.query(Order).filter(Order.id == payment_data.order_id).first()
         if not order:
+            logger.warning(
+                f"Payment verification failed - Order not found | "
+                f"Order ID: {payment_data.order_id} | User ID: {current_user.id} | IP: {client_ip}"
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Order not found"
             )
         
         if order.user_id != current_user.id:
+            logger.warning(
+                f"Payment verification failed - Unauthorized access attempt | "
+                f"Order ID: {payment_data.order_id} | Order User ID: {order.user_id} | "
+                f"Requesting User ID: {current_user.id} | IP: {client_ip}"
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Order does not belong to you"
@@ -1188,6 +1233,9 @@ def get_orders(
                     member_data = snapshot.member_data or {}
                     address_data = snapshot.address_data or {}
                     
+                    # Get mobile number from snapshot if present
+                    mobile = member_data.get("mobile")
+                    
                     member_details = {
                         "member_id": member_data.get("id", item.member_id),
                         "name": member_data.get("name", "Unknown"),
@@ -1195,7 +1243,7 @@ def get_orders(
                         "age": member_data.get("age"),
                         "gender": member_data.get("gender"),
                         "dob": member_data.get("dob"),
-                        "mobile": member_data.get("mobile")
+                        "mobile": mobile
                     }
                     
                     address_details = {
@@ -1214,6 +1262,11 @@ def get_orders(
                     member = item.member
                     address = item.address
                     
+                    # Get mobile number from member if present
+                    mobile = None
+                    if member and member.mobile:
+                        mobile = member.mobile
+                    
                     member_details = {
                         "member_id": member.id if member else item.member_id,
                         "name": member.name if member else "Unknown",
@@ -1221,7 +1274,7 @@ def get_orders(
                         "age": member.age if member else None,
                         "gender": member.gender if member else None,
                         "dob": to_ist_isoformat(member.dob) if member and member.dob else None,
-                        "mobile": member.mobile if member else None
+                        "mobile": mobile
                     }
                     
                     address_details = {

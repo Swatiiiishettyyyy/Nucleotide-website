@@ -143,6 +143,10 @@ def create_banner(
     
     # Validate date range
     if start_datetime and end_datetime and end_datetime < start_datetime:
+        logger.warning(
+            f"Banner creation failed - Invalid date range | "
+            f"Start Date: {start_datetime} | End Date: {end_datetime}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="end_date must be after start_date"
@@ -185,6 +189,10 @@ async def upload_banner_image(
     # Validate file extension
     file_ext = Path(file.filename).suffix.lower() if file.filename else ""
     if file_ext not in ALLOWED_EXTENSIONS:
+        logger.warning(
+            f"Banner image upload failed - Invalid file type | "
+            f"Banner ID: {banner_id} | File Extension: {file_ext}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid file type. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}"
@@ -195,12 +203,19 @@ async def upload_banner_image(
     file_size = len(file_content)
     
     if file_size > MAX_FILE_SIZE:
+        logger.warning(
+            f"Banner image upload failed - File size exceeds limit | "
+            f"Banner ID: {banner_id} | File Size: {file_size} bytes | Max Size: {MAX_FILE_SIZE} bytes"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"File size exceeds maximum allowed size of {MAX_FILE_SIZE // (1024 * 1024)}MB"
         )
     
     if file_size == 0:
+        logger.warning(
+            f"Banner image upload failed - Empty file | Banner ID: {banner_id}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="File is empty"
@@ -224,6 +239,9 @@ async def upload_banner_image(
             ).first()
             
             if not banner:
+                logger.warning(
+                    f"Banner image upload failed - Banner not found | Banner ID: {banner_id}"
+                )
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Banner not found"
@@ -291,12 +309,21 @@ async def upload_banner_image(
             
     except ValueError as e:
         # S3 not configured
+        logger.error(
+            f"Banner image upload failed - S3 configuration error | "
+            f"Banner ID: {banner_id} | Error: {str(e)}",
+            exc_info=True
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"S3 configuration error: {str(e)}"
         )
     except Exception as e:
-        logger.error(f"Error uploading banner image to S3: {str(e)}", exc_info=True)
+        logger.error(
+            f"Banner image upload failed - S3 upload error | "
+            f"Banner ID: {banner_id} | Error: {str(e)}",
+            exc_info=True
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to upload image to S3: {str(e)}"
@@ -351,6 +378,10 @@ def update_banner(
     
     # Validate date range
     if banner.start_date and banner.end_date and banner.end_date < banner.start_date:
+        logger.warning(
+            f"Banner update failed - Invalid date range | "
+            f"Banner ID: {banner_id} | Start Date: {banner.start_date} | End Date: {banner.end_date}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="end_date must be after start_date"
@@ -381,6 +412,9 @@ def delete_banner(
     ).first()
     
     if not banner:
+        logger.warning(
+            f"Banner deletion failed - Banner not found | Banner ID: {banner_id}"
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Banner not found"

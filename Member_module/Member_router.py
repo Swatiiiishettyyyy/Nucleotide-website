@@ -6,8 +6,11 @@ from datetime import datetime
 import uuid
 from pathlib import Path
 import os
+import logging
 
 from deps import get_db
+
+logger = logging.getLogger(__name__)
 from .Member_schema import (
     MemberRequest, MemberResponse, MemberListResponse, MemberData, EditMemberRequest,
     UploadPhotoResponse, DeletePhotoResponse, MemberProfileData
@@ -19,6 +22,7 @@ from .Member_s3_service import get_member_photo_s3_service
 from Login_module.Utils.auth_user import get_current_user, get_current_member
 from Login_module.Utils import security
 from Login_module.Utils.datetime_utils import to_ist_isoformat
+from Login_module.Utils.phone_encryption import decrypt_phone
 from Login_module.Device.Device_session_crud import get_device_session
 
 router = APIRouter(prefix="/member", tags=["Member"])
@@ -70,10 +74,8 @@ def generate_token_with_member(
                 detail="We couldn't find this family member profile, or it doesn't belong to your account."
             )
     
-    from dotenv import load_dotenv
-    import os
-    load_dotenv()
-    ACCESS_TOKEN_EXPIRE_SECONDS = int(os.getenv("ACCESS_TOKEN_EXPIRE_SECONDS", 86400))
+    from config import settings
+    ACCESS_TOKEN_EXPIRE_SECONDS = settings.ACCESS_TOKEN_EXPIRE_SECONDS
     
     token_data = {
         "sub": str(user_id),
@@ -125,6 +127,10 @@ def save_member_api(
         correlation_id=correlation_id
     )
     if not member:
+        logger.error(
+            f"Member creation failed - Unable to create member | "
+            f"User ID: {user.id} | Category ID: {category_id} | Plan Type: {plan_type} | IP: {ip_address}"
+        )
         raise HTTPException(status_code=404, detail="We couldn't create the family member profile. Please try again.")
 
     # Check if this is the first member for the user (check BEFORE creating to avoid race condition)
@@ -158,7 +164,8 @@ def save_member_api(
     participant_info = get_participant_info(db, member_id=member.id)
     has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
     
-    # Prepare member data for response
+    # Prepare member data for response - decrypt phone number for API schema
+    decrypted_mobile = decrypt_phone(member.mobile) if member.mobile else None
     member_data = MemberData(
         member_id=member.id,
         name=member.name,
@@ -166,7 +173,7 @@ def save_member_api(
         age=member.age,
         gender=member.gender,
         dob=member.dob,
-        mobile=member.mobile,
+        mobile=decrypted_mobile,  # Decrypt before returning in schema
         email=member.email,
         profile_photo_url=member.profile_photo_url,
         has_taken_genetic_test=has_taken_genetic_test
@@ -250,6 +257,11 @@ def edit_member_api(
     ).first()
     
     if not existing_member:
+        client_ip = request.client.host if request.client else None
+        logger.warning(
+            f"Member edit failed - Member not found or unauthorized | "
+            f"Member ID: {member_id} | User ID: {user.id} | IP: {client_ip}"
+        )
         raise HTTPException(status_code=404, detail="Member not found or does not belong to you")
     
     # Autofill: Merge existing member data with request data (request takes precedence)
@@ -264,6 +276,11 @@ def edit_member_api(
     
     # Ensure relation_value is not empty (safety check)
     if not relation_value or not str(relation_value).strip():
+        client_ip = request.client.host if request.client else None
+        logger.warning(
+            f"Member edit failed - Empty relation value | "
+            f"Member ID: {member_id} | User ID: {user.id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=422,
             detail="Relation cannot be empty. Please provide a valid relation value."
@@ -275,6 +292,9 @@ def edit_member_api(
     # Convert other fields to dict for autofill
     req_dict = req.dict(exclude_unset=True, exclude_none=True)
     
+    # Decrypt existing_member.mobile if it's in the request (since it's stored encrypted)
+    existing_mobile_decrypted = decrypt_phone(existing_member.mobile) if existing_member.mobile else None
+    
     # Create complete MemberRequest with autofilled data
     # Fields sent in request will override existing values
     # Fields not sent will be autofilled from existing member
@@ -285,7 +305,7 @@ def edit_member_api(
         age=req_dict.get('age', existing_member.age),
         gender=req_dict.get('gender', existing_member.gender),
         dob=req_dict.get('dob', existing_member.dob),
-        mobile=req_dict.get('mobile', existing_member.mobile),
+        mobile=req_dict.get('mobile', existing_mobile_decrypted),  # Use decrypted mobile
         email=req_dict.get('email', existing_member.email)
     )
     
@@ -304,6 +324,10 @@ def edit_member_api(
         correlation_id=correlation_id
     )
     if not member:
+        logger.error(
+            f"Member edit failed - Save operation failed | "
+            f"Member ID: {member_id} | User ID: {user.id} | IP: {ip_address}"
+        )
         raise HTTPException(status_code=404, detail="Member not found or does not belong to you")
 
     # Check if member has taken genetic test
@@ -328,7 +352,8 @@ def edit_member_api(
         else:
             message = "Member updated. Family plan slots are full (4/4)."
 
-    # Prepare member data for response
+    # Prepare member data for response - decrypt phone number for API schema
+    decrypted_mobile = decrypt_phone(member.mobile) if member.mobile else None
     member_data = MemberData(
         member_id=member.id,
         name=member.name,
@@ -336,7 +361,7 @@ def edit_member_api(
         age=member.age,
         gender=member.gender,
         dob=member.dob,
-        mobile=member.mobile,
+        mobile=decrypted_mobile,  # Decrypt before returning in schema
         email=member.email,
         profile_photo_url=member.profile_photo_url,
         has_taken_genetic_test=has_taken_genetic_test
@@ -371,6 +396,9 @@ def get_member_list(
         participant_info = get_participant_info(db, member_id=m.id)
         has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
         
+        # Decrypt phone number for API schema
+        decrypted_mobile = decrypt_phone(m.mobile) if m.mobile else None
+        
         data.append({
             "member_id": m.id,
             "name": m.name,
@@ -378,7 +406,7 @@ def get_member_list(
             "age": m.age,
             "gender": m.gender,
             "dob": to_ist_isoformat(m.dob) if m.dob else None,
-            "mobile": m.mobile,
+            "mobile": decrypted_mobile,  # Decrypt before returning in schema
             "email": m.email,
             "profile_photo_url": m.profile_photo_url,
             "has_taken_genetic_test": has_taken_genetic_test
@@ -413,7 +441,13 @@ def delete_member_api(
         Member.is_deleted == False
     ).first()
     
+    client_ip = request.client.host if request.client else None
+    
     if not member:
+        logger.warning(
+            f"Member deletion failed - Member not found | "
+            f"Member ID: {member_id} | User ID: {user.id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=404,
             detail="Member not found"
@@ -423,6 +457,10 @@ def delete_member_api(
     # Check using is_self_profile flag (more reliable than relation string)
     # This ensures user always has at least one member and prevents "no members" state
     if member.is_self_profile:
+        logger.warning(
+            f"Member deletion failed - Attempted to delete self profile | "
+            f"Member ID: {member_id} | Member Name: {member.name} | User ID: {user.id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=422,
             detail="This is your primary profile (Self). Primary profile cannot be deleted."
@@ -431,6 +469,10 @@ def delete_member_api(
     # Prevent deletion of the last remaining member (guards against mis-labeled first member)
     total_members = db.query(Member).filter(Member.user_id == user.id, Member.is_deleted == False).count()
     if total_members <= 1:
+        logger.warning(
+            f"Member deletion failed - Last remaining member | "
+            f"Member ID: {member_id} | Member Name: {member.name} | User ID: {user.id} | Total Members: {total_members} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=422,
             detail=f"Cannot delete '{member.name}' - At least one member must remain on the account. Add another member before deleting this one."
@@ -470,6 +512,11 @@ def delete_member_api(
             for name, types in product_conflicts.items()
         ])
         
+        logger.warning(
+            f"Member deletion failed - Member associated with cart items | "
+            f"Member ID: {member_id} | Member Name: {member.name} | User ID: {user.id} | "
+            f"Cart Items: {len(cart_items)} | Products: {conflict_details} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=422,
             detail=f"Member '{member.name}' is associated with {len(cart_items)} cart item(s) for product(s): {conflict_details}."
@@ -627,7 +674,13 @@ def select_member_api(
         Member.is_deleted == False
     ).first()
     
+    client_ip = request.client.host if request.client else None
+    
     if not member:
+        logger.warning(
+            f"Member selection failed - Member not found or unauthorized | "
+            f"Member ID: {member_id} | User ID: {user.id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=404,
             detail="Member not found or does not belong to you"
@@ -641,6 +694,10 @@ def select_member_api(
         device_platform = payload.get("device_platform", "unknown")
         
         if not session_id:
+            logger.warning(
+                f"Member selection failed - Session ID missing in token | "
+                f"Member ID: {member_id} | User ID: {user.id} | IP: {client_ip}"
+            )
             raise HTTPException(
                 status_code=400,
                 detail="Invalid session - session_id missing in token"
@@ -656,6 +713,9 @@ def select_member_api(
             selected_member_id=member_id
         )
         
+        # Decrypt phone number for API schema
+        decrypted_mobile = decrypt_phone(member.mobile) if member.mobile else None
+        
         return {
             "status": "success",
             "message": f"Switched to '{member.name}' profile.",
@@ -666,7 +726,7 @@ def select_member_api(
                 "age": member.age,
                 "gender": member.gender,
                 "dob": to_ist_isoformat(member.dob) if member.dob else None,
-                "mobile": member.mobile,
+                "mobile": decrypted_mobile,  # Decrypt before returning in schema
                 "profile_photo_url": member.profile_photo_url
             },
             "token": new_token,
@@ -729,6 +789,9 @@ def get_current_member_api(
     participant_info = get_participant_info(db, member_id=current_member.id)
     has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
     
+    # Decrypt phone number for API schema
+    decrypted_mobile = decrypt_phone(current_member.mobile) if current_member.mobile else None
+    
     return {
         "status": "success",
         "message": "Current member profile retrieved successfully.",
@@ -740,7 +803,7 @@ def get_current_member_api(
             "age": current_member.age,
             "gender": current_member.gender,
             "dob": to_ist_isoformat(current_member.dob) if current_member.dob else None,
-            "mobile": current_member.mobile,
+            "mobile": decrypted_mobile,  # Decrypt before returning in schema
             "email": current_member.email,
             "profile_photo_url": current_member.profile_photo_url,
             "has_taken_genetic_test": has_taken_genetic_test
@@ -903,6 +966,11 @@ async def parse_member_request_and_file(request: Request, req_body: Optional[Mem
         email = form.get("email")
         
         if not name or not relation or not age_str or not gender or not dob_str or not mobile:
+            client_ip = request.client.host if request and request.client else None
+            logger.warning(
+                f"Member request parsing failed - Missing required fields in multipart form | "
+                f"IP: {client_ip}"
+            )
             raise HTTPException(
                 status_code=422,
                 detail="When using multipart/form-data, all required fields (name, relation, age, gender, dob, mobile) must be provided as form fields."
@@ -911,11 +979,21 @@ async def parse_member_request_and_file(request: Request, req_body: Optional[Mem
         try:
             age = int(age_str)
         except ValueError:
+            client_ip = request.client.host if request and request.client else None
+            logger.warning(
+                f"Member request parsing failed - Invalid age format | "
+                f"Age String: {age_str} | IP: {client_ip}"
+            )
             raise HTTPException(status_code=422, detail="Invalid age format. Must be a number.")
         
         try:
             dob_date = datetime.strptime(dob_str, "%Y-%m-%d").date()
         except ValueError:
+            client_ip = request.client.host if request and request.client else None
+            logger.warning(
+                f"Member request parsing failed - Invalid date format | "
+                f"Date String: {dob_str} | IP: {client_ip}"
+            )
             raise HTTPException(status_code=422, detail="Invalid date format for dob. Use YYYY-MM-DD format.")
         
         req = MemberRequest(
@@ -942,6 +1020,11 @@ async def parse_member_request_and_file(request: Request, req_body: Optional[Mem
                 req.member_id = 0
                 return req, None
             except Exception as e:
+                client_ip = request.client.host if request and request.client else None
+                logger.warning(
+                    f"Member request parsing failed - Invalid JSON body | "
+                    f"Error: {str(e)} | IP: {client_ip}"
+                )
                 raise HTTPException(status_code=422, detail=f"Invalid JSON body: {str(e)}")
 
 
@@ -997,6 +1080,11 @@ async def upload_member_photo(
                 ).order_by(Member.created_at.asc()).first()
             
             if not default_member:
+                client_ip = request.client.host if request and request.client else None
+                logger.warning(
+                    f"Member photo upload failed - No member found | "
+                    f"User ID: {current_user.id} | IP: {client_ip}"
+                )
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="No member found. Please create a member profile first."
@@ -1007,6 +1095,12 @@ async def upload_member_photo(
     # Validate file extension
     file_ext = Path(file.filename).suffix.lower() if file.filename else ""
     if file_ext not in ALLOWED_PHOTO_EXTENSIONS:
+        client_ip = request.client.host if request and request.client else None
+        logger.warning(
+            f"Member photo upload failed - Invalid file type | "
+            f"Member ID: {target_member.id if target_member else None} | User ID: {current_user.id} | "
+            f"File Extension: {file_ext} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid file type. Allowed types: {', '.join(ALLOWED_PHOTO_EXTENSIONS)}"
@@ -1017,12 +1111,23 @@ async def upload_member_photo(
     file_size = len(file_content)
     
     if file_size > MAX_PHOTO_FILE_SIZE:
+        client_ip = request.client.host if request and request.client else None
+        logger.warning(
+            f"Member photo upload failed - File size exceeds limit | "
+            f"Member ID: {target_member.id if target_member else None} | User ID: {current_user.id} | "
+            f"File Size: {file_size} bytes | Max Size: {MAX_PHOTO_FILE_SIZE} bytes | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"File size exceeds maximum allowed size of {MAX_PHOTO_FILE_SIZE // (1024 * 1024)}MB"
         )
     
     if file_size == 0:
+        client_ip = request.client.host if request and request.client else None
+        logger.warning(
+            f"Member photo upload failed - Empty file | "
+            f"Member ID: {target_member.id if target_member else None} | User ID: {current_user.id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="File is empty"
@@ -1105,11 +1210,14 @@ async def upload_member_photo(
         correlation_id=correlation_id
     )
     
+    # Decrypt phone number for API schema
+    decrypted_mobile = decrypt_phone(target_member.mobile) if target_member.mobile else None
+    
     data = MemberProfileData(
         user_id=current_user.id,
         name=target_member.name,
         email=current_user.email,
-        mobile=target_member.mobile,
+        mobile=decrypted_mobile,  # Decrypt before returning in schema
         profile_photo_url=target_member.profile_photo_url,
         has_taken_genetic_test=has_taken_genetic_test
     )
@@ -1146,6 +1254,11 @@ async def delete_member_photo(
         ).first()
         
         if not target_member:
+            client_ip = request.client.host if request and request.client else None
+            logger.warning(
+                f"Member photo deletion failed - Member not found or unauthorized | "
+                f"Member ID: {member_id} | User ID: {current_user.id} | IP: {client_ip}"
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Member with ID {member_id} not found or does not belong to you."
@@ -1171,6 +1284,11 @@ async def delete_member_photo(
                 ).order_by(Member.created_at.asc()).first()
             
             if not default_member:
+                client_ip = request.client.host if request and request.client else None
+                logger.warning(
+                    f"Member photo deletion failed - No member found | "
+                    f"User ID: {current_user.id} | IP: {client_ip}"
+                )
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="No member found. Please create a member profile first."
@@ -1179,6 +1297,11 @@ async def delete_member_photo(
             target_member = default_member
     
     if not target_member.profile_photo_url:
+        client_ip = request.client.host if request and request.client else None
+        logger.warning(
+            f"Member photo deletion failed - No photo exists | "
+            f"Member ID: {target_member.id} | User ID: {current_user.id} | IP: {client_ip}"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No photo exists. Kindly upload the profile photo."
@@ -1234,11 +1357,14 @@ async def delete_member_photo(
         correlation_id=correlation_id
     )
     
+    # Decrypt phone number for API schema
+    decrypted_mobile = decrypt_phone(target_member.mobile) if target_member.mobile else None
+    
     data = MemberProfileData(
         user_id=current_user.id,
         name=target_member.name,
         email=current_user.email,
-        mobile=target_member.mobile,
+        mobile=decrypted_mobile,  # Decrypt before returning in schema
         profile_photo_url=None,
         has_taken_genetic_test=has_taken_genetic_test
     )

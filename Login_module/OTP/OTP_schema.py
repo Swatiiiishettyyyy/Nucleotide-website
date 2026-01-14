@@ -27,7 +27,7 @@ class VerifyOTPRequest(BaseModel):
     mobile: str = Field(..., example="9876543210", min_length=10, max_length=15)
     otp: str = Field(..., example="123456", min_length=4, max_length=8)
     device_id: str = Field(..., example="device-uuid-or-imei", min_length=1, max_length=255)
-    device_platform: str = Field(..., example="web", max_length=50)  # web/mobile/ios
+    device_platform: str = Field(..., example="web", max_length=50)  # web/mobile/ios/android
     device_details: str = Field(..., example='{"browser":"Chrome", "version":"..."}', max_length=1000)
     
     @validator('country_code')
@@ -74,9 +74,11 @@ class VerifiedData(BaseModel):
     name: Optional[str]
     mobile: str
     email: Optional[str]
-    access_token: str
-    token_type: str
-    expires_in: int
+    access_token: Optional[str] = None  # For mobile only - web uses cookies
+    refresh_token: Optional[str] = None  # For mobile only - web uses cookies
+    token_type: Optional[str] = None  # For mobile only
+    expires_in: Optional[int] = None  # For mobile only
+    csrf_token: Optional[str] = None  # For web only
 
 
 class VerifyOTPResponse(BaseModel):

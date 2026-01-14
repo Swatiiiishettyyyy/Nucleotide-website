@@ -5,8 +5,11 @@ from Login_module.Utils.datetime_utils import to_ist_isoformat
 from sqlalchemy import or_, text
 from fastapi import HTTPException
 from typing import Any, Dict, Optional, Union
+import logging
 
 from Product_module.category_service import resolve_category
+
+logger = logging.getLogger(__name__)
 
 _VALID_PLAN_TYPES = {"single", "couple", "family"}
 
@@ -40,6 +43,10 @@ def _normalize_plan_type(plan_type: Optional[str]) -> Optional[str]:
         return None
     plan = plan_type.strip().lower()
     if plan not in _VALID_PLAN_TYPES:
+        logger.warning(
+            f"Plan type validation failed - Unsupported plan type | "
+            f"Plan Type: {plan_type} | Allowed: {_VALID_PLAN_TYPES}"
+        )
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported plan_type '{plan_type}'. Allowed values: single, couple, family.",
@@ -201,7 +208,7 @@ def save_member(
             deleted_member.age = req.age
             deleted_member.gender = req.gender
             deleted_member.dob = req.dob
-            deleted_member.mobile = req.mobile
+            deleted_member.mobile = req.mobile  # Store as plain text
             if hasattr(req, 'email'):
                 deleted_member.email = getattr(req, 'email', None)
             
@@ -247,6 +254,7 @@ def save_member(
             )
             db.add(audit)
             db.commit()
+            
             
             # Return restored member (skip the rest of the creation logic)
             return deleted_member, family_status
@@ -389,7 +397,7 @@ def save_member(
             age=req.age,
             gender=req.gender,
             dob=req.dob,
-            mobile=member_mobile,
+            mobile=member_mobile,  # Store as plain text
             email=getattr(req, 'email', None),  # Optional email field
             associated_category=category_name,
             associated_category_id=category_obj.id,
@@ -571,6 +579,7 @@ def save_member(
             "category": category_name,
             "plan_type": plan_type_normalized
         }
+        # Note: new_data already has req.mobile (plaintext) which is fine for audit logs
         audit = MemberAuditLog(
             user_id=user.id,
             member_id=member.id,
@@ -618,7 +627,7 @@ def save_member(
         member.age = req.age
         member.gender = req.gender
         member.dob = req.dob
-        member.mobile = req.mobile
+        member.mobile = req.mobile  # Store as plain text
         member.email = getattr(req, 'email', None)  # Optional email field
         # Note: category_id and plan_type are not updated on edit to maintain data integrity
         # Note: is_self_profile is not updated on edit to protect primary profile
@@ -770,6 +779,7 @@ def save_member(
         # Refresh member to ensure we have the latest values after any workarounds
         db.refresh(member)
         
+        # Prepare new data for audit log
         new_data = {
             "member_id": member.id,
             "name": member.name,  # Use actual stored value
@@ -777,7 +787,7 @@ def save_member(
             "age": member.age,  # Use actual stored value
             "gender": member.gender,  # Use actual stored value
             "dob": to_ist_isoformat(member.dob) if member.dob else None,  # Use actual stored value
-            "mobile": member.mobile,  # Use actual stored value
+            "mobile": member.mobile,  # Use plain text value for audit log
             "category": member.associated_category,
             "plan_type": member.associated_plan_type
         }
@@ -786,7 +796,7 @@ def save_member(
             user_id=user.id,
             member_id=member.id,
             member_name=member.name,  # Use actual stored value
-            member_identifier=f"{member.name} ({member.mobile})",  # Use actual stored values
+                member_identifier=f"{member.name} ({member.mobile})",  # Use plain text value
             event_type="UPDATED",  # Clear status indicating this is an edit
             old_data=old_data,  # Previous values before update
             new_data=new_data,  # New values after update - shows clear changes
@@ -798,12 +808,27 @@ def save_member(
         db.commit()
 
     family_status = _build_family_plan_status(db, user.id, member)
+    
+    
     return member, family_status
 
 def get_members_by_user(db: Session, user, category: Optional[Union[int, str]] = None, plan_type: Optional[str] = None):
     """Get members for user, optionally filtered by category and plan_type"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # Ensure user has an id attribute
+    user_id = user.id if hasattr(user, 'id') else user
+    if not user_id:
+        logger.error(f"get_members_by_user: Invalid user object - no id attribute. User: {user}")
+        return []
+    
+    # Debug: Log query parameters
+    logger.info(f"get_members_by_user called: user_id={user_id}, category={category}, plan_type={plan_type}")
+    
+    # Build base query - check both user_id types (int vs object)
     query = db.query(Member).filter(
-        Member.user_id == user.id,
+        Member.user_id == user_id,
         Member.is_deleted == False
     )
     
@@ -815,4 +840,40 @@ def get_members_by_user(db: Session, user, category: Optional[Union[int, str]] =
     if plan_type:
         query = query.filter(Member.associated_plan_type == plan_type)
     
-    return query.all()
+    members = query.all()
+    
+    # Debug: Log raw query results with detailed info
+    logger.info(f"Query returned {len(members)} members for user_id={user_id}")
+    
+    if len(members) == 0:
+        # Check if members exist but are deleted or belong to different user
+        all_members_count = db.query(Member).filter(Member.user_id == user_id).count()
+        deleted_members_count = db.query(Member).filter(
+            Member.user_id == user_id,
+            Member.is_deleted == True
+        ).count()
+        active_members_count = db.query(Member).filter(
+            Member.user_id == user_id,
+            Member.is_deleted == False
+        ).count()
+        
+        # Check if category/plan_type filter is too restrictive
+        if category or plan_type:
+            unfiltered_count = db.query(Member).filter(
+                Member.user_id == user_id,
+                Member.is_deleted == False
+            ).count()
+            logger.warning(
+                f"No members found with filters | "
+                f"User ID: {user_id} | Category: {category} | Plan Type: {plan_type} | "
+                f"Unfiltered active members: {unfiltered_count} | "
+                f"Total members: {all_members_count} | Deleted: {deleted_members_count} | Active: {active_members_count}"
+            )
+        else:
+            logger.warning(
+                f"No active members found for user_id={user_id}. "
+                f"Total members: {all_members_count}, Deleted: {deleted_members_count}, Active: {active_members_count}"
+            )
+    
+    
+    return members

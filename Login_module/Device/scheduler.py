@@ -9,6 +9,7 @@ from .session_cleanup import cleanup_sessions_job
 
 logger = logging.getLogger(__name__)
 
+
 # Global scheduler instance
 scheduler = None
 
@@ -35,8 +36,9 @@ def start_scheduler():
         replace_existing=True
     )
     
+    logger.info("Background scheduler started. Session cleanup every 90 minutes.")
+    
     scheduler.start()
-    logger.info("Background scheduler started. Session cleanup scheduled every 90 minutes.")
     
     return scheduler
 

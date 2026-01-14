@@ -622,15 +622,15 @@ def verify_new_number_confirm(
         if not user:
             return None, "User not found"
         
-        # Double-check new phone doesn't exist (race condition)
+        # Double-check new phone doesn't exist (race condition check)
         existing_user = db.query(User).filter(User.mobile == request.new_phone).first()
         if existing_user:
             return None, "This phone number is already registered"
         
-        # Update users.mobile
+        # Update users.mobile (store as plain text)
         user.mobile = request.new_phone
         
-        # Update members.mobile where is_self_profile = True
+        # Update members.mobile where is_self_profile = True (store as plain text)
         db.query(Member).filter(
             Member.user_id == user_id,
             Member.is_self_profile == True

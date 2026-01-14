@@ -7,7 +7,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=True)
     email = Column(String(255), unique=True, nullable=True, index=True)
-    mobile = Column(String(20), unique=True, nullable=False, index=True)
+    mobile = Column(String(100), nullable=False, index=True)  # Increased to 100 for encrypted phone numbers (unique constraint removed)
     profile_photo_url = Column(String(500), nullable=True)  # URL/path to profile photo
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     is_active = Column(Boolean, default=True)

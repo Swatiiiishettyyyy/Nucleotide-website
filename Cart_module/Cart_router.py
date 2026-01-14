@@ -169,6 +169,12 @@ def add_to_cart(
                 members_str = ", ".join([f"'{name}'" for name in member_names[:-1]]) + f", and '{member_names[-1]}'"
                 message = f"These members ({members_str}) are already added to another product in '{category_name}'. These members are already there. Remove from the other product first or choose different members."
             
+            client_ip, user_agent = get_client_info(request) if request else (None, None)
+            logger.warning(
+                f"Cart add failed - Member conflicts with existing cart items | "
+                f"User ID: {current_user.id} | Product ID: {item.product_id} | "
+                f"Conflicting Members: {[c['member_name'] for c in conflicts]} | IP: {client_ip}"
+            )
             raise HTTPException(
                 status_code=422,
                 detail={

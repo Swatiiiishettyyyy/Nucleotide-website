@@ -226,13 +226,14 @@ Returns application health status.
 | `DATABASE_URL` | MySQL connection string | `mysql+pymysql://user:pass@host:port/db` |
 | `SECRET_KEY` | JWT secret key | Random string (min 32 chars) |
 | `ALLOWED_ORIGINS` | CORS allowed origins | `*` or comma-separated list |
+| `PHONE_ENCRYPTION_KEY` | AES-256 encryption key for phone numbers (64 hex chars) | Generate with: `python -c "import secrets; print(secrets.token_hex(32))"` |
 
 ### Optional Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `ALGORITHM` | JWT algorithm | `HS256` |
-| `ACCESS_TOKEN_EXPIRE_SECONDS` | Token expiry | `86400` (24 hours) |
+| `ACCESS_TOKEN_EXPIRE_SECONDS` | Token expiry | `900` (15 minutes) |
 | `OTP_EXPIRY_SECONDS` | OTP validity | `120` (2 minutes) |
 | `OTP_MAX_REQUESTS_PER_HOUR` | Rate limit | `15` |
 | `DB_POOL_SIZE` | Connection pool size | `10` |

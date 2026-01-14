@@ -1,9 +1,11 @@
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
-
 from typing import Optional
+import logging
 
 from .Product_model import Category, DEFAULT_CATEGORY_NAME
+
+logger = logging.getLogger(__name__)
 
 
 def get_or_create_default_category(db: Session) -> Category:
@@ -35,6 +37,9 @@ def resolve_category(db: Session, category_id: Optional[int]) -> Category:
 
     category = db.query(Category).filter(Category.id == category_id).first()
     if not category:
+        logger.warning(
+            f"Category resolution failed - Category not found | Category ID: {category_id}"
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Category with id {category_id} does not exist.",
@@ -48,6 +53,9 @@ def create_category(db: Session, name: str) -> Category:
     """
     name = name.strip()
     if not name:
+        logger.warning(
+            f"Category creation failed - Empty category name"
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Category name cannot be empty.",
@@ -55,6 +63,9 @@ def create_category(db: Session, name: str) -> Category:
 
     existing = db.query(Category).filter(Category.name.ilike(name)).first()
     if existing:
+        logger.warning(
+            f"Category creation failed - Category already exists | Category Name: {name} | Existing ID: {existing.id}"
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Category '{name}' already exists.",

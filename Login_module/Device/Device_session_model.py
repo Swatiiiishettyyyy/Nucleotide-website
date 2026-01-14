@@ -17,6 +17,9 @@ class DeviceSession(Base):
     event_on_logout = Column(DateTime(timezone=True), nullable=True)  # timestamp when logged out
     is_active = Column(Boolean, default=True, nullable=False, index=True)
     
+    # Dual Token Strategy: Link to refresh token family
+    refresh_token_family_id = Column(String(36), nullable=True, index=True)  # UUID linking to current token family
+    
     # Legacy fields for backward compatibility (can be removed later)
     session_key = Column(String(255), nullable=True, index=True)  # deprecated, use session_token
     device_details = Column(String(500), nullable=True)           # deprecated, use browser_info

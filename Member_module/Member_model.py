@@ -17,7 +17,7 @@ class Member(Base):
     age = Column(IntCol, nullable=False)
     gender = Column(String(20), nullable=False)  # M, F, Other
     dob = Column(Date, nullable=False)
-    mobile = Column(String(20), nullable=False)
+    mobile = Column(String(100), nullable=False)  # Increased to 100 for encrypted phone numbers
     email = Column(String(255), nullable=True)  # Optional email address
     
     # Track which category/plan this member is associated with
