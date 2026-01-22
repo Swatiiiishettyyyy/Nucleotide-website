@@ -7,21 +7,18 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     
     # Token configuration - Dual Token Strategy
-    # These can be overridden via .env file for testing:
-    # ACCESS_TOKEN_EXPIRE_MINUTES=5 (5 minutes for quick testing)
-    # ACCESS_TOKEN_EXPIRE_MINUTES=1440 (24 hours for extended testing)
-    # ACCESS_TOKEN_EXPIRE_SECONDS=300 (5 minutes in seconds - optional, auto-calculated if not set)
-    # REFRESH_TOKEN_EXPIRE_DAYS_WEB=7 (7 days for testing)
-    # REFRESH_TOKEN_EXPIRE_DAYS_MOBILE=7 (7 days for testing)
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # Default: 15 minutes
     ACCESS_TOKEN_EXPIRE_SECONDS: int = 900  # Will be recalculated from minutes if not set in env
-    # Refresh token: 7 days
     REFRESH_TOKEN_EXPIRE_DAYS_WEB: float = 7.0  # Default: 7 days
     REFRESH_TOKEN_EXPIRE_DAYS_MOBILE: float = 7.0  # Default: 7 days
     
     # Cookie configuration for web
     COOKIE_DOMAIN: str = ""
-    COOKIE_SECURE: bool = True
+    COOKIE_SECURE: bool 
+    # Cookie SameSite attribute: value must be provided via environment/.env
+    COOKIE_SAMESITE: str
+    # Separate SameSite setting for refresh token cookie
+    REFRESH_COOKIE_SAMESITE: str
     
     # CSRF protection
     CSRF_SECRET_KEY: str = ""
@@ -81,14 +78,3 @@ else:
 if not settings.CSRF_SECRET_KEY:
     settings.CSRF_SECRET_KEY = f"csrf_{settings.SECRET_KEY}"
 
-# Optional: test that values are loaded
-print("DATABASE_URL:", settings.DATABASE_URL)
-print("SECRET_KEY:", settings.SECRET_KEY)
-print(f"Token Configuration:")
-print(f"  - Access Token: {settings.ACCESS_TOKEN_EXPIRE_MINUTES} minutes ({settings.ACCESS_TOKEN_EXPIRE_SECONDS} seconds)")
-refresh_token_minutes_web = settings.REFRESH_TOKEN_EXPIRE_DAYS_WEB * 60 * 24
-refresh_token_minutes_mobile = settings.REFRESH_TOKEN_EXPIRE_DAYS_MOBILE * 60 * 24
-print(f"  - Refresh Token (Web): {settings.REFRESH_TOKEN_EXPIRE_DAYS_WEB} days ({refresh_token_minutes_web:.1f} minutes)")
-print(f"  - Refresh Token (Mobile): {settings.REFRESH_TOKEN_EXPIRE_DAYS_MOBILE} days ({refresh_token_minutes_mobile:.1f} minutes)")
-max_session_minutes = settings.MAX_SESSION_LIFETIME_DAYS * 60 * 24
-print(f"  - Max Session Lifetime: {settings.MAX_SESSION_LIFETIME_DAYS} days ({max_session_minutes:.1f} minutes)")

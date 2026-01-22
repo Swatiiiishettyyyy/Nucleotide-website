@@ -522,7 +522,7 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
                 path="/",
                 httponly=True,
                 secure=cookie_secure,
-                samesite="lax",
+                samesite=settings.COOKIE_SAMESITE,
                 domain=cookie_domain,
                 max_age=access_token_max_age
             )
@@ -535,7 +535,7 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
                 path="/auth/refresh",
                 httponly=True,
                 secure=cookie_secure,
-                samesite="strict",
+                samesite=settings.REFRESH_COOKIE_SAMESITE,
                 domain=cookie_domain,
                 max_age=refresh_token_max_age
             )

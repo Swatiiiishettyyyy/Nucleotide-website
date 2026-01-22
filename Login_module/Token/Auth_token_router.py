@@ -36,7 +36,7 @@ from .Refresh_token_crud import (
     revoke_token_family,
     revoke_all_user_token_families,
     get_refresh_token_by_family_and_hash,
-    is_token_family_revoked
+    has_active_refresh_token_in_family,
 )
 from Login_module.Token.Token_audit_crud import log_token_event
 from config import settings
@@ -111,7 +111,7 @@ def _set_token_cookies(
     cookie_kwargs = {
         "httponly": True,
         "secure": secure,
-        "samesite": "lax"
+        "samesite": settings.COOKIE_SAMESITE
     }
     
     if domain:
@@ -131,7 +131,7 @@ def _set_token_cookies(
     
     # Set refresh token cookie - path restricted to /auth/refresh, SameSite=strict for security
     refresh_cookie_kwargs = cookie_kwargs.copy()
-    refresh_cookie_kwargs["samesite"] = "strict"
+    refresh_cookie_kwargs["samesite"] = settings.REFRESH_COOKIE_SAMESITE
     if refresh_token_max_age is not None:
         refresh_cookie_kwargs["max_age"] = refresh_token_max_age
     
@@ -174,24 +174,17 @@ def _clear_token_cookies(
             cookie_kwargs["domain"] = domain
         response.set_cookie(key=key, value="", **cookie_kwargs)
     
-    # Clear access_token cookie - correct: path="/", samesite="lax"
+    # Clear access_token cookie using current SameSite configuration
     # Try both secure and non-secure for localhost compatibility
-    clear_cookie("access_token", path="/", samesite="lax", secure_val=True)
-    clear_cookie("access_token", path="/", samesite="lax", secure_val=False)
-    # Also try other samesite values in case of old cookies
-    clear_cookie("access_token", path="/", samesite="none", secure_val=True)
-    clear_cookie("access_token", path="/", samesite="strict", secure_val=True)
+    clear_cookie("access_token", path="/", samesite=settings.COOKIE_SAMESITE, secure_val=True)
+    clear_cookie("access_token", path="/", samesite=settings.COOKIE_SAMESITE, secure_val=False)
     
-    # Clear refresh_token cookie - correct: path="/auth/refresh", samesite="strict"
-    # Try correct parameters first
-    clear_cookie("refresh_token", path="/auth/refresh", samesite="strict", secure_val=True)
-    clear_cookie("refresh_token", path="/auth/refresh", samesite="strict", secure_val=False)
-    # Also try path="/" in case cookie was set with wrong path (as shown in browser)
-    clear_cookie("refresh_token", path="/", samesite="lax", secure_val=False)  # Matches browser screenshot
-    clear_cookie("refresh_token", path="/", samesite="lax", secure_val=True)
-    clear_cookie("refresh_token", path="/", samesite="strict", secure_val=False)
-    clear_cookie("refresh_token", path="/", samesite="strict", secure_val=True)
-    clear_cookie("refresh_token", path="/", samesite="none", secure_val=False)
+    # Clear refresh_token cookie using current SameSite configuration
+    # Try correct path first, then "/" in case cookie was set with different path
+    clear_cookie("refresh_token", path="/auth/refresh", samesite=settings.REFRESH_COOKIE_SAMESITE, secure_val=True)
+    clear_cookie("refresh_token", path="/auth/refresh", samesite=settings.REFRESH_COOKIE_SAMESITE, secure_val=False)
+    clear_cookie("refresh_token", path="/", samesite=settings.REFRESH_COOKIE_SAMESITE, secure_val=False)
+    clear_cookie("refresh_token", path="/", samesite=settings.REFRESH_COOKIE_SAMESITE, secure_val=True)
     
     logger.info(
         f"Token cookies cleared (tried multiple parameter combinations) | "
@@ -359,52 +352,6 @@ def refresh_token(
                 detail="Too many refresh requests. Please try again later."
             )
         
-        # Check if token family is revoked (token reuse detection)
-        if is_token_family_revoked(db, token_family_id):
-            # SECURITY INCIDENT: Token reuse detected
-            logger.error(
-                f"SECURITY: Token reuse detected | "
-                f"User ID: {user_id} | Session ID: {session_id} | "
-                f"Family ID: {token_family_id} | IP: {client_ip}"
-            )
-            
-            # Revoke entire token family and terminate session
-            revoke_token_family(db, token_family_id, "Token reuse detected")
-            
-            session = get_device_session(db, session_id)
-            if session and session.is_active:
-                deactivate_session(
-                    db=db,
-                    session_id=session_id,
-                    reason="Session terminated due to token reuse",
-                    ip_address=client_ip,
-                    user_agent=user_agent,
-                    correlation_id=correlation_id
-                )
-            
-            log_token_event(
-                db=db,
-                event_type="TOKEN_REUSE_DETECTED",
-                user_id=user_id,
-                session_id=session_id,
-                token_family_id=token_family_id,
-                reason=f"Token reuse detected. IP: {client_ip}",
-                ip_address=client_ip,
-                user_agent=user_agent,
-                correlation_id=correlation_id
-            )
-            
-            # Clear cookies when token reuse detected (security incident)
-            _clear_token_cookies(
-                response,
-                domain=settings.COOKIE_DOMAIN if settings.COOKIE_DOMAIN else None,
-                secure=settings.COOKIE_SECURE
-            )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"error_code": "TOKEN_REUSE_DETECTED", "detail": "Security incident detected. Please log in again."}
-            )
-        
         # Validate refresh token hash in database
         token_hash = security.hash_value(refresh_token_value)
         logger.info(
@@ -414,7 +361,7 @@ def refresh_token(
         db_refresh_token = get_refresh_token_by_family_and_hash(db, token_family_id, token_hash)
         
         if not db_refresh_token:
-            # Token not found or already used - potential reuse
+            # Token not found or already used - distinguish between true reuse vs generic invalid
             logger.error(
                 f"Token refresh failed - Refresh token not found in database | "
                 f"User ID: {user_id} | Session ID: {session_id} | Family ID: {token_family_id} | "
@@ -424,28 +371,77 @@ def refresh_token(
             # Record failed attempt
             record_failed_refresh_attempt(session_id)
             
-            log_token_event(
-                db=db,
-                event_type="TOKEN_REFRESH_FAILED",
-                user_id=user_id,
-                session_id=session_id,
-                token_family_id=token_family_id,
-                reason=f"Token not found in database. IP: {client_ip}",
-                ip_address=client_ip,
-                user_agent=user_agent,
-                correlation_id=correlation_id
-            )
+            # Check if there is still an active (non-revoked, unexpired) token in this family
+            has_active = has_active_refresh_token_in_family(db, token_family_id)
             
-            # Clear cookies when refresh token not found (invalid/revoked)
-            _clear_token_cookies(
-                response,
-                domain=settings.COOKIE_DOMAIN if settings.COOKIE_DOMAIN else None,
-                secure=settings.COOKIE_SECURE
-            )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"error_code": "INVALID_TOKEN", "detail": "Invalid refresh token"}
-            )
+            if has_active:
+                # SECURITY INCIDENT: Token reuse detected (old token used while a newer one is still active)
+                logger.error(
+                    f"SECURITY: Token reuse detected | "
+                    f"User ID: {user_id} | Session ID: {session_id} | "
+                    f"Family ID: {token_family_id} | IP: {client_ip}"
+                )
+                
+                # Revoke entire token family and terminate session
+                revoke_token_family(db, token_family_id, "Token reuse detected")
+                
+                session = get_device_session(db, session_id)
+                if session and session.is_active:
+                    deactivate_session(
+                        db=db,
+                        session_id=session_id,
+                        reason="Session terminated due to token reuse",
+                        ip_address=client_ip,
+                        user_agent=user_agent,
+                        correlation_id=correlation_id
+                    )
+                
+                log_token_event(
+                    db=db,
+                    event_type="TOKEN_REUSE_DETECTED",
+                    user_id=user_id,
+                    session_id=session_id,
+                    token_family_id=token_family_id,
+                    reason=f"Token reuse detected. IP: {client_ip}",
+                    ip_address=client_ip,
+                    user_agent=user_agent,
+                    correlation_id=correlation_id
+                )
+                
+                # Clear cookies when token reuse detected (security incident)
+                _clear_token_cookies(
+                    response,
+                    domain=settings.COOKIE_DOMAIN if settings.COOKIE_DOMAIN else None,
+                    secure=settings.COOKIE_SECURE
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail={"error_code": "TOKEN_REUSE_DETECTED", "detail": "Security incident detected. Please log in again."}
+                )
+            else:
+                # No active tokens in this family - treat as generic invalid/expired token
+                log_token_event(
+                    db=db,
+                    event_type="TOKEN_REFRESH_FAILED",
+                    user_id=user_id,
+                    session_id=session_id,
+                    token_family_id=token_family_id,
+                    reason=f"Token not found in database (no active tokens in family). IP: {client_ip}",
+                    ip_address=client_ip,
+                    user_agent=user_agent,
+                    correlation_id=correlation_id
+                )
+                
+                # Clear cookies when refresh token not found (invalid/revoked)
+                _clear_token_cookies(
+                    response,
+                    domain=settings.COOKIE_DOMAIN if settings.COOKIE_DOMAIN else None,
+                    secure=settings.COOKIE_SECURE
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail={"error_code": "INVALID_TOKEN", "detail": "Invalid refresh token"}
+                )
         
         # Validate session is still active
         session = get_device_session(db, session_id)
@@ -939,10 +935,11 @@ def get_csrf_token(
     try:
         payload, is_expired, is_invalid = security.decode_access_token_with_expiry_check(token)
         
-        if is_invalid or not payload:
+        # Reject invalid OR expired tokens
+        if is_invalid or is_expired or not payload:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"error_code": "INVALID_TOKEN", "detail": "Invalid access token"}
+                detail={"error_code": "INVALID_TOKEN", "detail": "Invalid or expired access token"}
             )
         
         user_id = payload.get("sub")

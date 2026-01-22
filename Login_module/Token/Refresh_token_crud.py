@@ -190,6 +190,23 @@ def is_token_family_revoked(
     return any_revoked
 
 
+def has_active_refresh_token_in_family(
+    db: Session,
+    token_family_id: str
+) -> bool:
+    """
+    Check if there is any non-revoked, unexpired refresh token in a family.
+    Used to distinguish between true token reuse (old token used while a newer
+    one is still active) vs a completely expired/cleaned-up family.
+    """
+    active = db.query(RefreshToken).filter(
+        RefreshToken.token_family_id == token_family_id,
+        RefreshToken.is_revoked == False,
+        RefreshToken.expires_at > now_ist()
+    ).first()
+    return active is not None
+
+
 def cleanup_expired_tokens(db: Session) -> int:
     """
     Clean up expired refresh tokens (optional maintenance task).
