@@ -26,7 +26,9 @@ from Login_module.Utils.phone_encryption import decrypt_phone
 from Login_module.Device.Device_session_crud import get_device_session
 
 router = APIRouter(prefix="/member", tags=["Member"])
-security_scheme = HTTPBearer()
+# HTTPBearer is optional; main authentication is handled by get_current_user,
+# which supports both cookies (web) and Authorization header (mobile/apps).
+security_scheme = HTTPBearer(auto_error=False)
 
 # Helper function to generate new token with selected_member_id
 def generate_token_with_member(
@@ -103,7 +105,7 @@ def save_member_api(
     plan_type: Optional[str] = Query(None, description="Plan type: single, couple, or family"),
     db: Session = Depends(get_db),
     user = Depends(get_current_user),
-    credentials: HTTPAuthorizationCredentials = Depends(security_scheme)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme)
 ):
     """
     Create a new member (requires authentication).
@@ -186,7 +188,7 @@ def save_member_api(
     }
     
     # If this is the first member, auto-select it and return new token
-    if is_first_member:
+    if is_first_member and credentials and credentials.credentials:
         try:
             # Extract token from credentials dependency (more reliable than manual extraction)
             token = credentials.credentials
@@ -661,7 +663,7 @@ def select_member_api(
     request: Request,
     db: Session = Depends(get_db),
     user = Depends(get_current_user),
-    credentials: HTTPAuthorizationCredentials = Depends(security_scheme)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme)
 ):
     """
     Switch to a different member profile.
@@ -686,7 +688,12 @@ def select_member_api(
             detail="Member not found or does not belong to you"
         )
     
-    # Get current session info from token
+    # Get current session info from token (requires Authorization header for this endpoint)
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=401,
+            detail="Authorization header with Bearer token is required"
+        )
     token = credentials.credentials
     try:
         payload = security.decode_access_token(token)
