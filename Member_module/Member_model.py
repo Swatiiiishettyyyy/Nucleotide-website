@@ -10,6 +10,10 @@ class Member(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
+    # Per-member API key for identifying member in external requests
+    # Generated once at member creation time, immutable thereafter
+    api_key = Column(String(128), nullable=True, unique=True, index=True)
+
     name = Column(String(100), nullable=False)
     relation = Column(String(50), nullable=False)  # Accepts any relation string value - no enum restriction
     

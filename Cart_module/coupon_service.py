@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional, Tuple
 import logging
 from .Coupon_model import Coupon, CartCoupon, CouponType, CouponStatus
+from Login_module.Utils.datetime_utils import now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +230,8 @@ def apply_coupon_to_cart(
             user_id=user_id,
             coupon_id=coupon.id,
             coupon_code=coupon.coupon_code,
-            discount_amount=discount_amount
+            discount_amount=discount_amount,
+            applied_at=now_ist(),
         )
         db.add(cart_coupon)
         db.commit()

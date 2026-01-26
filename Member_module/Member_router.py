@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, status, Cookie, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -24,8 +24,14 @@ from Login_module.Utils import security
 from Login_module.Utils.datetime_utils import to_ist_isoformat
 from Login_module.Utils.phone_encryption import decrypt_phone
 from Login_module.Device.Device_session_crud import get_device_session
+from config import settings
 
 router = APIRouter(prefix="/member", tags=["Member"])
+
+# Standard header for passing the per-member API key from frontend to backend.
+# Frontend should read `api_key` from /member/current and send it as this header
+# on any request that needs to be associated with a specific member.
+MEMBER_API_KEY_HEADER_NAME = "X-Member-Api-Key"
 # HTTPBearer is optional; main authentication is handled by get_current_user,
 # which supports both cookies (web) and Authorization header (mobile/apps).
 security_scheme = HTTPBearer(auto_error=False)
@@ -105,7 +111,9 @@ def save_member_api(
     plan_type: Optional[str] = Query(None, description="Plan type: single, couple, or family"),
     db: Session = Depends(get_db),
     user = Depends(get_current_user),
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
+    access_token_cookie: Optional[str] = Cookie(None, alias="access_token"),
+    response: Response = None,
 ):
     """
     Create a new member (requires authentication).
@@ -178,7 +186,8 @@ def save_member_api(
         mobile=decrypted_mobile,  # Decrypt before returning in schema
         email=member.email,
         profile_photo_url=member.profile_photo_url,
-        has_taken_genetic_test=has_taken_genetic_test
+        has_taken_genetic_test=has_taken_genetic_test,
+        api_key=getattr(member, "api_key", None),
     )
     
     response = {
@@ -188,10 +197,29 @@ def save_member_api(
     }
     
     # If this is the first member, auto-select it and return new token
-    if is_first_member and credentials and credentials.credentials:
+    if is_first_member:
         try:
-            # Extract token from credentials dependency (more reliable than manual extraction)
-            token = credentials.credentials
+            # Determine token source (cookie for web, Authorization header for mobile/apps)
+            token = None
+            is_web_request = False
+            cookie_token = access_token_cookie.strip() if access_token_cookie and isinstance(access_token_cookie, str) else None
+            if cookie_token:
+                # Web: token from HttpOnly cookie
+                token = cookie_token
+                is_web_request = True
+            elif credentials and credentials.credentials:
+                # Mobile/apps: token from Authorization header
+                token = credentials.credentials
+            else:
+                token = None
+
+            if not token:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Access token required to auto-select first member"
+                )
+
+            # Extract session information from token
             payload = security.decode_access_token(token)
             session_id = payload.get("session_id")
             device_platform = payload.get("device_platform", "unknown")
@@ -211,6 +239,18 @@ def save_member_api(
                 )
                 response["token"] = new_token
                 response["token_type"] = "Bearer"
+
+                # For web clients, also update the HttpOnly access_token cookie
+                if is_web_request and response is not None:
+                    response.set_cookie(
+                        key="access_token",
+                        value=new_token,
+                        path="/",
+                        httponly=True,
+                        secure=settings.COOKIE_SECURE,
+                        samesite=settings.COOKIE_SAMESITE,
+                        max_age=settings.ACCESS_TOKEN_EXPIRE_SECONDS,
+                    )
         except HTTPException:
             # Re-raise HTTP exceptions (like invalid token, invalid session)
             # Don't fail member creation, but log the error
@@ -366,7 +406,8 @@ def edit_member_api(
         mobile=decrypted_mobile,  # Decrypt before returning in schema
         email=member.email,
         profile_photo_url=member.profile_photo_url,
-        has_taken_genetic_test=has_taken_genetic_test
+        has_taken_genetic_test=has_taken_genetic_test,
+        api_key=getattr(member, "api_key", None),
     )
 
     return {
@@ -411,7 +452,8 @@ def get_member_list(
             "mobile": decrypted_mobile,  # Decrypt before returning in schema
             "email": m.email,
             "profile_photo_url": m.profile_photo_url,
-            "has_taken_genetic_test": has_taken_genetic_test
+            "has_taken_genetic_test": has_taken_genetic_test,
+            "api_key": getattr(m, "api_key", None),
         })
     return {
         "status": "success",
@@ -661,9 +703,11 @@ def delete_member_api(
 def select_member_api(
     member_id: int,
     request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     user = Depends(get_current_user),
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
+    access_token_cookie: Optional[str] = Cookie(None, alias="access_token")
 ):
     """
     Switch to a different member profile.
@@ -688,14 +732,27 @@ def select_member_api(
             detail="Member not found or does not belong to you"
         )
     
-    # Get current session info from token (requires Authorization header for this endpoint)
-    if not credentials or not credentials.credentials:
+    # Get current session info from token (support both cookies for web and Authorization header for mobile/apps)
+    token = None
+    cookie_token = access_token_cookie.strip() if access_token_cookie and isinstance(access_token_cookie, str) else None
+    is_web_request = bool(cookie_token)
+    if cookie_token:
+        # Web: token from HttpOnly cookie
+        token = cookie_token
+    elif credentials and credentials.credentials and credentials.credentials.strip():
+        # Mobile/apps: token from Authorization header
+        token = credentials.credentials.strip()
+    else:
         raise HTTPException(
             status_code=401,
-            detail="Authorization header with Bearer token is required"
+            detail="Access token required"
         )
-    token = credentials.credentials
+
     try:
+        # Decode token to extract session information
+        # Note: we use decode_access_token here (no expiry tolerance) because switching profile
+        # requires a valid, non-expired access token just like other authenticated actions.
+        token = token.strip()
         payload = security.decode_access_token(token)
         session_id = payload.get("session_id")
         device_platform = payload.get("device_platform", "unknown")
@@ -719,6 +776,19 @@ def select_member_api(
             device_platform=device_platform,
             selected_member_id=member_id
         )
+
+        # For web clients, also update the HttpOnly access_token cookie so subsequent
+        # requests automatically use the new selected_member_id
+        if is_web_request and response is not None:
+            response.set_cookie(
+                key="access_token",
+                value=new_token,
+                path="/",
+                httponly=True,
+                secure=settings.COOKIE_SECURE,
+                samesite=settings.COOKIE_SAMESITE,
+                max_age=settings.ACCESS_TOKEN_EXPIRE_SECONDS,
+            )
         
         # Decrypt phone number for API schema
         decrypted_mobile = decrypt_phone(member.mobile) if member.mobile else None
@@ -813,7 +883,8 @@ def get_current_member_api(
             "mobile": decrypted_mobile,  # Decrypt before returning in schema
             "email": current_member.email,
             "profile_photo_url": current_member.profile_photo_url,
-            "has_taken_genetic_test": has_taken_genetic_test
+            "has_taken_genetic_test": has_taken_genetic_test,
+            "api_key": getattr(current_member, "api_key", None),
         }
     }
 

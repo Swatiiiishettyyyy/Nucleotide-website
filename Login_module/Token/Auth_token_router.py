@@ -621,6 +621,8 @@ def refresh_token(
             "device_platform": device_platform
         }
         if selected_member_id:
+            # Preserve currently selected member across refresh so user stays
+            # on the same profile after token rotation.
             access_token_data["selected_member_id"] = str(selected_member_id)
         
         new_access_token = security.create_access_token(

@@ -194,6 +194,8 @@ class MemberData(BaseModel):
     email: Optional[str] = None
     profile_photo_url: Optional[str] = None
     has_taken_genetic_test: Optional[bool] = False
+    # Per-member API key, used by frontend in headers
+    api_key: Optional[str] = None
 
 class MemberResponse(BaseModel):
     status: str

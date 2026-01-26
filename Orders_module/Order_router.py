@@ -280,9 +280,24 @@ def create_order(
             subtotal += item.quantity * product.SpecialPrice
         
         # Get coupon discount for Razorpay order amount
-        from Cart_module.coupon_service import get_applied_coupon
+        # Recalculate using the same logic as order creation to keep amounts in sync
+        from Cart_module.coupon_service import get_applied_coupon, validate_and_calculate_discount
         applied_coupon = get_applied_coupon(db, current_user.id)
-        coupon_discount = applied_coupon.discount_amount if applied_coupon else 0.0
+        coupon_discount = 0.0
+
+        if applied_coupon:
+            coupon, recalculated_discount, error_message = validate_and_calculate_discount(
+                db,
+                applied_coupon.coupon_code,
+                current_user.id,
+                subtotal,
+                cart_items,
+            )
+            if coupon and not error_message:
+                coupon_discount = recalculated_discount
+            else:
+                # If coupon is no longer valid, treat as no coupon for Razorpay amount
+                coupon_discount = 0.0
         
         # Calculate product discount (per product group, not per cart item row)
         processed_groups = set()

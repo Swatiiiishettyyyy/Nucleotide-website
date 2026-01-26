@@ -14,6 +14,32 @@ logger = logging.getLogger(__name__)
 _VALID_PLAN_TYPES = {"single", "couple", "family"}
 
 
+def _build_member_api_key(user_id: int, member_id: int, dob, mobile: Optional[str]) -> str:
+    """Build a deterministic, human-readable member API key.
+
+    Pattern (example): nu1532100812345
+    - nu               : fixed prefix
+    - 15               : day of DOB (DD)
+    - 3210             : last 4 digits of mobile
+    - 08               : month of DOB (MM)
+    - 12               : user_id
+    - 345              : member_id
+    """
+    # Day and month as zero-padded 2-digit strings
+    day = f"{dob.day:02d}" if dob is not None else "00"
+    month = f"{dob.month:02d}" if dob is not None else "00"
+
+    # Extract digits from mobile and take last 4, padding if needed
+    digits = "".join(filter(str.isdigit, str(mobile))) if mobile else ""
+    if len(digits) >= 4:
+        last4 = digits[-4:]
+    else:
+        # Pad on the left with zeros if fewer than 4 digits
+        last4 = digits.zfill(4)
+
+    return f"nu{day}{last4}{month}{user_id}{member_id}"
+
+
 def _normalize_relation(relation: Optional[str]) -> str:
     """Convert incoming relation string to normalized string. Accepts any string value.
     No default value - relation must be provided by user.
@@ -211,6 +237,15 @@ def save_member(
             deleted_member.mobile = req.mobile  # Store as plain text
             if hasattr(req, 'email'):
                 deleted_member.email = getattr(req, 'email', None)
+
+            # Ensure restored member has an API key; build from current fields if missing
+            if not getattr(deleted_member, "api_key", None):
+                deleted_member.api_key = _build_member_api_key(
+                    user_id=deleted_member.user_id,
+                    member_id=deleted_member.id,
+                    dob=deleted_member.dob,
+                    mobile=deleted_member.mobile,
+                )
             
             # Preserve profile photo URL (restore original photo if it existed)
             deleted_member.profile_photo_url = preserved_profile_photo_url
@@ -390,6 +425,7 @@ def save_member(
         
         # Create member with the relation value
         # IMPORTANT: relation_to_store has been validated and is guaranteed to be non-empty
+        # API key is built after we have a member ID (post-flush) using the agreed deterministic pattern.
         member = Member(
             user_id=user.id,
             name=req.name,
@@ -402,10 +438,18 @@ def save_member(
             associated_category=category_name,
             associated_category_id=category_obj.id,
             associated_plan_type=plan_type_normalized,
-            is_self_profile=should_mark_as_self  # Mark as self profile if first member with "Self" relation
+            is_self_profile=should_mark_as_self,  # Mark as self profile if first member with "Self" relation
         )
         db.add(member)
         db.flush()  # Flush to get the ID without committing
+
+        # Now that member.id is available, build the deterministic API key
+        member.api_key = _build_member_api_key(
+            user_id=user.id,
+            member_id=member.id,
+            dob=member.dob,
+            mobile=member.mobile,
+        )
         
         # CRITICAL: Verify the relation was set correctly BEFORE commit
         if not member.relation or str(member.relation).strip() == "":

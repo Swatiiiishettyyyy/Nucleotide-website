@@ -133,3 +133,4 @@ def downgrade() -> None:
     else:
         logger.info("tracking_records table does not exist, skipping drop")
 
+
