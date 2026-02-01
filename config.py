@@ -1,5 +1,6 @@
 import os
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 
 class Settings(BaseSettings):
     DATABASE_URL: str
@@ -48,12 +49,13 @@ class Settings(BaseSettings):
 
     ENVIRONMENT: str = "development"
 
-    class Config:
+    model_config = ConfigDict(
         # Use absolute path to make sure .env is found
-        env_file = os.path.join(os.path.dirname(__file__), "..", ".env")
-        env_file_encoding = "utf-8"
+        env_file=os.path.join(os.path.dirname(__file__), "..", ".env"),
+        env_file_encoding="utf-8",
         # Allow case-insensitive environment variable names
-        case_sensitive = False
+        case_sensitive=False
+    )
 
 # Create the settings instance
 settings = Settings()
