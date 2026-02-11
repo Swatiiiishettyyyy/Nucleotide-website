@@ -48,7 +48,7 @@ class CartItemResponse(BaseModel):
     cart_items_count: int
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 # ---------------- NEW CART RESPONSE SCHEMAS ---------------- #
@@ -64,7 +64,7 @@ class CartItemDetail(BaseModel):
     total_amount: float
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class CartSummary(BaseModel):
@@ -79,7 +79,7 @@ class CartSummary(BaseModel):
     grand_total: float
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class ApplyCouponRequest(BaseModel):
@@ -97,7 +97,7 @@ class CartData(BaseModel):
     cart_items: List[CartItemDetail]
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class CartResponse(BaseModel):
@@ -106,7 +106,7 @@ class CartResponse(BaseModel):
     data: CartData
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class CouponCreate(BaseModel):

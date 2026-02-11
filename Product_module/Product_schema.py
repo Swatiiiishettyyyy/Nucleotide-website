@@ -54,7 +54,7 @@ class ProductResponse(BaseModel):
     category: CategoryResponse
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class ProductListResponse(BaseModel):

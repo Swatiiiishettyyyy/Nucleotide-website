@@ -58,7 +58,7 @@ class ManageConsentRequest(BaseModel):
     product_consents: List[dict] = Field(..., description="List of product consent updates")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "product_consents": [
                     {"product_id": 1, "status": "yes"},
@@ -83,7 +83,7 @@ class ConsentData(BaseModel):
     updated_at: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class ConsentBulkData(BaseModel):
@@ -99,7 +99,7 @@ class ConsentBulkData(BaseModel):
     updated_at: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class ConsentRecordResponse(BaseModel):

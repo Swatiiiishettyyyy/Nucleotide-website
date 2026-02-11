@@ -1,7 +1,7 @@
 """
 Tracking Schemas - Pydantic models for request/response validation
 """
-from pydantic import BaseModel, Field, validator, root_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List
 from datetime import datetime
 import re
@@ -33,7 +33,8 @@ class TrackingEventRequest(BaseModel):
     referrer: Optional[str] = Field(None, max_length=500, description="Referrer URL")
     device_info: Optional[DeviceInfo] = Field(None, description="Device information")
 
-    @validator('ga_client_id')
+    @field_validator('ga_client_id')
+    @classmethod
     def validate_ga_client_id(cls, v):
         """Validate GA Client ID format if provided"""
         if v is None or v == "":
@@ -51,35 +52,37 @@ class TrackingEventRequest(BaseModel):
         
         return v
 
-    @root_validator
+    @model_validator(mode='before')
+    @classmethod
     def validate_conditional_fields(cls, values):
         """Validate that required fields are provided based on consent values"""
-        ga_consent = values.get('ga_consent')
-        location_consent = values.get('location_consent')
-        ga_client_id = values.get('ga_client_id')
-        latitude = values.get('latitude')
-        longitude = values.get('longitude')
-        accuracy = values.get('accuracy')
+        if isinstance(values, dict):
+            ga_consent = values.get('ga_consent')
+            location_consent = values.get('location_consent')
+            ga_client_id = values.get('ga_client_id')
+            latitude = values.get('latitude')
+            longitude = values.get('longitude')
+            accuracy = values.get('accuracy')
 
-        # If GA consent is true, ga_client_id should be provided (but not strictly required)
-        # If GA consent is false, ga_client_id must be null
-        if ga_consent is False:
-            if ga_client_id is not None and (not isinstance(ga_client_id, str) or ga_client_id.strip() != ""):
-                raise ValueError('ga_client_id must be null when ga_consent is false')
-            values['ga_client_id'] = None
+            # If GA consent is true, ga_client_id should be provided (but not strictly required)
+            # If GA consent is false, ga_client_id must be null
+            if ga_consent is False:
+                if ga_client_id is not None and (not isinstance(ga_client_id, str) or ga_client_id.strip() != ""):
+                    raise ValueError('ga_client_id must be null when ga_consent is false')
+                values['ga_client_id'] = None
 
-        # If location consent is true, latitude and longitude should be provided
-        if location_consent is True:
-            if latitude is None or longitude is None:
-                raise ValueError('latitude and longitude are required when location_consent is true')
-        
-        # If location consent is false, location fields must be null
-        if location_consent is False:
-            if latitude is not None or longitude is not None or accuracy is not None:
-                raise ValueError('latitude, longitude, and accuracy must be null when location_consent is false')
-            values['latitude'] = None
-            values['longitude'] = None
-            values['accuracy'] = None
+            # If location consent is true, latitude and longitude should be provided
+            if location_consent is True:
+                if latitude is None or longitude is None:
+                    raise ValueError('latitude and longitude are required when location_consent is true')
+            
+            # If location consent is false, location fields must be null
+            if location_consent is False:
+                if latitude is not None or longitude is not None or accuracy is not None:
+                    raise ValueError('latitude, longitude, and accuracy must be null when location_consent is false')
+                values['latitude'] = None
+                values['longitude'] = None
+                values['accuracy'] = None
 
         return values
 

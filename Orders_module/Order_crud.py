@@ -3,7 +3,7 @@ Order CRUD operations.
 """
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import datetime
+from datetime import datetime, date, time
 from typing import Optional, List, Tuple, Dict, Any
 import secrets
 from Login_module.Utils.datetime_utils import now_ist, to_ist_isoformat
@@ -20,6 +20,102 @@ from Address_module.Address_model import Address
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _get_slot_time(slot: str) -> time:
+    """
+    Map a slot label to a representative time of day.
+    Slots are UX labels (e.g., MORNING, EVENING) corresponding to fixed windows:
+    - MORNING: 09:00–11:00 (we store 09:00)
+    - EVENING: 15:00–19:00 (we store 15:00)
+    """
+    if not slot:
+        raise ValueError("Slot is required")
+
+    slot_upper = slot.strip().upper()
+
+    if slot_upper in ["MORNING", "9_11", "9-11", "09_11", "09-11"]:
+        return time(hour=9, minute=0)
+
+    if slot_upper in ["EVENING", "15_19", "15-19", "3_7", "3-7"]:
+        return time(hour=15, minute=0)
+
+    raise ValueError(f"Invalid slot value: {slot}. Allowed: MORNING or EVENING")
+
+
+def schedule_order_items(
+    db: Session,
+    order: Order,
+    member_schedule_map: Dict[int, Dict[str, Any]],
+    changed_by: str = "system",
+    notes: Optional[str] = None,
+) -> Order:
+    """
+    Apply SCHEDULED status and scheduled_date per order item using update_order_status.
+
+    member_schedule_map format:
+        {
+            member_id: {
+                "date": date,          # datetime.date
+                "slot": str,           # slot label (MORNING/EVENING)
+            },
+            ...
+        }
+
+    - Only items whose member_id appears in the map will be updated.
+    - Uses a representative time for the slot (see _get_slot_time).
+    - Uses update_order_status to ensure consistency and history tracking.
+    """
+    if not member_schedule_map:
+        raise ValueError("member_schedule_map cannot be empty")
+
+    # Ensure payment is completed before scheduling (post-payment statuses)
+    if order.payment_status != PaymentStatus.COMPLETED:
+        raise ValueError(
+            f"Cannot schedule order {order.order_number} because payment status is "
+            f"{order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status)}. "
+            f"Payment must be completed before scheduling."
+        )
+
+    # For each member_id, schedule all items in this order that belong to that member
+    for member_id, schedule in member_schedule_map.items():
+        schedule_date: date = schedule.get("scheduled_date")
+        slot: str = schedule.get("slot")
+
+        if not schedule_date or not slot:
+            raise ValueError(f"Both date and slot are required for member_id={member_id}")
+
+        # Reject past dates
+        today = now_ist().date()
+        if schedule_date < today:
+            raise ValueError(f"Scheduled date {schedule_date} for member_id={member_id} cannot be in the past")
+
+        slot_time = _get_slot_time(slot)
+        scheduled_dt = datetime.combine(schedule_date, slot_time)
+
+        # Find items for this member in this order
+        member_items = [item for item in order.items if item.member_id == member_id]
+        if not member_items:
+            # Skip silently or raise? For now, raise to surface potential frontend issues
+            raise ValueError(
+                f"No order items found for member_id={member_id} in order {order.order_number}"
+            )
+
+        # Update each item separately to keep per-item history clean
+        for item in member_items:
+            update_order_status(
+                db=db,
+                order_id=order.id,
+                new_status=OrderStatus.SCHEDULED,
+                changed_by=changed_by,
+                notes=notes or f"Scheduled visit for member_id={member_id} on {schedule_date} ({slot}).",
+                order_item_id=item.id,
+                scheduled_date=scheduled_dt,
+            )
+
+    # Refresh order after all updates to get latest status
+    db.refresh(order)
+    return order
 
 
 def sync_order_item_statuses_with_order_status(
@@ -920,6 +1016,89 @@ def confirm_order_from_webhook(
         logger.error(
             f"CRITICAL: Error tracking genetic test participants for order {order.order_number} (ID: {order.id}): {str(e)}. "
             f"Order confirmed but genetic test flag may not be set. Manual intervention may be required.",
+            exc_info=True
+        )
+    
+    # Create Razorpay invoice for the confirmed order (idempotent with respect to this function)
+    try:
+        from .razorpay_service import create_razorpay_customer, create_razorpay_invoice_for_order
+
+        # Try to reuse an existing customer_id from any previous order of this user
+        existing_with_customer = (
+            db.query(Order)
+            .filter(
+                Order.user_id == order.user_id,
+                Order.razorpay_customer_id.isnot(None)
+            )
+            .order_by(Order.created_at.desc())
+            .first()
+        )
+
+        customer_id = existing_with_customer.razorpay_customer_id if existing_with_customer else None
+
+        user = order.user
+
+        # Create a new Razorpay customer if we don't have one yet
+        if not customer_id:
+            # Build contact number from user's mobile (decrypt and normalize to last 10 digits if possible)
+            contact = None
+            try:
+                from Login_module.Utils.phone_encryption import decrypt_phone
+
+                raw_mobile = getattr(user, "mobile", None)
+                if raw_mobile:
+                    try:
+                        decrypted_mobile = decrypt_phone(raw_mobile)
+                    except Exception:
+                        # If decryption fails, fall back to raw value
+                        decrypted_mobile = raw_mobile
+
+                    digits_only = "".join(filter(str.isdigit, str(decrypted_mobile)))
+                    if len(digits_only) >= 10:
+                        contact = digits_only[-10:]
+                    elif len(digits_only) > 0:
+                        contact = digits_only
+            except Exception:
+                # If anything goes wrong while preparing contact, keep it None
+                contact = None
+
+            customer = create_razorpay_customer(
+                name=getattr(user, "name", None),
+                email=getattr(user, "email", None),
+                contact=contact,
+            )
+            customer_id = customer.get("id")
+
+        if not customer_id:
+            logger.error(
+                f"Unable to determine Razorpay customer_id for order {order.order_number} (user {order.user_id}). "
+                f"Invoice will not be created."
+            )
+        else:
+            invoice = create_razorpay_invoice_for_order(
+                customer_id=customer_id,
+                order_number=order.order_number,
+                total_amount=order.total_amount,
+                currency=payment.currency if payment and payment.currency else "INR",
+                email=getattr(user, "email", None)
+            )
+
+            # Persist invoice details on the order for frontend and future email sending
+            order.razorpay_customer_id = customer_id
+            order.razorpay_invoice_id = invoice.get("id")
+            order.razorpay_invoice_number = invoice.get("invoice_number") or invoice.get("number")
+            order.razorpay_invoice_url = invoice.get("short_url") or invoice.get("invoice_url") or invoice.get("pdf_url")
+            order.razorpay_invoice_status = invoice.get("status")
+
+            logger.info(
+                f"Razorpay invoice created for order {order.order_number} (ID: {order.id}) - "
+                f"invoice_id={order.razorpay_invoice_id}, status={order.razorpay_invoice_status}"
+            )
+    except Exception as e:
+        # Log error but don't fail order confirmation if invoice creation fails
+        logger.error(
+            f"CRITICAL: Error creating Razorpay invoice for order {order.order_number} (ID: {order.id}): {str(e)}. "
+            f"Order confirmed but invoice may not be created. Manual intervention may be required.",
             exc_info=True
         )
     

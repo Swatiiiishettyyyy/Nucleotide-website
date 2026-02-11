@@ -7,7 +7,7 @@ class NewsletterSubscribeRequest(BaseModel):
     email: EmailStr = Field(..., description="Email address to subscribe", example="user@example.com")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "email": "user@example.com"
             }
@@ -20,7 +20,7 @@ class NewsletterSubscribeData(BaseModel):
     email: str = Field(..., description="Validated email address")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "user_id": 123,
                 "email": "user@example.com"

@@ -9,7 +9,7 @@ class BannerAction(BaseModel):
     value: Optional[str] = Field(None, description="Optional action value (e.g., 'CANCER_PREDISPOSITION')")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "type": "GENETIC_TEST",
                 "value": "CANCER_PREDISPOSITION"
@@ -72,7 +72,7 @@ class BannerResponse(BaseModel):
     updated_at: Optional[str] = None  # ISO format datetime string
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class BannerListResponse(BaseModel):

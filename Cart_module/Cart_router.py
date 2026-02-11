@@ -164,10 +164,22 @@ def add_to_cart(
             
             # Create user-friendly message with specific member names
             if len(member_names) == 1:
-                message = f"'{member_names[0]}' is already added to another product in '{category_name}'. This member is already there. Remove '{member_names[0]}' from the other product first or choose a different member."
+                # Single member
+                name = member_names[0]
+                message = (
+                    f"{name} is already added to another {category_name} plan. "
+                    f"Please remove them from that plan or pick a different member."
+                )
             else:
-                members_str = ", ".join([f"'{name}'" for name in member_names[:-1]]) + f", and '{member_names[-1]}'"
-                message = f"These members ({members_str}) are already added to another product in '{category_name}'. These members are already there. Remove from the other product first or choose different members."
+                # Multiple members: "A and B" or "A, B and C"
+                if len(member_names) == 2:
+                    members_str = f"{member_names[0]} and {member_names[1]}"
+                else:
+                    members_str = ", ".join(member_names[:-1]) + f" and {member_names[-1]}"
+                message = (
+                    f"{members_str} are already added to another {category_name} plan. "
+                    f"Please remove them from that plan or pick different members."
+                )
             
             client_ip, user_agent = get_client_info(request) if request else (None, None)
             logger.warning(

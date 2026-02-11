@@ -309,8 +309,8 @@ def save_member(
                 raise HTTPException(
                     status_code=422,
                     detail=(
-                        f"Member '{req.name}' is already associated with your '{plan}' plan "
-                        f"in the '{category_name}' category. Remove them from that plan before adding to family."
+                        f"{req.name} is already in your {plan} plan for {category_name}. "
+                        f"Please remove them there before adding again."
                     )
                 )
 
@@ -335,8 +335,8 @@ def save_member(
                 raise HTTPException(
                     status_code=422,
                     detail=(
-                        f"Member '{req.name}' is already associated with your '{plan}' plan "
-                        f"in the '{category_name}' category. Remove them before assigning to another plan."
+                        f"{req.name} is already in your {plan} plan for {category_name}. "
+                        f"Please remove them there before adding again."
                     )
                 )
     

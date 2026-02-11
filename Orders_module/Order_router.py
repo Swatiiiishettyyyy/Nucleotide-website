@@ -25,7 +25,8 @@ from .Order_schema import (
     OrderItemTrackingResponse,
     OrderTrackingResponse,
     RazorpayWebhookPayload,
-    WebhookResponse
+    WebhookResponse,
+    ScheduleOrderRequest,
 )
 from .Order_crud import (
     create_order_from_cart,
@@ -1346,11 +1347,25 @@ def get_orders(
         if not order_items:
             continue
         
-        # Get latest payment record for razorpay_order_id
-        latest_payment = db.query(Payment).filter(
-            Payment.order_id == order.id
-        ).order_by(Payment.created_at.desc()).first()
+        # Get latest payment record for payment details
+        latest_payment = (
+            db.query(Payment)
+            .filter(Payment.order_id == order.id)
+            .order_by(Payment.created_at.desc())
+            .first()
+        )
         razorpay_order_id = latest_payment.razorpay_order_id if latest_payment else None
+        payment_method = (
+            latest_payment.payment_method.value
+            if latest_payment and hasattr(latest_payment.payment_method, "value")
+            else (str(latest_payment.payment_method) if latest_payment else None)
+        )
+        payment_method_details = (
+            latest_payment.payment_method_details if latest_payment else None
+        )
+        payment_method_metadata = (
+            latest_payment.payment_method_metadata if latest_payment else None
+        )
         
         result.append({
             "order_number": order.order_number,
@@ -1365,6 +1380,14 @@ def get_orders(
             "payment_status": order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status),
             "order_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
             "razorpay_order_id": razorpay_order_id,
+            "payment_method": payment_method,
+            "payment_method_details": payment_method_details,
+            "payment_method_metadata": payment_method_metadata,
+            "razorpay_customer_id": getattr(order, "razorpay_customer_id", None),
+            "razorpay_invoice_id": getattr(order, "razorpay_invoice_id", None),
+            "razorpay_invoice_number": getattr(order, "razorpay_invoice_number", None),
+            "razorpay_invoice_url": getattr(order, "razorpay_invoice_url", None),
+            "razorpay_invoice_status": getattr(order, "razorpay_invoice_status", None),
             "created_at": to_ist_isoformat(order.created_at),
             "items": order_items
         })
@@ -1802,9 +1825,16 @@ def get_order(
             detail="No order items found for the selected member in this order"
         )
     
-    # Get latest payment record for razorpay_order_id (from eager-loaded relationship)
+    # Get latest payment record for payment details (from eager-loaded relationship)
     latest_payment = max(order.payments, key=lambda p: p.created_at) if order.payments else None
     razorpay_order_id = latest_payment.razorpay_order_id if latest_payment else None
+    payment_method = (
+        latest_payment.payment_method.value
+        if latest_payment and hasattr(latest_payment.payment_method, "value")
+        else (str(latest_payment.payment_method) if latest_payment else None)
+    )
+    payment_method_details = latest_payment.payment_method_details if latest_payment else None
+    payment_method_metadata = latest_payment.payment_method_metadata if latest_payment else None
     
     # Get payment timestamps
     payment_confirmed_at = None
@@ -1834,6 +1864,14 @@ def get_order(
         "payment_status": order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status),
         "order_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
         "razorpay_order_id": razorpay_order_id if razorpay_order_id else None,
+        "payment_method": payment_method,
+        "payment_method_details": payment_method_details,
+        "payment_method_metadata": payment_method_metadata,
+        "razorpay_customer_id": getattr(order, "razorpay_customer_id", None),
+        "razorpay_invoice_id": getattr(order, "razorpay_invoice_id", None),
+        "razorpay_invoice_number": getattr(order, "razorpay_invoice_number", None),
+        "razorpay_invoice_url": getattr(order, "razorpay_invoice_url", None),
+        "razorpay_invoice_status": getattr(order, "razorpay_invoice_status", None),
         "created_at": to_ist_isoformat(order.created_at),
         "status_updated_at": to_ist_isoformat(order.status_updated_at),
         "payment_confirmed_at": to_ist_isoformat(payment_confirmed_at),
@@ -2476,4 +2514,192 @@ def update_order_status_api(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error updating order status: {str(e)}"
+        )
+
+
+@router.post("/{order_number}/schedule")
+def schedule_order(
+    order_number: str,
+    schedule_data: ScheduleOrderRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Schedule tests for an order.
+    
+    Only works for orders that belong to the current user.
+    Requires payment_status = COMPLETED (post-payment scheduling).
+    
+    **Same Slot for All Members JSON (use_same_slot_for_all = true):**
+    ```json
+    {
+      "use_same_slot_for_all": true,
+      "scheduled_date": "2026-02-15",
+      "slot": "9_11",
+      "member_schedules": null
+    }
+    ```
+    
+    **Per-Member Scheduling JSON (use_same_slot_for_all = false):**
+    ```json
+    {
+      "use_same_slot_for_all": false,
+      "scheduled_date": null,
+      "slot": null,
+      "member_schedules": [
+        {
+          "member_id": 63,
+          "scheduled_date": "2026-02-15",
+          "slot": "9_11"
+        },
+        {
+          "member_id": 64,
+          "scheduled_date": "2026-02-16",
+          "slot": "15_19"
+        }
+      ]
+    }
+    ```
+    
+    **Note:** Date format should be YYYY-MM-DD. Slot format can be:
+    - Morning: "9_11", 
+    - Evening: "15_19"
+    """
+    from .Order_crud import schedule_order_items
+
+    try:
+        client_ip = get_client_info(request) if request else None
+
+        # Load order and ensure it belongs to the current user
+        from sqlalchemy.orm import joinedload
+
+        order = (
+            db.query(Order)
+            .options(joinedload(Order.items))
+            .filter(
+                Order.order_number == order_number,
+                Order.user_id == current_user.id,
+            )
+            .first()
+        )
+
+        if not order:
+            logger.warning(
+                f"Schedule request failed - Order not found or does not belong to user | "
+                f"Order number: {order_number} | User ID: {current_user.id} | IP: {client_ip}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found",
+            )
+
+        # Payment must be completed before scheduling
+        if order.payment_status != PaymentStatus.COMPLETED:
+            logger.warning(
+                f"Schedule request rejected - Payment not completed | "
+                f"Order: {order_number} | Payment status: {order.payment_status} | User ID: {current_user.id}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "We can schedule your tests only after the payment is completed. "
+                    "Please complete the payment first."
+                ),
+            )
+
+        # Build member_schedule_map: member_id -> {scheduled_date, slot}
+        member_schedule_map: Dict[int, Dict[str, Any]] = {}
+
+        if schedule_data.use_same_slot_for_all:
+            if not schedule_data.scheduled_date or not schedule_data.slot:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Please select a date and time slot to schedule all tests.",
+                )
+
+            # Apply to all members in this order (for items with member_id)
+            member_ids = {
+                item.member_id
+                for item in order.items
+                if item.member_id is not None
+            }
+
+            if not member_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="No members found in this order to schedule.",
+                )
+
+            for member_id in member_ids:
+                member_schedule_map[member_id] = {
+                    "scheduled_date": schedule_data.scheduled_date,
+                    "slot": schedule_data.slot,
+                }
+        else:
+            # Per-member scheduling
+            if not schedule_data.member_schedules:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Please provide schedules for each member or choose the same slot for all.",
+                )
+
+            for ms in schedule_data.member_schedules:
+                member_schedule_map[ms.member_id] = {
+                    "scheduled_date": ms.scheduled_date,
+                    "slot": ms.slot,
+                }
+
+        # Apply scheduling via helper
+        order = schedule_order_items(
+            db=db,
+            order=order,
+            member_schedule_map=member_schedule_map,
+            changed_by=str(current_user.id),
+            notes="Scheduled via user API.",
+        )
+
+        # Build simple response summarizing schedules
+        scheduled_items: List[Dict[str, Any]] = []
+        for item in order.items:
+            if item.member_id is None:
+                continue
+            scheduled_items.append(
+                {
+                    "order_item_id": item.id,
+                    "member_id": item.member_id,
+                    "scheduled_date": to_ist_isoformat(item.scheduled_date),
+                    "status": item.order_status.value
+                    if hasattr(item.order_status, "value")
+                    else str(item.order_status),
+                }
+            )
+
+        return {
+            "status": "success",
+            "message": "Your test has been scheduled successfully.",
+            "data": {
+                "order_number": order.order_number,
+                "order_status": order.order_status.value
+                if hasattr(order.order_status, "value")
+                else str(order.order_status),
+                "scheduled_items": scheduled_items,
+            },
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.warning(
+            f"Schedule request validation error for order {order_number}: {str(e)}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+        )
+    except Exception as e:
+        logger.error(
+            f"Error scheduling order {order_number}: {str(e)}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Something went wrong while scheduling your tests. Please try again.",
         )

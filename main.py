@@ -50,6 +50,7 @@ from PhoneChange_module.PhoneChange_model import PhoneChangeRequest, PhoneChange
 from Login_module.Token.Refresh_token_model import RefreshToken  # Dual-token strategy
 from Newsletter_module.Newsletter_model import NewsletterSubscription
 from Tracking_module.Tracking_model import TrackingRecord  # Location & Analytics Tracking
+from Account_module.Account_model import AccountFeedbackRequest
 
 # Import Google Meet API models to register with SQLAlchemy Base
 try:
@@ -78,6 +79,7 @@ from Product_module.Product_router import router as product_router
 from PhoneChange_module.PhoneChange_router import router as phone_change_router
 from Newsletter_module.Newsletter_router import router as newsletter_router
 from Tracking_module.Tracking_router import router as tracking_router
+from Account_module.Account_router import router as account_router
 
 # Google Meet API router
 try:
@@ -178,35 +180,55 @@ def initialize_database():
         logger.info("Running database migrations...")
         run_migrations()
         logger.info("Database migrations completed successfully")
-    except OperationalError as e:
-        logger.error(f"Failed to connect to database during migrations: {e}")
-        logger.warning("Migrations will be retried on next startup")
+    except KeyboardInterrupt:
+        # Re-raise keyboard interrupt so the app can shut down gracefully
+        logger.warning("Migration interrupted by user")
+        raise
     except Exception as e:
-        logger.error(f"Unexpected error during migrations: {e}", exc_info=True)
+        # Catch all exceptions to prevent app crash
+        logger.error(f"Error during database migrations: {e}", exc_info=True)
+        logger.warning("Migrations will be retried on next startup. Application will continue to start.")
     
     # Seed default categories
     try:
         logger.info("Seeding default categories...")
         seed_default_categories()
         logger.info("Default categories seeded successfully")
-    except OperationalError as e:
-        logger.error(f"Failed to connect to database during category seeding: {e}")
-        logger.warning("Category seeding will be retried on next startup")
     except Exception as e:
-        logger.error(f"Unexpected error during category seeding: {e}", exc_info=True)
+        # Catch all exceptions to prevent app crash
+        logger.error(f"Error during category seeding: {e}", exc_info=True)
+        logger.warning("Category seeding will be retried on next startup. Application will continue to start.")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
-    logger.info("Starting application...")
-    initialize_database()
-    start_scheduler()
-    logger.info("Application started successfully")
+    try:
+        logger.info("Starting application...")
+        logger.info("Step 1: Initializing database...")
+        initialize_database()
+        logger.info("Step 2: Database initialization complete")
+        logger.info("Step 3: Starting scheduler...")
+        start_scheduler()
+        logger.info("Step 4: Scheduler started")
+        logger.info("Application started successfully - all startup tasks completed")
+    except KeyboardInterrupt:
+        logger.warning("Application startup interrupted by user")
+        raise
+    except Exception as e:
+        logger.error(f"Error during application startup: {e}", exc_info=True)
+        logger.warning("Application will continue to start despite startup errors.")
+    
+    logger.info("Yielding control to FastAPI...")
     yield
-    logger.info("Shutting down application...")
-    shutdown_scheduler()
-    logger.info("Application shutdown complete")
+    logger.info("FastAPI shutdown initiated...")
+    
+    try:
+        logger.info("Shutting down application...")
+        shutdown_scheduler()
+        logger.info("Application shutdown complete")
+    except Exception as e:
+        logger.error(f"Error during application shutdown: {e}", exc_info=True)
 
 
 # Initialize FastAPI app
@@ -543,7 +565,8 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 # CORS configuration
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-if ALLOWED_ORIGINS == ["*"]:
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
+if ALLOWED_ORIGINS == ["*"] and ENVIRONMENT == "production":
     warnings.warn("CORS is set to allow all origins. This is not recommended for production.")
 
 # Middleware
@@ -575,6 +598,7 @@ app.include_router(session_router)
 app.include_router(phone_change_router)
 app.include_router(newsletter_router)  # /newsletter/subscribe
 app.include_router(tracking_router)  # /api/tracking/event
+app.include_router(account_router)  # /account/feedback
 
 # Include Google Meet API router if available
 if gmeet_router:
@@ -621,6 +645,7 @@ def health_check():
 # Run application
 if __name__ == "__main__":
     import uvicorn
+    import socket
     
     # Configure uvicorn loggers
     uvicorn_access_logger = logging.getLogger("uvicorn.access")
@@ -628,18 +653,58 @@ if __name__ == "__main__":
     uvicorn_logger = logging.getLogger("uvicorn")
     uvicorn_logger.setLevel(logging.INFO)
     
+    # Check if port is available
+    def is_port_available(port):
+        """Check if a port is available."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(('0.0.0.0', port))
+                return True
+            except OSError:
+                return False
+    
+    def find_available_port(start_port, max_attempts=10):
+        """Find an available port starting from start_port."""
+        for i in range(max_attempts):
+            port = start_port + i
+            if is_port_available(port):
+                return port
+        return None
+    
+    # Get port from environment or use default
+    requested_port = int(os.getenv("PORT", 8030))
+    
+    # Check if requested port is available, if not find next available
+    if not is_port_available(requested_port):
+        logger.warning(f"Port {requested_port} is already in use!")
+        logger.info(f"Searching for next available port starting from {requested_port}...")
+        port = find_available_port(requested_port)
+        if port is None:
+            logger.error(f"Could not find an available port after {requested_port + 10} attempts!")
+            logger.error("Please either:")
+            logger.error(f"  1. Stop the process using port {requested_port}")
+            logger.error("  2. Set a different PORT environment variable (e.g., PORT=8031)")
+            logger.error("")
+            logger.error("To find and kill the process using the port on Windows:")
+            logger.error(f"  netstat -ano | findstr :{requested_port}")
+            logger.error("  taskkill /F /PID <PID>")
+            sys.exit(1)
+        logger.info(f"Using port {port} instead (port {requested_port} was in use)")
+    else:
+        port = requested_port
+    
     print("\n" + "="*60)
     print("Starting Nucleoseq Unified API Server")
     print("="*60)
-    print("Server will be available at: http://0.0.0.0:8030")
-    print("API Documentation: http://0.0.0.0:8030/docs")
-    print("ReDoc Documentation: http://0.0.0.0:8030/redoc")
+    print(f"Server will be available at: http://0.0.0.0:{port}")
+    print(f"API Documentation: http://0.0.0.0:{port}/docs")
+    print(f"ReDoc Documentation: http://0.0.0.0:{port}/redoc")
     print("="*60 + "\n")
     
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8030,
+        port=port,
         reload=False,
         log_level="info",
         access_log=True,

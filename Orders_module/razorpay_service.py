@@ -156,6 +156,97 @@ def get_order_details(razorpay_order_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def create_razorpay_customer(
+    name: Optional[str] = None,
+    email: Optional[str] = None,
+    contact: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Create a Razorpay customer that can be reused for invoices.
+
+    At least one of name, email, or contact should be provided.
+    """
+    data: Dict[str, Any] = {}
+    if name:
+        data["name"] = name
+    if email:
+        data["email"] = email
+    if contact:
+        data["contact"] = contact
+
+    if not data:
+        raise ValueError("Cannot create Razorpay customer without any of name, email, or contact")
+
+    try:
+        customer = razorpay_client.customer.create(data=data)
+        logger.info(f"Razorpay customer created: {customer.get('id')}")
+        return customer
+    except razorpay.errors.BadRequestError as e:
+        logger.error(f"Razorpay customer bad request error: {e}")
+        raise ValueError(f"Invalid request to Razorpay while creating customer: {str(e)}")
+    except razorpay.errors.ServerError as e:
+        logger.error(f"Razorpay customer server error: {e}")
+        raise ValueError(f"Razorpay server error while creating customer: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error creating Razorpay customer: {e}")
+        raise ValueError(f"Failed to create Razorpay customer: {str(e)}")
+
+
+def create_razorpay_invoice_for_order(
+    customer_id: str,
+    order_number: str,
+    total_amount: float,
+    currency: str = "INR",
+    email: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Create a Razorpay invoice for a confirmed order using an existing customer_id.
+
+    This uses the public Razorpay example for creating an invoice with customer_id:
+    https://www.postman.com/razorpaydev/razorpay-public-workspace/request/llu74wr/create-an-invoice-with-customer-id?tab=body
+    """
+    try:
+        amount_in_paise = int(total_amount * 100)
+
+        invoice_data: Dict[str, Any] = {
+            "type": "invoice",
+            "customer_id": customer_id,
+            "currency": currency,
+            "line_items": [
+                {
+                    "name": f"Order {order_number}",
+                    "amount": amount_in_paise,
+                    "currency": currency,
+                    "quantity": 1,
+                }
+            ],
+            "receipt": order_number,
+            # We only create the invoice now; email/SMS sending can be enabled later
+            "sms_notify": 0,
+            "email_notify": 0,
+            "notes": {
+                "order_number": order_number,
+            },
+        }
+
+        # Optionally attach email so it can be used later from Razorpay side
+        if email:
+            invoice_data["email"] = email
+
+        invoice = razorpay_client.invoice.create(data=invoice_data)
+        logger.info(f"Razorpay invoice created: {invoice.get('id')} for order {order_number}")
+        return invoice
+    except razorpay.errors.BadRequestError as e:
+        logger.error(f"Razorpay invoice bad request error: {e}")
+        raise ValueError(f"Invalid request to Razorpay while creating invoice: {str(e)}")
+    except razorpay.errors.ServerError as e:
+        logger.error(f"Razorpay invoice server error: {e}")
+        raise ValueError(f"Razorpay server error while creating invoice: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error creating Razorpay invoice: {e}")
+        raise ValueError(f"Failed to create Razorpay invoice: {str(e)}")
+
+
 def verify_webhook_signature(webhook_body: str, webhook_signature: str) -> bool:
     """
     Verify Razorpay webhook signature using webhook secret.

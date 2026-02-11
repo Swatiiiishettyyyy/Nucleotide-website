@@ -3,7 +3,7 @@ Order schemas for request/response models.
 """
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, date
 
 
 class CreateOrderRequest(BaseModel):
@@ -145,7 +145,15 @@ class OrderResponse(BaseModel):
     total_amount: float
     payment_status: str
     order_status: str
+    payment_method: Optional[str] = None
+    payment_method_details: Optional[str] = None
+    payment_method_metadata: Optional[Dict[str, Any]] = None
     razorpay_order_id: Optional[str] = None
+    razorpay_customer_id: Optional[str] = None
+    razorpay_invoice_id: Optional[str] = None
+    razorpay_invoice_number: Optional[str] = None
+    razorpay_invoice_url: Optional[str] = None
+    razorpay_invoice_status: Optional[str] = None
     created_at: Optional[datetime] = None
     status_updated_at: Optional[datetime] = None
     payment_confirmed_at: Optional[datetime] = None
@@ -164,3 +172,38 @@ class WebhookResponse(BaseModel):
     """Webhook response"""
     status: str
     message: str
+
+
+class MemberSchedule(BaseModel):
+    """Per-member schedule details"""
+    member_id: int = Field(..., description="Member ID to schedule")
+    scheduled_date: date = Field(..., description="Scheduled date (YYYY-MM-DD)")
+    slot: str = Field(..., description="Time slot label (e.g., MORNING or EVENING)")
+
+
+class ScheduleOrderRequest(BaseModel):
+    """
+    Request to schedule tests for an order.
+
+    Modes:
+    - use_same_slot_for_all = true: use date + slot for all members in the order.
+    - use_same_slot_for_all = false: use member_schedules for per-member dates/slots.
+    """
+    use_same_slot_for_all: bool = Field(
+        ...,
+        description="If true, applies the same date and slot to all members in the order."
+    )
+    # Shared scheduling fields
+    scheduled_date: Optional[date] = Field(
+        None,
+        description="Scheduled date for all members (required when use_same_slot_for_all is true)."
+    )
+    slot: Optional[str] = Field(
+        None,
+        description="Time slot label for all members (required when use_same_slot_for_all is true)."
+    )
+    # Per-member scheduling fields
+    member_schedules: Optional[List[MemberSchedule]] = Field(
+        None,
+        description="Per-member schedules (required when use_same_slot_for_all is false)."
+    )
