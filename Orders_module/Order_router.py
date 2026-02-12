@@ -38,9 +38,10 @@ from .Order_crud import (
     get_user_orders,
     mark_payment_failed_or_cancelled
 )
-from .razorpay_service import create_razorpay_order, verify_webhook_signature, get_payment_details
+from .razorpay_service import create_razorpay_order, verify_webhook_signature, get_payment_details, create_razorpay_invoice_for_order, razorpay_client, RAZORPAY_KEY_ID
 from .Order_model import OrderStatus, PaymentStatus, PaymentMethod, Order, OrderItem, Payment, PaymentTransition, WebhookLog
 from Cart_module.Cart_model import CartItem, Cart
+import razorpay
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -2702,4 +2703,160 @@ def schedule_order(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Something went wrong while scheduling your tests. Please try again.",
+        )
+
+
+# ==================== DIAGNOSTIC & INVOICE RETRY ENDPOINTS ====================
+
+
+@router.get("/debug/razorpay-invoice-test")
+async def test_razorpay_invoice_creation(
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Test Razorpay invoice API with minimal payload.
+    Helps diagnose permission issues and API configuration.
+    """
+    try:
+        # Step 1: Create test customer
+        test_customer = razorpay_client.customer.create(data={
+            "name": "Test Customer",
+            "email": "test@nucleotide.com"
+        })
+
+        # Step 2: Create test invoice
+        test_invoice = razorpay_client.invoice.create(data={
+            "type": "invoice",
+            "customer_id": test_customer["id"],
+            "currency": "INR",
+            "line_items": [{
+                "name": "Test Order",
+                "amount": 100,
+                "currency": "INR",
+                "quantity": 1
+            }]
+        })
+
+        return {
+            "status": "success",
+            "message": "Invoice API is working correctly",
+            "test_customer_id": test_customer.get("id"),
+            "test_invoice_id": test_invoice.get("id"),
+            "test_invoice_status": test_invoice.get("status"),
+            "test_invoice_url": test_invoice.get("short_url")
+        }
+
+    except razorpay.errors.BadRequestError as e:
+        return {
+            "status": "error",
+            "error_type": "BadRequestError",
+            "message": str(e),
+            "possible_causes": [
+                "Invoice feature not enabled in Razorpay account",
+                "API key lacks invoice creation permissions",
+                "Check Razorpay Dashboard > Settings > Invoices",
+                "Check Razorpay Dashboard > Settings > API Keys > Permissions"
+            ]
+        }
+    except razorpay.errors.ServerError as e:
+        return {
+            "status": "error",
+            "error_type": "ServerError",
+            "message": str(e),
+            "possible_causes": [
+                "Razorpay API is experiencing issues",
+                "This may be temporary - try again later"
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Razorpay invoice test failed: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "error_type": type(e).__name__,
+            "message": str(e)
+        }
+
+
+@router.post("/orders/{order_id}/retry-invoice")
+async def retry_invoice_creation(
+    order_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Manually retry invoice creation for a confirmed order.
+    Useful when invoice creation fails during webhook processing.
+    """
+    # Get order with user validation
+    order = db.query(Order).filter(
+        Order.id == order_id,
+        Order.user_id == current_user.id
+    ).first()
+
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Validate order state
+    if order.order_status != OrderStatus.CONFIRMED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can only create invoice for confirmed orders. Current status: {order.order_status}"
+        )
+
+    if order.razorpay_invoice_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invoice already exists: {order.razorpay_invoice_id}"
+        )
+
+    if not order.razorpay_customer_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No Razorpay customer_id found. Cannot create invoice."
+        )
+
+    # Retry invoice creation
+    try:
+        logger.info(f"Manual invoice retry for order {order.order_number} (ID: {order.id}) by user {current_user.id}")
+
+        invoice = create_razorpay_invoice_for_order(
+            customer_id=order.razorpay_customer_id,
+            order_number=order.order_number,
+            total_amount=order.total_amount,
+            currency="INR",
+            email=order.user.email if order.user else None
+        )
+
+        # Update order with invoice details
+        order.razorpay_invoice_id = invoice.get("id")
+        order.razorpay_invoice_number = invoice.get("invoice_number") or invoice.get("number")
+        order.razorpay_invoice_url = invoice.get("short_url") or invoice.get("invoice_url") or invoice.get("pdf_url")
+        order.razorpay_invoice_status = invoice.get("status")
+
+        db.commit()
+        db.refresh(order)
+
+        logger.info(f"Manual invoice retry successful for order {order.order_number}: {order.razorpay_invoice_id}")
+
+        return {
+            "status": "success",
+            "message": "Invoice created successfully",
+            "invoice_id": order.razorpay_invoice_id,
+            "invoice_number": order.razorpay_invoice_number,
+            "invoice_url": order.razorpay_invoice_url,
+            "invoice_status": order.razorpay_invoice_status
+        }
+
+    except ValueError as e:
+        # Log and return error details
+        logger.error(f"Manual invoice retry failed for order {order.order_number}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invoice creation failed: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error during manual invoice retry for order {order.order_number}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred. Please try again or contact support."
         )

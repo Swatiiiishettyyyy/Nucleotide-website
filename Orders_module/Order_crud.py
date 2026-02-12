@@ -1075,6 +1075,9 @@ def confirm_order_from_webhook(
                 f"Invoice will not be created."
             )
         else:
+            # Log invoice creation attempt
+            logger.info(f"Creating Razorpay invoice for order {order.order_number} with customer_id={customer_id}, amount={order.total_amount}")
+
             invoice = create_razorpay_invoice_for_order(
                 customer_id=customer_id,
                 order_number=order.order_number,
@@ -1082,6 +1085,13 @@ def confirm_order_from_webhook(
                 currency=payment.currency if payment and payment.currency else "INR",
                 email=getattr(user, "email", None)
             )
+
+            # Validate invoice response before persisting
+            if not invoice:
+                raise ValueError(f"Invoice creation returned None for order {order.order_number}")
+
+            if not invoice.get("id"):
+                raise ValueError(f"Invoice missing 'id' field. Response keys: {list(invoice.keys())}")
 
             # Persist invoice details on the order for frontend and future email sending
             order.razorpay_customer_id = customer_id

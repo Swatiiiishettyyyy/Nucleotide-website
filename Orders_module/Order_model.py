@@ -75,7 +75,7 @@ class Order(Base):
     razorpay_invoice_number = Column(String(255), nullable=True)
     razorpay_invoice_url = Column(String(500), nullable=True)
     razorpay_invoice_status = Column(String(50), nullable=True, index=True)
-    
+
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

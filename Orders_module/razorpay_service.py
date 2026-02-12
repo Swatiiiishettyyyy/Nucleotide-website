@@ -233,17 +233,34 @@ def create_razorpay_invoice_for_order(
         if email:
             invoice_data["email"] = email
 
+        # Log invoice creation attempt with key details
+        logger.info(f"Creating Razorpay invoice for order {order_number} (customer_id={customer_id}, amount={total_amount} {currency})")
+        logger.debug(f"Invoice payload: {invoice_data}")
+
         invoice = razorpay_client.invoice.create(data=invoice_data)
-        logger.info(f"Razorpay invoice created: {invoice.get('id')} for order {order_number}")
+
+        # Validate response contains required fields
+        if not invoice:
+            logger.error(f"Razorpay invoice.create() returned None for order {order_number}")
+            raise ValueError("Razorpay invoice.create() returned None - API call may have failed silently")
+
+        if not invoice.get("id"):
+            logger.error(f"Invoice response missing 'id' field for order {order_number}. Response: {invoice}")
+            raise ValueError(f"Invoice response incomplete - missing 'id' field. Got: {list(invoice.keys())}")
+
+        logger.info(f"Razorpay invoice created successfully: {invoice.get('id')} for order {order_number} (status: {invoice.get('status')})")
         return invoice
     except razorpay.errors.BadRequestError as e:
-        logger.error(f"Razorpay invoice bad request error: {e}")
-        raise ValueError(f"Invalid request to Razorpay while creating invoice: {str(e)}")
+        logger.error(f"Razorpay invoice bad request error for order {order_number}: {e}")
+        logger.error("Possible causes: Invalid customer_id, invoice feature not enabled in Razorpay account, or API key lacks invoice permissions")
+        logger.error("Check Razorpay Dashboard > Settings > Invoices and Settings > API Keys > Permissions")
+        raise ValueError(f"Invalid request to Razorpay: {str(e)}")
     except razorpay.errors.ServerError as e:
-        logger.error(f"Razorpay invoice server error: {e}")
-        raise ValueError(f"Razorpay server error while creating invoice: {str(e)}")
+        logger.error(f"Razorpay invoice server error for order {order_number}: {e}")
+        logger.error("Razorpay API is experiencing issues. This may be temporary - retry may succeed.")
+        raise ValueError(f"Razorpay server error: {str(e)}")
     except Exception as e:
-        logger.error(f"Error creating Razorpay invoice: {e}")
+        logger.error(f"Error creating Razorpay invoice for order {order_number}: {e}", exc_info=True)
         raise ValueError(f"Failed to create Razorpay invoice: {str(e)}")
 
 
