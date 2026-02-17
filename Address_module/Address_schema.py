@@ -9,7 +9,7 @@ class AddressRequest(BaseModel):
     # Removed: first_name, last_name, email, mobile (as per requirements)
     address_label: str = Field(..., description="Address label (e.g., 'Home', 'Office')", min_length=1, max_length=50)
     street_address: str = Field(..., description="Street address", min_length=1, max_length=255)
-    landmark: str = Field(..., description="Landmark", max_length=255)
+    landmark: Optional[str] = Field(None, description="Landmark (optional)", max_length=255)
     locality: str = Field(..., description="Locality", max_length=150)
     city: str = Field(..., description="City", max_length=100)
     state: str = Field(..., description="State", max_length=100)

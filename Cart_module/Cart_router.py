@@ -138,7 +138,8 @@ def add_to_cart(
             .join(Member, CartItem.member_id == Member.id)
             .filter(
                 Product.is_deleted == False,
-                Member.is_deleted == False
+                Member.is_deleted == False,
+                CartItem.is_deleted == False,  # Ignore cleared (post-order) cart items
             )
             .filter(
                 CartItem.user_id == current_user.id,
@@ -150,37 +151,47 @@ def add_to_cart(
         )
         
         if conflicting_members:
-            conflicts = []
-            member_names = []
+            # Build raw conflicts, then deduplicate by (member_id, existing_product_id)
+            raw_conflicts = []
             for cart_item, existing_product, member_obj in conflicting_members:
-                conflicts.append({
+                raw_conflicts.append({
                     "member_id": member_obj.id,
                     "member_name": member_obj.name,
                     "existing_product_id": existing_product.ProductId,
                     "existing_product_name": existing_product.Name,
                     "existing_plan_type": existing_product.plan_type.value if hasattr(existing_product.plan_type, "value") else str(existing_product.plan_type),
                 })
-                member_names.append(member_obj.name)
-            
-            # Create user-friendly message with specific member names
+            seen = set()
+            conflicts = []
+            for c in raw_conflicts:
+                key = (c["member_id"], c["existing_product_id"])
+                if key not in seen:
+                    seen.add(key)
+                    conflicts.append(c)
+            # Unique member names for message (preserve order)
+            member_names = []
+            for c in conflicts:
+                if c["member_name"] not in member_names:
+                    member_names.append(c["member_name"])
+            # Product name for message: use first conflict's product; if multiple products, say "another genetic test"
+            product_names = list({c["existing_product_name"] for c in conflicts})
+            existing_product_name = product_names[0] if len(product_names) == 1 else "another genetic test"
+            # User-friendly message: in your cart, product name, clear action
             if len(member_names) == 1:
-                # Single member
                 name = member_names[0]
                 message = (
-                    f"{name} is already added to another {category_name} plan. "
-                    f"Please remove them from that plan or pick a different member."
+                    f"{name} is already selected for {existing_product_name} in your cart. "
+                    f"Remove that item from your cart first, or choose a different member."
                 )
             else:
-                # Multiple members: "A and B" or "A, B and C"
                 if len(member_names) == 2:
                     members_str = f"{member_names[0]} and {member_names[1]}"
                 else:
                     members_str = ", ".join(member_names[:-1]) + f" and {member_names[-1]}"
                 message = (
-                    f"{members_str} are already added to another {category_name} plan. "
-                    f"Please remove them from that plan or pick different members."
+                    f"{members_str} are already selected for {existing_product_name} in your cart. "
+                    f"Remove that item from your cart first, or choose different members."
                 )
-            
             client_ip, user_agent = get_client_info(request) if request else (None, None)
             logger.warning(
                 f"Cart add failed - Member conflicts with existing cart items | "

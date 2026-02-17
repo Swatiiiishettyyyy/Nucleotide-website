@@ -49,6 +49,11 @@ class Settings(BaseSettings):
 
     ENVIRONMENT: str = "development"
 
+    # Firebase FCM - path to service account JSON; empty = skip FCM send (notifications still stored in DB)
+    FIREBASE_SERVICE_ACCOUNT_PATH: str = ""
+    # When True (default), invalid FCM tokens are removed after failed send. When False (e.g. dev/test with dummy token), tokens are kept so notification trigger keeps running for every event.
+    REMOVE_INVALID_FCM_TOKENS: bool = True
+
     model_config = ConfigDict(
         # Use absolute path to make sure .env is found
         env_file=os.path.join(os.path.dirname(__file__), "..", ".env"),

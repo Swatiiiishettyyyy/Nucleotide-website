@@ -21,6 +21,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Lazy import to avoid circular dependency; used for order-status notifications
+def _send_order_notification(db: Session, order: Order, title: str, message: str, type: str = "info") -> None:
+    try:
+        from Notification_module.Notification_crud import send_notification_to_user
+        send_notification_to_user(db, order.user_id, title, message, type=type)
+    except Exception as e:
+        logger.warning("Order notification failed (order %s): %s", order.order_number, e)
+
 
 def _get_slot_time(slot: str) -> time:
     """
@@ -49,9 +57,10 @@ def schedule_order_items(
     member_schedule_map: Dict[int, Dict[str, Any]],
     changed_by: str = "system",
     notes: Optional[str] = None,
-) -> Order:
+) -> Tuple[Order, Optional[Tuple[str, str, str]]]:
     """
     Apply SCHEDULED status and scheduled_date per order item using update_order_status.
+    Returns (order, notif_payload) so the caller can send "Sample scheduled" notification.
 
     member_schedule_map format:
         {
@@ -76,6 +85,8 @@ def schedule_order_items(
             f"{order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status)}. "
             f"Payment must be completed before scheduling."
         )
+
+    last_notif_payload: Optional[Tuple[str, str, str]] = None
 
     # For each member_id, schedule all items in this order that belong to that member
     for member_id, schedule in member_schedule_map.items():
@@ -103,7 +114,7 @@ def schedule_order_items(
 
         # Update each item separately to keep per-item history clean
         for item in member_items:
-            update_order_status(
+            order, notif_payload = update_order_status(
                 db=db,
                 order_id=order.id,
                 new_status=OrderStatus.SCHEDULED,
@@ -112,10 +123,12 @@ def schedule_order_items(
                 order_item_id=item.id,
                 scheduled_date=scheduled_dt,
             )
+            if notif_payload is not None:
+                last_notif_payload = notif_payload
 
     # Refresh order after all updates to get latest status
     db.refresh(order)
-    return order
+    return order, last_notif_payload
 
 
 def sync_order_item_statuses_with_order_status(
@@ -720,6 +733,12 @@ def verify_payment_frontend(
             db.add(item_status_history)
         
         db.commit()
+        _send_order_notification(
+            db, order,
+            "Payment failed",
+            f"Payment for order {order.order_number} could not be completed. You can retry payment for this order.",
+            type="warning"
+        )
         logger.warning(f"Payment verification failed for order {order.order_number} (ID: {order.id}). Payment status set to FAILED.")
         raise ValueError("Payment verification failed. Please check your payment details and try again. If the problem persists, please contact support.")
     
@@ -1115,6 +1134,12 @@ def confirm_order_from_webhook(
     db.commit()
     db.refresh(order)
     
+    _send_order_notification(
+        db, order,
+        "Order confirmed",
+        f"Your order {order.order_number} has been confirmed.",
+        type="success"
+    )
     logger.info(f"Order {order.order_number} confirmed by webhook. Payment status: COMPLETED, Order status: CONFIRMED")
     
     return order
@@ -1169,6 +1194,11 @@ def mark_payment_failed_or_cancelled(
     # Don't update if payment is already completed (protected state)
     if order.payment_status == PaymentStatus.COMPLETED:
         logger.warning(f"Cannot mark payment as {payment_status.value} for order {order.order_number} - payment already completed")
+        return order
+    
+    # Idempotency: if order is already PAYMENT_FAILED, skip update and notification (duplicate webhook)
+    if order.order_status == OrderStatus.PAYMENT_FAILED:
+        logger.info(f"Order {order.order_number} already marked as payment failed (idempotent).")
         return order
     
     # Get the latest payment for this order
@@ -1263,6 +1293,7 @@ def mark_payment_failed_or_cancelled(
     db.flush()
     db.refresh(order)
     
+    # Notification is sent by the router after commit to avoid race (see plan: FCM only after commit).
     logger.info(f"Payment marked as {payment_status.value} for order {order.order_number} (ID: {order.id}). Previous status: {previous_payment_status.value}")
     
     return order
@@ -1279,11 +1310,13 @@ def update_order_status(
     scheduled_date: Optional[datetime] = None,
     technician_name: Optional[str] = None,
     technician_contact: Optional[str] = None
-) -> Order:
+) -> Tuple[Order, Optional[Tuple[str, str, str]]]:
     """
     Update order status and create status history entry.
     If order_item_id or address_id is provided, updates only that specific item.
     Otherwise, updates the entire order and all items with matching addresses.
+    Returns (order, notification_payload) where notification_payload is (title, message, type) or None;
+    caller should send notification after commit when payload is not None.
     
     Technician and scheduling fields are optional and only applied when provided.
     For statuses like 'report_ready', 'testing_in_progress', 'sample_received_by_lab',
@@ -1297,6 +1330,7 @@ def update_order_status(
     Statuses that don't need technician info:
     - confirmed, sample_received_by_lab, testing_in_progress, report_ready
     """
+    notif_payload: Optional[Tuple[str, str, str]] = None
     # Statuses where technician details are not relevant
     # For these statuses, if technician fields are not provided, they will be cleared
     # However, if explicitly provided, they will still be set (for flexibility)
@@ -1405,7 +1439,7 @@ def update_order_status(
         db.add(status_history)
         
         # Also update order-level status if all items have the same status
-        _sync_order_status(db, order)
+        notif_payload = _sync_order_status(db, order)
     
     # If updating by address_id (all items with that address)
     elif address_id:
@@ -1451,7 +1485,7 @@ def update_order_status(
             db.add(status_history)
         
         # Also update order-level status if all items have the same status
-        _sync_order_status(db, order)
+        notif_payload = _sync_order_status(db, order)
     
     # Update entire order (default behavior)
     else:
@@ -1461,6 +1495,7 @@ def update_order_status(
         
         # Update all order items to match - sync with order status
         sync_order_item_statuses_with_order_status(db, order, new_status, update_timestamp=True)
+        notif_payload = _get_notification_payload_for_status(order, new_status)
         
         # Update technician and scheduling fields for all items only if provided
         # For statuses that don't need technician info, clear fields if not provided
@@ -1493,19 +1528,35 @@ def update_order_status(
     db.commit()
     db.refresh(order)
     
-    return order
+    return (order, notif_payload)
 
 
-def _sync_order_status(db: Session, order: Order):
+def _get_notification_payload_for_status(order: Order, target_status: OrderStatus) -> Optional[Tuple[str, str, str]]:
+    """Return (title, message, type) for order status notification, or None if we don't notify for this status."""
+    order_num = order.order_number
+    messages = {
+        OrderStatus.COMPLETED: ("Report ready", f"Your lab report for order {order_num} is ready.", "success"),
+        OrderStatus.SCHEDULED: ("Sample scheduled", f"Your sample collection for order {order_num} has been scheduled.", "info"),
+        OrderStatus.SCHEDULE_CONFIRMED_BY_LAB: ("Schedule confirmed", f"Lab has confirmed the schedule for order {order_num}.", "info"),
+        OrderStatus.SAMPLE_COLLECTED: ("Sample collected", f"Sample for order {order_num} has been collected.", "info"),
+        OrderStatus.SAMPLE_RECEIVED_BY_LAB: ("Sample at lab", f"Lab has received the sample for order {order_num}.", "info"),
+        OrderStatus.TESTING_IN_PROGRESS: ("Testing in progress", f"Testing in progress for order {order_num}.", "info"),
+        OrderStatus.REPORT_READY: ("Report ready", f"Your lab report for order {order_num} is ready.", "success"),
+    }
+    if target_status in messages:
+        return messages[target_status]
+    return None
+
+
+def _sync_order_status(db: Session, order: Order) -> Optional[Tuple[str, str, str]]:
     """
     Sync order-level status based on order items.
     If all items have the same status, update order status to match.
     Otherwise, keep order status as the most common status or leave as is.
-    
-    Validates that status changes are consistent with payment status.
+    Returns notification payload (title, message, type) if order status changed to a notifiable status, else None.
     """
     if not order.items:
-        return
+        return None
     
     # Get all item statuses
     item_statuses = [item.order_status for item in order.items]
@@ -1526,7 +1577,7 @@ def _sync_order_status(db: Session, order: Order):
         # If payment is completed, don't sync to PENDING_PAYMENT
         # Keep current order status or use CONFIRMED as minimum
         if order.order_status != OrderStatus.PENDING_PAYMENT:
-            return  # Keep current status
+            return None  # Keep current status
         target_status = OrderStatus.CONFIRMED
     
     # Don't set to COMPLETED if payment is not completed
@@ -1536,7 +1587,7 @@ def _sync_order_status(db: Session, order: Order):
         if all(status == OrderStatus.REPORT_READY for status in item_statuses):
             target_status = OrderStatus.REPORT_READY
         else:
-            return  # Keep current status
+            return None  # Keep current status
     
     # Don't set to CONFIRMED or post-payment statuses if payment is not completed
     POST_PAYMENT_STATUSES = {
@@ -1553,7 +1604,7 @@ def _sync_order_status(db: Session, order: Order):
         # If payment is not completed, don't sync to post-payment statuses
         # Keep current status or use appropriate status based on payment
         if order.order_status not in POST_PAYMENT_STATUSES:
-            return  # Keep current status
+            return None  # Keep current status
         # If payment failed, keep as PENDING_PAYMENT (user can retry), otherwise keep current status
         if order.payment_status == PaymentStatus.FAILED:
             target_status = OrderStatus.PENDING_PAYMENT
@@ -1580,6 +1631,26 @@ def _sync_order_status(db: Session, order: Order):
                     changed_by="system"
                 )
                 db.add(status_history)
+        # Return payload for router to send after commit (no _notify here)
+        return _get_notification_payload_for_status(order, target_status)
+    return None
+
+
+def _notify_order_status_change(db: Session, order: Order, target_status: OrderStatus) -> None:
+    """Send push notification for order status changes (report ready and intermediate statuses)."""
+    order_num = order.order_number
+    messages = {
+        OrderStatus.COMPLETED: ("Report ready", f"Your lab report for order {order_num} is ready.", "success"),
+        OrderStatus.SCHEDULED: ("Sample scheduled", f"Your sample collection for order {order_num} has been scheduled.", "info"),
+        OrderStatus.SCHEDULE_CONFIRMED_BY_LAB: ("Schedule confirmed", f"Lab has confirmed the schedule for order {order_num}.", "info"),
+        OrderStatus.SAMPLE_COLLECTED: ("Sample collected", f"Sample for order {order_num} has been collected.", "info"),
+        OrderStatus.SAMPLE_RECEIVED_BY_LAB: ("Sample at lab", f"Lab has received the sample for order {order_num}.", "info"),
+        OrderStatus.TESTING_IN_PROGRESS: ("Testing in progress", f"Testing in progress for order {order_num}.", "info"),
+        OrderStatus.REPORT_READY: ("Report ready", f"Your lab report for order {order_num} is ready.", "success"),
+    }
+    if target_status in messages:
+        title, message, ntype = messages[target_status]
+        _send_order_notification(db, order, title, message, type=ntype)
 
 
 def get_order_by_id(db: Session, order_id: int, user_id: Optional[int] = None, include_all_payment_statuses: bool = False) -> Optional[Order]:

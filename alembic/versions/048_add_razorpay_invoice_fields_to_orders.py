@@ -10,8 +10,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-# revision identifiers, used by Alembic.
-revision = "048_add_razorpay_invoice_fields_to_orders"
+# revision identifiers, used by Alembic. (32 chars max for version_num in DB)
+revision = "048_add_razorpay_invoice_fields_"
 down_revision = "047_add_lab_report_tables"
 branch_labels = None
 depends_on = None

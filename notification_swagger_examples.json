@@ -1,0 +1,29 @@
+{
+  "POST /api/notifications/send": {
+    "user_id": 1,
+    "title": "Order Shipped",
+    "message": "Your order #12345 has been shipped and is on its way.",
+    "type": "info"
+  },
+  "POST /api/notifications/send (minimal)": {
+    "user_id": 1,
+    "title": "Reminder",
+    "message": "Don't forget to complete your profile."
+  },
+  "GET /api/notifications": {
+    "query_params": {
+      "limit": 20,
+      "unread_only": false
+    }
+  },
+  "GET /api/notifications (unread only)": {
+    "query_params": {
+      "limit": 10,
+      "unread_only": true
+    }
+  },
+  "PUT /api/notifications/{notification_id}/read": {
+    "path_param": "notification_id",
+    "example_value": 1
+  }
+}

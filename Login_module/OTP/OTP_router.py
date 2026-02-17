@@ -21,6 +21,7 @@ from ..User.user_session_crud import get_user_by_mobile, create_user
 from ..User.user_model import User
 from ..Device.Device_session_crud import create_device_session, deactivate_session_by_token
 from . import OTP_crud
+from Notification_module.Notification_crud import upsert_device_token
 
 from config import settings
 
@@ -441,7 +442,14 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
         session.refresh_token_family_id = token_family_id
         db.commit()
         db.refresh(session)
-        
+
+        # Save FCM token to user_device_tokens if provided (push works immediately after login)
+        if req.fcm_token and req.fcm_token.strip():
+            try:
+                upsert_device_token(db, user.id, req.fcm_token.strip())
+            except Exception as fcm_err:
+                logger.warning("FCM token save failed during verify-otp (user_id=%s): %s", user.id, fcm_err)
+
         # Audit log token creation
         from Login_module.Token.Token_audit_crud import log_token_event
         log_token_event(
@@ -461,6 +469,19 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
             f"Platform: {device_platform} | Session ID: {session.id} | Family ID: {token_family_id} | "
             f"Access Token contains: user_id={access_token_data.get('sub')}, session_id={access_token_data.get('session_id')}"
         )
+        
+        # Send "Login successful" notification (non-blocking; login must not fail if notification fails)
+        try:
+            from Notification_module.Notification_crud import send_notification_to_user
+            send_notification_to_user(
+                db,
+                user_id=user.id,
+                title="Login successful",
+                message="You have logged in successfully.",
+                type="info",
+            )
+        except Exception as notif_err:
+            logger.warning("Login successful notification send failed (user_id=%s): %s", user.id, notif_err)
         
         # Prepare response data based on platform
         if is_web:

@@ -1,0 +1,143 @@
+import logging
+from datetime import datetime, timezone
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+from typing import Optional
+
+from .Notification_model import Notification, UserDeviceToken
+
+logger = logging.getLogger(__name__)
+
+
+def upsert_device_token(db: Session, user_id: int, device_token: str) -> UserDeviceToken:
+    """
+    Insert or update device token for user.
+    If token already exists (globally), update its user_id and updated_at (token reassigned).
+    Otherwise insert new row. One user can have multiple tokens (multiple rows per user).
+    """
+    token = device_token.strip()
+    existing = db.query(UserDeviceToken).filter(UserDeviceToken.device_token == token).first()
+    if existing:
+        existing.user_id = user_id
+        existing.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(existing)
+        return existing
+    try:
+        row = UserDeviceToken(user_id=user_id, device_token=token)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return row
+    except IntegrityError:
+        db.rollback()
+        existing = db.query(UserDeviceToken).filter(UserDeviceToken.device_token == token).first()
+        if existing:
+            existing.user_id = user_id
+            db.commit()
+            db.refresh(existing)
+            return existing
+        raise
+
+
+def create_notification(
+    db: Session,
+    user_id: int,
+    title: str,
+    message: str,
+    type: Optional[str] = None,
+) -> Notification:
+    """Insert a notification and return the model."""
+    row = Notification(
+        user_id=user_id,
+        title=title,
+        message=message,
+        type=type,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def list_notifications(
+    db: Session,
+    user_id: int,
+    limit: Optional[int] = None,
+    unread_only: bool = False,
+) -> list[Notification]:
+    """List notifications for user, newest first. Optional limit and is_read filter."""
+    q = db.query(Notification).filter(Notification.user_id == user_id)
+    if unread_only:
+        q = q.filter(Notification.is_read == False)
+    q = q.order_by(Notification.created_at.desc())
+    if limit is not None:
+        q = q.limit(limit)
+    return list(q.all())
+
+
+def get_device_tokens_for_user(db: Session, user_id: int) -> list[str]:
+    """Return list of FCM device token strings for the user."""
+    rows = db.query(UserDeviceToken).filter(UserDeviceToken.user_id == user_id).all()
+    return [r.device_token for r in rows]
+
+
+def delete_device_tokens_by_value(db: Session, tokens: list[str]) -> int:
+    """Delete rows from user_device_tokens where device_token is in the given list. Returns count deleted."""
+    if not tokens:
+        return 0
+    deleted = db.query(UserDeviceToken).filter(UserDeviceToken.device_token.in_(tokens)).delete(synchronize_session=False)
+    db.commit()
+    return deleted
+
+
+def mark_notification_read(db: Session, notification_id: int, user_id: int) -> Optional[Notification]:
+    """Mark a notification as read if it belongs to the user. Return the notification or None."""
+    row = db.query(Notification).filter(
+        Notification.id == notification_id,
+        Notification.user_id == user_id,
+    ).first()
+    if not row:
+        return None
+    row.is_read = True
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def get_unread_count(db: Session, user_id: int) -> int:
+    """Return count of unread notifications for the user."""
+    return db.query(Notification).filter(
+        Notification.user_id == user_id,
+        Notification.is_read == False,
+    ).count()
+
+
+def send_notification_to_user(
+    db: Session,
+    user_id: int,
+    title: str,
+    message: str,
+    type: Optional[str] = None,
+) -> None:
+    """
+    Create a notification in DB and send push via FCM to the user's devices.
+    Does not raise; logs errors so callers (e.g. order flow) are not affected by FCM failures.
+    """
+    try:
+        notification = create_notification(db, user_id=user_id, title=title, message=message, type=type)
+        from .firebase_service import init_firebase, send_fcm_to_tokens, firebase_initialized
+        tokens = get_device_tokens_for_user(db, user_id)
+        init_firebase()
+        if tokens and firebase_initialized:
+            data = {"notification_id": str(notification.id), "type": type or ""}
+            invalid_tokens = send_fcm_to_tokens(tokens=tokens, title=title, body=message, data=data)
+            if invalid_tokens:
+                from config import settings
+                if settings.REMOVE_INVALID_FCM_TOKENS:
+                    removed = delete_device_tokens_by_value(db, invalid_tokens)
+                    logger.info("Removed %s invalid FCM token(s) for user_id=%s", removed, user_id)
+                else:
+                    logger.debug("Invalid FCM token(s) for user_id=%s not removed (REMOVE_INVALID_FCM_TOKENS=false)", user_id)
+    except Exception as e:
+        logger.warning("send_notification_to_user failed (user_id=%s): %s", user_id, e)

@@ -29,6 +29,7 @@ class VerifyOTPRequest(BaseModel):
     device_id: str = Field(..., example="device-uuid-or-imei", min_length=1, max_length=255)
     device_platform: str = Field(..., example="web", max_length=50)  # web/mobile/ios/android
     device_details: str = Field(..., example='{"browser":"Chrome", "version":"..."}', max_length=1000)
+    fcm_token: Optional[str] = Field(None, max_length=255, description="FCM device token for push notifications")
     
     @validator('country_code')
     def validate_country_code(cls, v):

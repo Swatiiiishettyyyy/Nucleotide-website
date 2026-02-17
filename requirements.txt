@@ -23,6 +23,9 @@ google-auth-oauthlib>=1.1.0
 google-auth-httplib2>=0.1.1
 # "pydantic[email]"
 
+# Firebase Admin SDK for FCM push notifications
+firebase-admin
+
 #pip install -r requirements.txt
 
 # cd nucleotide_backend

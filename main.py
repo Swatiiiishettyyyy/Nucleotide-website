@@ -51,6 +51,7 @@ from Login_module.Token.Refresh_token_model import RefreshToken  # Dual-token st
 from Newsletter_module.Newsletter_model import NewsletterSubscription
 from Tracking_module.Tracking_model import TrackingRecord  # Location & Analytics Tracking
 from Account_module.Account_model import AccountFeedbackRequest
+from Notification_module.Notification_model import Notification, UserDeviceToken
 
 # Import Google Meet API models to register with SQLAlchemy Base
 try:
@@ -78,6 +79,7 @@ from Orders_module.Order_router import router as order_router
 from Product_module.Product_router import router as product_router
 from PhoneChange_module.PhoneChange_router import router as phone_change_router
 from Newsletter_module.Newsletter_router import router as newsletter_router
+from Notification_module.Notification_router import router as notification_router
 from Tracking_module.Tracking_router import router as tracking_router
 from Account_module.Account_router import router as account_router
 
@@ -211,6 +213,14 @@ async def lifespan(app: FastAPI):
         logger.info("Step 3: Starting scheduler...")
         start_scheduler()
         logger.info("Step 4: Scheduler started")
+        try:
+            from Notification_module.firebase_service import init_firebase
+            if init_firebase():
+                logger.info("FCM (Firebase Cloud Messaging) activated - push notifications enabled")
+            else:
+                logger.info("FCM not configured - notifications will be stored in DB only (no push)")
+        except Exception as e:
+            logger.warning("Firebase init skipped or failed: %s", e)
         logger.info("Application started successfully - all startup tasks completed")
     except KeyboardInterrupt:
         logger.warning("Application startup interrupted by user")
@@ -597,6 +607,7 @@ app.include_router(audit_router)
 app.include_router(session_router)
 app.include_router(phone_change_router)
 app.include_router(newsletter_router)  # /newsletter/subscribe
+app.include_router(notification_router)  # /api/notifications
 app.include_router(tracking_router)  # /api/tracking/event
 app.include_router(account_router)  # /account/feedback
 
@@ -626,7 +637,8 @@ def root():
             "gmeet": "/gmeet",
             "phone-change": "/api/phone-change",
             "location": "/api/v1/location",
-            "newsletter": "/newsletter"
+            "newsletter": "/newsletter",
+            "notifications": "/api/notifications"
         },
         "docs": "/docs",
         "redoc": "/redoc"

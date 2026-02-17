@@ -1,7 +1,7 @@
 """
 Order router - handles order creation, payment, and tracking.
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from typing import List, Optional
@@ -41,9 +41,24 @@ from .Order_crud import (
 from .razorpay_service import create_razorpay_order, verify_webhook_signature, get_payment_details, create_razorpay_invoice_for_order, razorpay_client, RAZORPAY_KEY_ID
 from .Order_model import OrderStatus, PaymentStatus, PaymentMethod, Order, OrderItem, Payment, PaymentTransition, WebhookLog
 from Cart_module.Cart_model import CartItem, Cart
+from Notification_module.Notification_crud import send_notification_to_user
 import razorpay
 
+# Fixed password for PUT order status endpoint (admin/lab use)
+ORDER_STATUS_PASSWORD = "4567"
+
 router = APIRouter(prefix="/orders", tags=["Orders"])
+
+
+def verify_order_status_password(
+    x_order_status_password: Optional[str] = Header(None, alias="X-Order-Status-Password")
+) -> None:
+    """Require password 4567 for PUT order status endpoint."""
+    if not x_order_status_password or x_order_status_password != ORDER_STATUS_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing order status password. Send correct password in header: X-Order-Status-Password."
+        )
 
 logger = logging.getLogger(__name__)
 
@@ -904,6 +919,18 @@ async def razorpay_webhook(
                 webhook_log.processed = True
                 webhook_log.processed_at = now_ist()
                 db.commit()
+                
+                # Send notification only after commit (avoid race: FCM after DB committed)
+                try:
+                    send_notification_to_user(
+                        db,
+                        order.user_id,
+                        "Payment failed",
+                        f"Payment for order {order.order_number} could not be completed. You can retry payment for this order.",
+                        type="warning",
+                    )
+                except Exception as notif_err:
+                    logger.warning("Payment failed notification send error (order %s): %s", order.order_number, notif_err)
                 
                 logger.info(f"Order {order.order_number} marked as failed by webhook")
                 
@@ -2315,10 +2342,11 @@ def update_order_status_api(
     order_number: str,
     status_data: UpdateOrderStatusRequest,
     request: Request,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_order_status_password)
 ):
     """
-    Update order status (no authorization required - typically used by admin/lab technicians).
+    Update order status. Password required in header X-Order-Status-Password (default: 4567).
     Status transitions are flexible - can update from any stage to any stage.
     
     Supports updating:
@@ -2409,7 +2437,7 @@ def update_order_status_api(
         
         # Update status (supports per-item, per-address, or entire order updates)
         # Status transitions are flexible - no validation of sequential progression
-        order = update_order_status(
+        order, notif_payload = update_order_status(
             db=db,
             order_id=order.id,
             new_status=new_status,
@@ -2421,6 +2449,14 @@ def update_order_status_api(
             technician_name=status_data.technician_name,
             technician_contact=status_data.technician_contact
         )
+        
+        # Send notification only after commit (update_order_status already commits)
+        if notif_payload:
+            title, message, ntype = notif_payload
+            try:
+                send_notification_to_user(db, order.user_id, title, message, type=ntype)
+            except Exception as notif_err:
+                logger.warning("Order status notification send error (order %s): %s", order.order_number, notif_err)
         
         # Refresh order to get updated items
         db.refresh(order)
@@ -2652,13 +2688,21 @@ def schedule_order(
                 }
 
         # Apply scheduling via helper
-        order = schedule_order_items(
+        order, notif_payload = schedule_order_items(
             db=db,
             order=order,
             member_schedule_map=member_schedule_map,
             changed_by=str(current_user.id),
             notes="Scheduled via user API.",
         )
+
+        # Send "Sample scheduled" notification when order status became SCHEDULED
+        if notif_payload:
+            title, message, ntype = notif_payload
+            try:
+                send_notification_to_user(db, order.user_id, title, message, type=ntype)
+            except Exception as notif_err:
+                logger.warning("Schedule notification send error (order %s): %s", order.order_number, notif_err)
 
         # Build simple response summarizing schedules
         scheduled_items: List[Dict[str, Any]] = []

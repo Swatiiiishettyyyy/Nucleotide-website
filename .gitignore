@@ -54,3 +54,5 @@ Thumbs.db
 # -----------------------------------------
 credentials.json
 *.json.enc
+Notifications.json
+firebase-service-account.json
