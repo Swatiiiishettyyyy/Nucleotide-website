@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from typing import Optional
 
 from .Notification_model import Notification, UserDeviceToken
+from Login_module.User.user_model import User
 
 logger = logging.getLogger(__name__)
 
@@ -122,10 +123,13 @@ def send_notification_to_user(
 ) -> None:
     """
     Create a notification in DB and send push via FCM to the user's devices.
-    Does not raise; logs errors so callers (e.g. order flow) are not affected by FCM failures.
+    Skips FCM send if user has notifications_enabled=False. Does not raise; logs errors.
     """
     try:
         notification = create_notification(db, user_id=user_id, title=title, message=message, type=type)
+        user = db.query(User).filter(User.id == user_id).first()
+        if user and not getattr(user, "notifications_enabled", True):
+            return
         from .firebase_service import init_firebase, send_fcm_to_tokens, firebase_initialized
         tokens = get_device_tokens_for_user(db, user_id)
         init_firebase()

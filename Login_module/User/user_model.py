@@ -11,4 +11,5 @@ class User(Base):
     profile_photo_url = Column(String(500), nullable=True)  # URL/path to profile photo
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     is_active = Column(Boolean, default=True)
+    notifications_enabled = Column(Boolean, default=True, nullable=False)
     # additional fields can be added (profile, role, etc.)

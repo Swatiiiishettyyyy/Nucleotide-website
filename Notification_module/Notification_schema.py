@@ -27,3 +27,13 @@ class NotificationItem(BaseModel):
 class UnreadCountResponse(BaseModel):
     """Response for GET /api/notifications/unread-count"""
     unread_count: int
+
+
+class NotificationSettingsResponse(BaseModel):
+    """Response for GET /api/notifications/settings"""
+    notifications_enabled: bool
+
+
+class NotificationSettingsUpdate(BaseModel):
+    """Body for PATCH /api/notifications/settings"""
+    enabled: bool = Field(..., description="Enable or disable push notifications")

@@ -12,6 +12,8 @@ from .Notification_schema import (
     SendNotificationRequest,
     NotificationItem,
     UnreadCountResponse,
+    NotificationSettingsResponse,
+    NotificationSettingsUpdate,
 )
 from .Notification_crud import (
     create_notification,
@@ -108,3 +110,25 @@ def get_notifications_unread_count(
     """Return count of unread notifications for the authenticated user."""
     count = get_unread_count(db, user_id=current_user.id)
     return UnreadCountResponse(unread_count=count)
+
+
+@router.get("/notifications/settings", response_model=NotificationSettingsResponse)
+def get_notification_settings(
+    current_user: User = Depends(get_current_user),
+):
+    """Get notification preference for the authenticated user (e.g. for Settings screen toggle)."""
+    enabled = getattr(current_user, "notifications_enabled", True)
+    return NotificationSettingsResponse(notifications_enabled=enabled)
+
+
+@router.patch("/notifications/settings", response_model=NotificationSettingsResponse)
+def patch_notification_settings(
+    body: NotificationSettingsUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update notification preference (enable/disable push). Used when user toggles in Settings."""
+    current_user.notifications_enabled = body.enabled
+    db.commit()
+    db.refresh(current_user)
+    return NotificationSettingsResponse(notifications_enabled=current_user.notifications_enabled)
