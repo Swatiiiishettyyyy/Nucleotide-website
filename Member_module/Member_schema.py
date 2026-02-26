@@ -194,8 +194,11 @@ class MemberData(BaseModel):
     email: Optional[str] = None
     profile_photo_url: Optional[str] = None
     has_taken_genetic_test: Optional[bool] = False
-    # Per-member API key, used by frontend in headers
     api_key: Optional[str] = None
+    latest_order_no: Optional[str] = None
+    latest_order_status: Optional[str] = None
+    gene_report_order_no: Optional[str] = None
+    gene_report_status: Optional[str] = None
 
 class MemberResponse(BaseModel):
     status: str
@@ -216,6 +219,10 @@ class MemberProfileData(BaseModel):
     mobile: Optional[str]
     profile_photo_url: Optional[str] = None
     has_taken_genetic_test: Optional[bool] = False
+    latest_order_no: Optional[str] = None
+    latest_order_status: Optional[str] = None
+    gene_report_order_no: Optional[str] = None
+    gene_report_status: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -226,7 +233,11 @@ class MemberProfileData(BaseModel):
                 "email": "john.doe@example.com",
                 "mobile": "9876543210",
                 "profile_photo_url": "profile_photos/1_abc12345.jpg",
-                "has_taken_genetic_test": False
+                "has_taken_genetic_test": False,
+                "latest_order_no": None,
+                "latest_order_status": None,
+                "gene_report_order_no": None,
+                "gene_report_status": None
             }
         }
 
@@ -248,7 +259,11 @@ class UploadPhotoResponse(BaseModel):
                     "email": "john.doe@example.com",
                     "mobile": "9876543210",
                     "profile_photo_url": "profile_photos/1_abc12345.jpg",
-                    "has_taken_genetic_test": False
+                    "has_taken_genetic_test": False,
+                    "latest_order_no": None,
+                    "latest_order_status": None,
+                    "gene_report_order_no": None,
+                    "gene_report_status": None
                 }
             }
         }
@@ -271,7 +286,11 @@ class DeletePhotoResponse(BaseModel):
                     "email": "john.doe@example.com",
                     "mobile": "9876543210",
                     "profile_photo_url": None,
-                    "has_taken_genetic_test": False
+                    "has_taken_genetic_test": False,
+                    "latest_order_no": None,
+                    "latest_order_status": None,
+                    "gene_report_order_no": None,
+                    "gene_report_status": None
                 }
             }
         }

@@ -22,7 +22,7 @@ from database import Base, engine, DATABASE_URL
 from Login_module.User.user_model import User
 from Product_module.Product_model import Category, Product
 from Member_module.Member_model import Member
-from Address_module.Address_model import Address
+from Address_module.Address_model import Address, ServiceableLocation
 from Cart_module.Cart_model import CartItem, Cart
 from Cart_module.Coupon_model import Coupon, CartCoupon
 from Orders_module.Order_model import Order, OrderItem, OrderSnapshot, OrderStatusHistory
@@ -38,6 +38,7 @@ from Login_module.Token.Refresh_token_model import RefreshToken  # Dual-token st
 from Consent_module.Consent_model import UserConsent, ConsentProduct, PartnerConsent
 from GeneticTest_module.GeneticTest_model import GeneticTestParticipant
 from Tracking_module.Tracking_model import TrackingRecord  # Location & Analytics Tracking
+from Enquiry_module.Enquiry_model import EnquiryRequest
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

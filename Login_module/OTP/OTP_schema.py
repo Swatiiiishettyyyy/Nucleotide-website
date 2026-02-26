@@ -80,6 +80,7 @@ class VerifiedData(BaseModel):
     token_type: Optional[str] = None  # For mobile only
     expires_in: Optional[int] = None  # For mobile only
     csrf_token: Optional[str] = None  # For web only
+    is_new_user: bool = False  # True if user was just created during this OTP verification
 
 
 class VerifyOTPResponse(BaseModel):

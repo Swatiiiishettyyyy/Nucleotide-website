@@ -130,12 +130,21 @@ def send_notification_to_user(
         user = db.query(User).filter(User.id == user_id).first()
         if user and not getattr(user, "notifications_enabled", True):
             return
-        from .firebase_service import init_firebase, send_fcm_to_tokens, firebase_initialized
+        from . import firebase_service
         tokens = get_device_tokens_for_user(db, user_id)
-        init_firebase()
-        if tokens and firebase_initialized:
+        firebase_service.init_firebase()
+        if not tokens:
+            logger.error("Skipping FCM: no device tokens for user_id=%s", user_id)
+        elif not firebase_service.firebase_initialized:
+            logger.error("Skipping FCM: Firebase not initialized")
+        else:
             data = {"notification_id": str(notification.id), "type": type or ""}
-            invalid_tokens = send_fcm_to_tokens(tokens=tokens, title=title, body=message, data=data)
+            invalid_tokens, success_count = firebase_service.send_fcm_to_tokens(tokens=tokens, title=title, body=message, data=data)
+            if success_count is not None:
+                if success_count > 0:
+                    logger.info("FCM send attempted for user_id=%s, delivered to %s device(s)", user_id, success_count)
+                else:
+                    logger.warning("FCM send attempted for user_id=%s, delivered to 0 device(s)", user_id)
             if invalid_tokens:
                 from config import settings
                 if settings.REMOVE_INVALID_FCM_TOKENS:
@@ -144,4 +153,4 @@ def send_notification_to_user(
                 else:
                     logger.debug("Invalid FCM token(s) for user_id=%s not removed (REMOVE_INVALID_FCM_TOKENS=false)", user_id)
     except Exception as e:
-        logger.warning("send_notification_to_user failed (user_id=%s): %s", user_id, e)
+        logger.error("send_notification_to_user failed (user_id=%s): %s", user_id, e, exc_info=True)

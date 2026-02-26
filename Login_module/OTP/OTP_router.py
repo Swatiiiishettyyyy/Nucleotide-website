@@ -216,6 +216,7 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
             logger.warning(f"Error getting/creating user: {e}. Trying to get existing user...")
             db.expire_all()
             user = get_user_by_mobile(db, req.mobile)
+            is_new_user = False  # We only get here when fetching existing user
             if not user:
                 # If still no user found, raise error
                 db.rollback()
@@ -502,7 +503,8 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
                 name=user.name,
                 mobile=mobile,
                 email=user.email,
-                csrf_token=csrf_token
+                csrf_token=csrf_token,
+                is_new_user=is_new_user
             )
             
             response_obj = VerifyOTPResponse(
@@ -528,7 +530,8 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
                         "name": user.name,
                         "mobile": mobile,
                         "email": user.email,
-                        "csrf_token": csrf_token
+                        "csrf_token": csrf_token,
+                        "is_new_user": is_new_user
                     }
                 }
             
@@ -576,7 +579,8 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
                 access_token=access_token,
                 refresh_token=refresh_token,
                 token_type="Bearer",
-                expires_in=settings.ACCESS_TOKEN_EXPIRE_SECONDS
+                expires_in=settings.ACCESS_TOKEN_EXPIRE_SECONDS,
+                is_new_user=is_new_user
             )
             
             return VerifyOTPResponse(

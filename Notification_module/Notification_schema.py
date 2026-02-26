@@ -12,13 +12,13 @@ class SendNotificationRequest(BaseModel):
 
 
 class NotificationItem(BaseModel):
-    """Single notification in list response"""
+    """Single notification in list response. created_at is IST ISO string."""
     id: int
     title: str
     message: str
     type: Optional[str] = None
     is_read: bool
-    created_at: datetime
+    created_at: Optional[str] = None  # IST ISO format string for API response
 
     class Config:
         from_attributes = True

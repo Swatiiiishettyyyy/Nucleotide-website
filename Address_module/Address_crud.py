@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 def save_address(db: Session, user, req, request: Optional[Request] = None, correlation_id: Optional[str] = None):
     """
     Save or update address (create if address_id=0, update if address_id>0).
-    Validates city name against Locations.xlsx file.
+    Validates city name against the serviceable_locations table.
     No pincode lookup or autofill - all fields must be provided manually.
     """
     # Ensure country is always set (default to India)
@@ -31,12 +31,12 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
         logger.warning(msg)
         raise HTTPException(status_code=422, detail=msg)
 
-    # Validate that the city name is in serviceable locations (from excel sheet)
+    # Validate that the city name is in serviceable locations (from serviceable_locations table)
     # This validation applies to both new addresses and address updates
-    if not is_serviceable_location(req.city, None):
+    if not is_serviceable_location(req.city, None, db):
         logger.warning(
             "Address rejected for user %s: city='%s' not serviceable. Pincode: %s. "
-            "City is not in Locations.xlsx.",
+            "City is not in serviceable locations table.",
             user.id,
             req.city,
             req.postal_code,

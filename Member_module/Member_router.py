@@ -36,6 +36,27 @@ MEMBER_API_KEY_HEADER_NAME = "X-Member-Api-Key"
 # which supports both cookies (web) and Authorization header (mobile/apps).
 security_scheme = HTTPBearer(auto_error=False)
 
+
+def _member_order_and_flag_fields(db: Session, member_id: int) -> dict:
+    """Return has_taken_genetic_test, latest_order_*, and gene_report_* for member profile. Two queries: latest order (any status) and latest Report Ready order."""
+    from GeneticTest_module.GeneticTest_crud import (
+        get_participant_by_member_id,
+        get_latest_order_for_member,
+        get_latest_report_ready_order_for_member,
+    )
+    participant = get_participant_by_member_id(db, member_id)
+    has_taken_genetic_test = participant.has_taken_genetic_test if participant else False
+    latest = get_latest_order_for_member(db, member_id)
+    gene_report = get_latest_report_ready_order_for_member(db, member_id)
+    return {
+        "has_taken_genetic_test": has_taken_genetic_test,
+        "latest_order_no": latest["order_number"] if latest else None,
+        "latest_order_status": latest["order_status"] if latest else None,
+        "gene_report_order_no": gene_report["order_number"] if gene_report else None,
+        "gene_report_status": gene_report["order_status"] if gene_report else None,
+    }
+
+
 # Helper function to generate new token with selected_member_id
 def generate_token_with_member(
     db: Session,
@@ -169,12 +190,7 @@ def save_member_api(
         else:
             message = "Member saved. Family plan slots are full (4/4)."
 
-    # Check if member has taken genetic test
-    from GeneticTest_module.GeneticTest_crud import get_participant_info
-    participant_info = get_participant_info(db, member_id=member.id)
-    has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
-    
-    # Prepare member data for response - decrypt phone number for API schema
+    fields = _member_order_and_flag_fields(db, member.id)
     decrypted_mobile = decrypt_phone(member.mobile) if member.mobile else None
     member_data = MemberData(
         member_id=member.id,
@@ -183,19 +199,21 @@ def save_member_api(
         age=member.age,
         gender=member.gender,
         dob=member.dob,
-        mobile=decrypted_mobile,  # Decrypt before returning in schema
+        mobile=decrypted_mobile,
         email=member.email,
         profile_photo_url=member.profile_photo_url,
-        has_taken_genetic_test=has_taken_genetic_test,
+        has_taken_genetic_test=fields["has_taken_genetic_test"],
         api_key=getattr(member, "api_key", None),
+        latest_order_no=fields["latest_order_no"],
+        latest_order_status=fields["latest_order_status"],
+        gene_report_order_no=fields["gene_report_order_no"],
+        gene_report_status=fields["gene_report_status"],
     )
-    
     response = {
         "status": "success",
         "message": message,
         "data": member_data
     }
-    
     # If this is the first member, auto-select it and return new token
     if is_first_member:
         try:
@@ -372,11 +390,6 @@ def edit_member_api(
         )
         raise HTTPException(status_code=404, detail="Member not found or does not belong to you")
 
-    # Check if member has taken genetic test
-    from GeneticTest_module.GeneticTest_crud import get_participant_info
-    participant_info = get_participant_info(db, member_id=member.id)
-    has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
-    
     message = "Member updated successfully."
     if family_status:
         mandatory_remaining = family_status.get("mandatory_slots_remaining", 0)
@@ -394,7 +407,7 @@ def edit_member_api(
         else:
             message = "Member updated. Family plan slots are full (4/4)."
 
-    # Prepare member data for response - decrypt phone number for API schema
+    fields = _member_order_and_flag_fields(db, member.id)
     decrypted_mobile = decrypt_phone(member.mobile) if member.mobile else None
     member_data = MemberData(
         member_id=member.id,
@@ -403,11 +416,15 @@ def edit_member_api(
         age=member.age,
         gender=member.gender,
         dob=member.dob,
-        mobile=decrypted_mobile,  # Decrypt before returning in schema
+        mobile=decrypted_mobile,
         email=member.email,
         profile_photo_url=member.profile_photo_url,
-        has_taken_genetic_test=has_taken_genetic_test,
+        has_taken_genetic_test=fields["has_taken_genetic_test"],
         api_key=getattr(member, "api_key", None),
+        latest_order_no=fields["latest_order_no"],
+        latest_order_status=fields["latest_order_status"],
+        gene_report_order_no=fields["gene_report_order_no"],
+        gene_report_status=fields["gene_report_status"],
     )
 
     return {
@@ -426,34 +443,27 @@ def get_member_list(
     user = Depends(get_current_user)
 ):
     members = get_members_by_user(db, user, category=category_id, plan_type=plan_type)
-    
-    # Import genetic test CRUD for checking participant status
-    from GeneticTest_module.GeneticTest_crud import get_participant_info
-    
     data = []
     for m in members:
-        # Read relation from database - it should be a string value
         relation_value = str(m.relation) if m.relation is not None else ""
-        
-        # Check if member has taken genetic test
-        participant_info = get_participant_info(db, member_id=m.id)
-        has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
-        
-        # Decrypt phone number for API schema
+        fields = _member_order_and_flag_fields(db, m.id)
         decrypted_mobile = decrypt_phone(m.mobile) if m.mobile else None
-        
         data.append({
             "member_id": m.id,
             "name": m.name,
-            "relation": relation_value,  # Read relation as string from database
+            "relation": relation_value,
             "age": m.age,
             "gender": m.gender,
             "dob": to_ist_isoformat(m.dob) if m.dob else None,
-            "mobile": decrypted_mobile,  # Decrypt before returning in schema
+            "mobile": decrypted_mobile,
             "email": m.email,
             "profile_photo_url": m.profile_photo_url,
-            "has_taken_genetic_test": has_taken_genetic_test,
+            "has_taken_genetic_test": fields["has_taken_genetic_test"],
             "api_key": getattr(m, "api_key", None),
+            "latest_order_no": fields["latest_order_no"],
+            "latest_order_status": fields["latest_order_status"],
+            "gene_report_order_no": fields["gene_report_order_no"],
+            "gene_report_status": fields["gene_report_status"],
         })
     return {
         "status": "success",
@@ -858,17 +868,9 @@ def get_current_member_api(
                 "data": None
             }
         
-        # Use default member
         current_member = default_member
-    
-    # Check if member has taken genetic test
-    from GeneticTest_module.GeneticTest_crud import get_participant_info
-    participant_info = get_participant_info(db, member_id=current_member.id)
-    has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
-    
-    # Decrypt phone number for API schema
+    fields = _member_order_and_flag_fields(db, current_member.id)
     decrypted_mobile = decrypt_phone(current_member.mobile) if current_member.mobile else None
-    
     return {
         "status": "success",
         "message": "Current member profile retrieved successfully.",
@@ -880,11 +882,15 @@ def get_current_member_api(
             "age": current_member.age,
             "gender": current_member.gender,
             "dob": to_ist_isoformat(current_member.dob) if current_member.dob else None,
-            "mobile": decrypted_mobile,  # Decrypt before returning in schema
+            "mobile": decrypted_mobile,
             "email": current_member.email,
             "profile_photo_url": current_member.profile_photo_url,
-            "has_taken_genetic_test": has_taken_genetic_test,
+            "has_taken_genetic_test": fields["has_taken_genetic_test"],
             "api_key": getattr(current_member, "api_key", None),
+            "latest_order_no": fields["latest_order_no"],
+            "latest_order_status": fields["latest_order_status"],
+            "gene_report_order_no": fields["gene_report_order_no"],
+            "gene_report_status": fields["gene_report_status"],
         }
     }
 
@@ -1262,12 +1268,6 @@ async def upload_member_photo(
     target_member.profile_photo_url = profile_photo_url
     db.commit()
     db.refresh(target_member)
-    
-    # Check if member has taken genetic test
-    from GeneticTest_module.GeneticTest_crud import get_participant_info
-    participant_info = get_participant_info(db, member_id=target_member.id)
-    has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
-    
     # Store new data for audit
     new_data = {
         "profile_photo_url": target_member.profile_photo_url
@@ -1291,15 +1291,19 @@ async def upload_member_photo(
     # Decrypt phone number for API schema
     decrypted_mobile = decrypt_phone(target_member.mobile) if target_member.mobile else None
     
+    fields = _member_order_and_flag_fields(db, target_member.id)
     data = MemberProfileData(
         user_id=current_user.id,
         name=target_member.name,
         email=current_user.email,
-        mobile=decrypted_mobile,  # Decrypt before returning in schema
+        mobile=decrypted_mobile,
         profile_photo_url=target_member.profile_photo_url,
-        has_taken_genetic_test=has_taken_genetic_test
+        has_taken_genetic_test=fields["has_taken_genetic_test"],
+        latest_order_no=fields["latest_order_no"],
+        latest_order_status=fields["latest_order_status"],
+        gene_report_order_no=fields["gene_report_order_no"],
+        gene_report_status=fields["gene_report_status"],
     )
-    
     return UploadPhotoResponse(
         status="success",
         message="Profile photo uploaded successfully.",
@@ -1409,12 +1413,6 @@ async def delete_member_photo(
     target_member.profile_photo_url = None
     db.commit()
     db.refresh(target_member)
-    
-    # Check if member has taken genetic test
-    from GeneticTest_module.GeneticTest_crud import get_participant_info
-    participant_info = get_participant_info(db, member_id=target_member.id)
-    has_taken_genetic_test = participant_info.get("has_taken_genetic_test", False) if participant_info else False
-    
     # Store new data for audit
     new_data = {
         "profile_photo_url": None
@@ -1438,15 +1436,19 @@ async def delete_member_photo(
     # Decrypt phone number for API schema
     decrypted_mobile = decrypt_phone(target_member.mobile) if target_member.mobile else None
     
+    fields = _member_order_and_flag_fields(db, target_member.id)
     data = MemberProfileData(
         user_id=current_user.id,
         name=target_member.name,
         email=current_user.email,
-        mobile=decrypted_mobile,  # Decrypt before returning in schema
+        mobile=decrypted_mobile,
         profile_photo_url=None,
-        has_taken_genetic_test=has_taken_genetic_test
+        has_taken_genetic_test=fields["has_taken_genetic_test"],
+        latest_order_no=fields["latest_order_no"],
+        latest_order_status=fields["latest_order_status"],
+        gene_report_order_no=fields["gene_report_order_no"],
+        gene_report_status=fields["gene_report_status"],
     )
-    
     return DeletePhotoResponse(
         status="success",
         message="Profile photo deleted successfully.",

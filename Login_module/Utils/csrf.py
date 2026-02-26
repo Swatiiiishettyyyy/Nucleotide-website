@@ -143,6 +143,10 @@ def should_exempt_from_csrf(path: str) -> bool:
     # Exempt newsletter endpoints (works for anonymous users)
     if path.startswith("/newsletter/"):
         return True
+
+    # Exempt enquiry form submission (public form, no auth)
+    if path.startswith("/enquiry"):
+        return True
     
     # Exempt product endpoints (read-only or public access)
     if path.startswith("/products") or path.startswith("/product/"):

@@ -33,7 +33,7 @@ def save_address_api(
     """
     Create a new address (requires authentication).
     Use address_id = 0 for new addresses.
-    City name is validated against Locations.xlsx file.
+    City name is validated against the serviceable locations table.
     No pincode lookup or autofill - all fields must be provided manually.
     """
     # Generate correlation ID for request tracing
@@ -84,7 +84,7 @@ def edit_address_api(
     Workflow:
     1. Send PUT request with address_id in path and only fields you want to change in body
     2. Endpoint autofills missing fields from existing address
-    3. City name is validated against Locations.xlsx file before saving
+    3. City name is validated against the serviceable locations table before saving
     4. Cannot edit address if it's associated with cart items.
     
     Example: To change only city, send: {"city": "New City"}

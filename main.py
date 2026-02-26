@@ -51,6 +51,7 @@ from Login_module.Token.Refresh_token_model import RefreshToken  # Dual-token st
 from Newsletter_module.Newsletter_model import NewsletterSubscription
 from Tracking_module.Tracking_model import TrackingRecord  # Location & Analytics Tracking
 from Account_module.Account_model import AccountFeedbackRequest
+from Enquiry_module.Enquiry_model import EnquiryRequest
 from Notification_module.Notification_model import Notification, UserDeviceToken
 
 # Import Google Meet API models to register with SQLAlchemy Base
@@ -82,6 +83,7 @@ from Newsletter_module.Newsletter_router import router as newsletter_router
 from Notification_module.Notification_router import router as notification_router
 from Tracking_module.Tracking_router import router as tracking_router
 from Account_module.Account_router import router as account_router
+from Enquiry_module.Enquiry_router import router as enquiry_router
 
 # Google Meet API router
 try:
@@ -610,6 +612,7 @@ app.include_router(newsletter_router)  # /newsletter/subscribe
 app.include_router(notification_router)  # /api/notifications
 app.include_router(tracking_router)  # /api/tracking/event
 app.include_router(account_router)  # /account/feedback
+app.include_router(enquiry_router)  # /enquiry (form + POST)
 
 # Include Google Meet API router if available
 if gmeet_router:

@@ -23,7 +23,8 @@ from .Notification_crud import (
     mark_notification_read,
     get_unread_count,
 )
-from .firebase_service import init_firebase, send_fcm_to_tokens, firebase_initialized
+from . import firebase_service
+from Login_module.Utils.datetime_utils import to_ist_isoformat
 
 logger = logging.getLogger(__name__)
 
@@ -50,15 +51,24 @@ def post_notifications_send(
         type=body.type,
     )
     tokens = get_device_tokens_for_user(db, body.user_id)
-    init_firebase()
-    if tokens and firebase_initialized:
+    firebase_service.init_firebase()
+    if not tokens:
+        logger.error("Skipping FCM: no device tokens for user_id=%s", body.user_id)
+    elif not firebase_service.firebase_initialized:
+        logger.error("Skipping FCM: Firebase not initialized")
+    else:
         data = {"notification_id": str(notification.id), "type": body.type or ""}
-        invalid_tokens = send_fcm_to_tokens(
+        invalid_tokens, success_count = firebase_service.send_fcm_to_tokens(
             tokens=tokens,
             title=body.title,
             body=body.message,
             data=data,
         )
+        if success_count is not None:
+            if success_count > 0:
+                logger.info("FCM send attempted for user_id=%s, delivered to %s device(s)", body.user_id, success_count)
+            else:
+                logger.warning("FCM send attempted for user_id=%s, delivered to 0 device(s)", body.user_id)
         if invalid_tokens:
             from config import settings
             if settings.REMOVE_INVALID_FCM_TOKENS:
@@ -76,14 +86,24 @@ def get_notifications(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List notifications for the authenticated user. Optional limit and unread_only filter."""
+    """List notifications for the authenticated user. Optional limit and unread_only filter. Timestamps in IST."""
     items = list_notifications(
         db,
         user_id=current_user.id,
         limit=limit,
         unread_only=unread_only,
     )
-    return [NotificationItem.model_validate(n) for n in items]
+    return [
+        NotificationItem(
+            id=n.id,
+            title=n.title,
+            message=n.message,
+            type=n.type,
+            is_read=n.is_read,
+            created_at=to_ist_isoformat(n.created_at),
+        )
+        for n in items
+    ]
 
 
 @router.put("/notifications/{notification_id}/read", response_model=NotificationItem)
@@ -92,14 +112,21 @@ def put_notification_read(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Mark a notification as read. Requires auth; only own notifications can be marked read."""
+    """Mark a notification as read. Requires auth; only own notifications can be marked read. Returns notification with created_at in IST."""
     updated = mark_notification_read(db, notification_id=notification_id, user_id=current_user.id)
     if not updated:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Notification not found",
         )
-    return NotificationItem.model_validate(updated)
+    return NotificationItem(
+        id=updated.id,
+        title=updated.title,
+        message=updated.message,
+        type=updated.type,
+        is_read=updated.is_read,
+        created_at=to_ist_isoformat(updated.created_at),
+    )
 
 
 @router.get("/notifications/unread-count", response_model=UnreadCountResponse)

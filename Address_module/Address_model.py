@@ -27,3 +27,11 @@ class Address(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class ServiceableLocation(Base):
+    __tablename__ = "serviceable_locations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    location = Column(String(150), nullable=False, unique=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
