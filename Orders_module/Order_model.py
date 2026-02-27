@@ -1,10 +1,12 @@
 """
 Order model - stores order information and payment details.
 No COD option, no refund policy.
+All timestamps stored in IST (Indian Standard Time).
 """
-from sqlalchemy import Column, Integer, String, Float, DateTime, func, Enum, ForeignKey, Text, JSON, Boolean
+from sqlalchemy import Column, Integer, String, Float, DateTime, Enum, ForeignKey, Text, JSON, Boolean
 from sqlalchemy.orm import relationship
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 import enum
 
 
@@ -64,7 +66,7 @@ class Order(Base):
     
     # Order status tracking
     order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.PENDING_PAYMENT, index=True)
-    status_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    status_updated_at = Column(DateTime(timezone=True), default=now_ist, onupdate=now_ist)
     
     # Additional notes
     notes = Column(Text, nullable=True)
@@ -77,8 +79,8 @@ class Order(Base):
     razorpay_invoice_status = Column(String(50), nullable=True, index=True)
 
     # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=now_ist)
 
     # Relationships
     user = relationship("User")
@@ -111,14 +113,14 @@ class OrderItem(Base):
     
     # Per-item status tracking (for different addresses in couple/family packs)
     order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.PENDING_PAYMENT, index=True)
-    status_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    status_updated_at = Column(DateTime(timezone=True), default=now_ist, onupdate=now_ist)
     
     # Technician and scheduling information (per item, since items can have different addresses)
     scheduled_date = Column(DateTime(timezone=True), nullable=True)  # When technician will visit for this item
     technician_name = Column(String(100), nullable=True)  # Technician assigned to this item
     technician_contact = Column(String(20), nullable=True)  # Technician contact for this item
     
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), default=now_ist)
     
     # Relationships
     order = relationship("Order", backref="items")
@@ -152,7 +154,7 @@ class OrderSnapshot(Base):
     # Snapshot of cart item details (not required, can be empty)
     cart_item_data = Column(JSON, nullable=True)  # Original cart item data if needed (optional)
     
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), default=now_ist)
     
     # Relationships
     order = relationship("Order", backref="snapshots")
@@ -172,7 +174,7 @@ class OrderStatusHistory(Base):
     previous_status = Column(Enum(OrderStatus), nullable=True)  # NULL for initial status
     notes = Column(Text, nullable=False)  # Additional notes about status change
     changed_by = Column(String(100), nullable=False)  # Who changed the status (user_id or "system")
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     
     # Relationships
     order = relationship("Order", backref="status_history")
@@ -216,8 +218,8 @@ class Payment(Base):
     notes = Column(Text, nullable=True)
     
     # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=now_ist)
     
     # Relationships
     order = relationship("Order", backref="payments")
@@ -254,7 +256,7 @@ class WebhookLog(Base):
     razorpay_payment_id = Column(String(255), nullable=True, index=True)
     
     # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     processed_at = Column(DateTime(timezone=True), nullable=True)  # When webhook was processed
     
     # Relationships
@@ -285,7 +287,7 @@ class PaymentTransition(Base):
     webhook_log_id = Column(Integer, ForeignKey("webhook_logs.id", ondelete="SET NULL"), nullable=True)  # Related webhook log
     
     # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     
     # Relationships
     payment = relationship("Payment", backref="transitions")

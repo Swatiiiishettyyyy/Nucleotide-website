@@ -1333,13 +1333,25 @@ def get_orders(
                         "country": address.country if address else None
                     }
                 
+                # Display fallback: if order was updated to post-payment status but item stayed PENDING (e.g. before item-level sync fix), show order status
+                item_status = item.order_status
+                if order.order_status in (
+                    OrderStatus.SCHEDULED,
+                    OrderStatus.SCHEDULE_CONFIRMED_BY_LAB,
+                    OrderStatus.SAMPLE_COLLECTED,
+                    OrderStatus.SAMPLE_RECEIVED_BY_LAB,
+                    OrderStatus.TESTING_IN_PROGRESS,
+                    OrderStatus.REPORT_READY,
+                    OrderStatus.COMPLETED,
+                ) and item_status == OrderStatus.PENDING:
+                    item_status = order.order_status
                 member_address_map.append({
                     "member": member_details,
                     "address": address_details,
                     "order_item_id": item.id,
                     "quantity": item.quantity,
                     "unit_price": item.unit_price,
-                    "order_status": item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status),
+                    "order_status": item_status.value if hasattr(item_status, 'value') else str(item_status),
                     "status_updated_at": to_ist_isoformat(item.status_updated_at),
                     "scheduled_date": to_ist_isoformat(item.scheduled_date),
                     "technician_name": item.technician_name,
@@ -1808,13 +1820,25 @@ def get_order(
                     "country": address.country if address else None
                 }
             
+            # Display fallback: if order was updated to post-payment status but item stayed PENDING (e.g. before item-level sync fix), show order status
+            item_status = item.order_status
+            if order.order_status in (
+                OrderStatus.SCHEDULED,
+                OrderStatus.SCHEDULE_CONFIRMED_BY_LAB,
+                OrderStatus.SAMPLE_COLLECTED,
+                OrderStatus.SAMPLE_RECEIVED_BY_LAB,
+                OrderStatus.TESTING_IN_PROGRESS,
+                OrderStatus.REPORT_READY,
+                OrderStatus.COMPLETED,
+            ) and item_status == OrderStatus.PENDING:
+                item_status = order.order_status
             member_address_map.append({
                 "member": member_details,
                 "address": address_details,
                 "order_item_id": item.id,
                 "quantity": item.quantity,
                 "unit_price": item.unit_price,
-                "order_status": item.order_status.value if hasattr(item.order_status, 'value') else str(item.order_status),
+                "order_status": item_status.value if hasattr(item_status, 'value') else str(item_status),
                 "status_updated_at": to_ist_isoformat(item.status_updated_at),
                 "scheduled_date": to_ist_isoformat(item.scheduled_date),
                 "technician_name": item.technician_name,

@@ -71,7 +71,7 @@ def send_otp(request: SendOTPRequest, http_request: Request, db: Session = Depen
     return SendOTPResponse(status="success", message=message, data=data)
 
 
-@router.post("/verify-otp")
+@router.post("/verify-otp", response_model=VerifyOTPResponse)
 def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(get_db)):
     """
     Verify OTP and create user session.

@@ -142,23 +142,33 @@ def sync_order_item_statuses_with_order_status(
     Logic:
     - If order status is CONFIRMED → item status = CONFIRMED
     - If order status is PAYMENT_FAILED → item status = PAYMENT_FAILED
-    - For all other order statuses → item status = PENDING
-    
+    - If order status is in post-payment pipeline (SCHEDULED, SCHEDULE_CONFIRMED_BY_LAB,
+      SAMPLE_COLLECTED, SAMPLE_RECEIVED_BY_LAB, TESTING_IN_PROGRESS, REPORT_READY) → item status = order status
+    - For all other order statuses (PENDING_PAYMENT, PROCESSING, etc.) → item status = PENDING
+
     Args:
         db: Database session
         order: Order object with items relationship loaded
         order_status: The order-level status
         update_timestamp: Whether to update status_updated_at timestamp
     """
-    # Determine item status based on order status
+    POST_PAYMENT_ITEM_SYNC = {
+        OrderStatus.SCHEDULED,
+        OrderStatus.SCHEDULE_CONFIRMED_BY_LAB,
+        OrderStatus.SAMPLE_COLLECTED,
+        OrderStatus.SAMPLE_RECEIVED_BY_LAB,
+        OrderStatus.TESTING_IN_PROGRESS,
+        OrderStatus.REPORT_READY,
+    }
     if order_status == OrderStatus.CONFIRMED:
         item_status = OrderStatus.CONFIRMED
     elif order_status == OrderStatus.PAYMENT_FAILED:
         item_status = OrderStatus.PAYMENT_FAILED
+    elif order_status in POST_PAYMENT_ITEM_SYNC:
+        item_status = order_status
     else:
-        # For all other statuses (PENDING_PAYMENT, PROCESSING, SCHEDULED, etc.)
         item_status = OrderStatus.PENDING
-    
+
     # Update all order items
     for item in order.items:
         item.order_status = item_status
@@ -1492,11 +1502,14 @@ def update_order_status(
         previous_status = order.order_status
         order.order_status = new_status
         order.status_updated_at = now_ist()
-        
+
+        # Capture each item's previous status before sync overwrites it
+        item_previous_statuses = {item.id: item.order_status for item in order.items}
+
         # Update all order items to match - sync with order status
         sync_order_item_statuses_with_order_status(db, order, new_status, update_timestamp=True)
         notif_payload = _get_notification_payload_for_status(order, new_status)
-        
+
         # Update technician and scheduling fields for all items only if provided
         # For statuses that don't need technician info, clear fields if not provided
         for item in order.items:
@@ -1504,18 +1517,18 @@ def update_order_status(
                 item.scheduled_date = scheduled_date
             elif should_clear_technician:
                 item.scheduled_date = None
-                
+
             if technician_name is not None:
                 item.technician_name = technician_name
             elif should_clear_technician:
                 item.technician_name = None
-                
+
             if technician_contact is not None:
                 item.technician_contact = technician_contact
             elif should_clear_technician:
                 item.technician_contact = None
-        
-        # Create status history entry for order
+
+        # Create status history entry for order (order-level, order_item_id=None)
         status_history = OrderStatusHistory(
             order_id=order_id,
             status=new_status,
@@ -1524,6 +1537,19 @@ def update_order_status(
             changed_by=changed_by
         )
         db.add(status_history)
+
+        # Create status history entry for each order item so item-level tracking shows these transitions
+        for item in order.items:
+            item_previous = item_previous_statuses.get(item.id, item.order_status)
+            item_status_history = OrderStatusHistory(
+                order_id=order_id,
+                order_item_id=item.id,
+                status=new_status,
+                previous_status=item_previous,
+                notes=notes or f"Order status updated to {new_status.value}",
+                changed_by=changed_by
+            )
+            db.add(item_status_history)
     
     db.commit()
     db.refresh(order)
