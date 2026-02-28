@@ -1973,7 +1973,8 @@ def get_order_tracking(
         OrderStatus.SAMPLE_COLLECTED,
         OrderStatus.SAMPLE_RECEIVED_BY_LAB,
         OrderStatus.TESTING_IN_PROGRESS,
-        OrderStatus.REPORT_READY
+        OrderStatus.REPORT_READY,
+        OrderStatus.COMPLETED,
     }
     
     if order.order_status not in POST_CONFIRMATION_STATUSES:
@@ -2389,7 +2390,6 @@ def update_order_status_api(
     - scheduled_date (optional): Scheduled date for technician visit (only needed for statuses like 'scheduled')
     - technician_name (optional): Technician name (only needed for statuses like 'scheduled', 'sample_collected')
     - technician_contact (optional): Technician contact (only needed for statuses like 'scheduled', 'sample_collected')
-    - changed_by (optional): Identifier for who made the change (defaults to 'system')
     
     Note: Technician details (scheduled_date, technician_name, technician_contact) are optional.
     They are typically required for: scheduled, schedule_confirmed_by_lab, sample_collected
@@ -2430,8 +2430,7 @@ def update_order_status_api(
                     detail=f"Order item {status_data.order_item_id} not found in order {order_number}"
                 )
         
-        # Get changed_by from request or use default
-        changed_by = status_data.changed_by if status_data.changed_by else "system"
+        changed_by = "system"
         
         # Get previous status before update
         previous_order_status = order.order_status
@@ -2717,7 +2716,7 @@ def schedule_order(
             order=order,
             member_schedule_map=member_schedule_map,
             changed_by=str(current_user.id),
-            notes="Scheduled via user API.",
+            notes="Sample collection scheduled",
         )
 
         # Send "Sample scheduled" notification when order status became SCHEDULED

@@ -42,7 +42,9 @@ def get_latest_report_ready_order_for_member(
     member_id: int
 ) -> Optional[dict]:
     """
-    Most recent order for this member with order_status = REPORT_READY.
+    Most recent order where this member has at least one item with REPORT_READY (or COMPLETED).
+    Uses OrderItem.order_status, not Order.order_status, so wife can get gene report
+    even when husband (same order, different address) is still in SCHEDULED/SAMPLE_COLLECTED.
     Returns dict with order_id, order_number, order_status or None.
     """
     from Orders_module.Order_model import Order, OrderItem, OrderStatus
@@ -52,7 +54,7 @@ def get_latest_report_ready_order_for_member(
         .join(OrderItem, OrderItem.order_id == Order.id)
         .filter(
             OrderItem.member_id == member_id,
-            Order.order_status == OrderStatus.REPORT_READY,
+            OrderItem.order_status.in_([OrderStatus.REPORT_READY, OrderStatus.COMPLETED]),
         )
         .order_by(Order.created_at.desc(), Order.id.desc())
         .first()
@@ -62,7 +64,7 @@ def get_latest_report_ready_order_for_member(
     return {
         "order_id": order.id,
         "order_number": order.order_number,
-        "order_status": order.order_status.value if hasattr(order.order_status, "value") else str(order.order_status),
+        "order_status": OrderStatus.REPORT_READY.value,
     }
 
 

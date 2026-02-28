@@ -26,7 +26,7 @@ After payment is confirmed (`CONFIRMED`), the order moves through these stages u
 |-------|--------|-------------|
 | 1 | `SCHEDULED` | Sample collection scheduled; technician details set |
 | 2 | `SCHEDULE_CONFIRMED_BY_LAB` | Lab has confirmed the schedule |
-| 3 | `SAMPLE_COLLECTED` | Sample collected from customer |
+| 3 | `SAMPLE_COLLECTED` | Sample collected |
 | 4 | `SAMPLE_RECEIVED_BY_LAB` | Lab has received the sample |
 | 5 | `TESTING_IN_PROGRESS` | Testing is in progress |
 | 6 | `REPORT_READY` | Report is ready for the customer |
@@ -47,8 +47,7 @@ Requires scheduling/technician info.
   "notes": "Sample collection scheduled",
   "scheduled_date": "2025-03-01T10:00:00",
   "technician_name": "John Doe",
-  "technician_contact": "+919876543210",
-  "changed_by": "lab_admin"
+  "technician_contact": "+919876543210"
 }
 ```
 
@@ -57,8 +56,7 @@ Requires scheduling/technician info.
 ```json
 {
   "status": "SCHEDULE_CONFIRMED_BY_LAB",
-  "notes": "Lab confirmed the schedule",
-  "changed_by": "lab_admin"
+  "notes": "Lab confirmed the schedule"
 }
 ```
 
@@ -67,10 +65,9 @@ Requires scheduling/technician info.
 ```json
 {
   "status": "SAMPLE_COLLECTED",
-  "notes": "Sample collected from customer",
+  "notes": "Sample collected",
   "technician_name": "John Doe",
-  "technician_contact": "+919876543210",
-  "changed_by": "technician"
+  "technician_contact": "+919876543210"
 }
 ```
 
@@ -79,8 +76,7 @@ Requires scheduling/technician info.
 ```json
 {
   "status": "SAMPLE_RECEIVED_BY_LAB",
-  "notes": "Sample received at lab",
-  "changed_by": "lab_admin"
+  "notes": "Sample received at lab"
 }
 ```
 
@@ -89,8 +85,7 @@ Requires scheduling/technician info.
 ```json
 {
   "status": "TESTING_IN_PROGRESS",
-  "notes": "Testing in progress",
-  "changed_by": "lab_admin"
+  "notes": "Testing in progress"
 }
 ```
 
@@ -99,8 +94,7 @@ Requires scheduling/technician info.
 ```json
 {
   "status": "REPORT_READY",
-  "notes": "Report generated and ready for customer",
-  "changed_by": "lab_admin"
+  "notes": "Report generated and ready for customer"
 }
 ```
 
@@ -116,7 +110,6 @@ Requires scheduling/technician info.
 | **technician_name** | For `SCHEDULED`, `SCHEDULE_CONFIRMED_BY_LAB`, `SAMPLE_COLLECTED`. |
 | **technician_contact** | For `SCHEDULED`, `SCHEDULE_CONFIRMED_BY_LAB`, `SAMPLE_COLLECTED`. |
 | **notes** | Optional text for the status change. |
-| **changed_by** | Who made the change; defaults to `"system"` if omitted. |
 
 ### Order-item level update example
 
@@ -126,8 +119,7 @@ To update **only one order item** (for example, order item `271` in order `ORD-2
 {
   "status": "REPORT_READY",
   "order_item_id": 271,
-  "notes": "Report ready for this item",
-  "changed_by": "lab_admin"
+  "notes": "Report ready for this item"
 }
 ```
 
@@ -162,7 +154,7 @@ Valid `status` values for this pipeline (case-sensitive, uppercase):
 curl -X PUT "https://your-api-host/orders/ORD-2024-001234/status" \
   -H "Content-Type: application/json" \
   -H "X-Order-Status-Password: 4567" \
-  -d '{"status": "REPORT_READY", "notes": "Report ready", "changed_by": "lab_admin"}'
+  -d '{"status": "REPORT_READY", "notes": "Report ready"}'
 ```
 
 ---

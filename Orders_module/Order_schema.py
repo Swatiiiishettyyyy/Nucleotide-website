@@ -47,7 +47,6 @@ class UpdateOrderStatusRequest(BaseModel):
     scheduled_date: Optional[datetime] = Field(None, description="Scheduled date for technician visit")
     technician_name: Optional[str] = Field(None, description="Technician name")
     technician_contact: Optional[str] = Field(None, description="Technician contact")
-    changed_by: Optional[str] = Field(None, description="Identifier for who made the change (defaults to 'system')")
 
 
 class MemberDetails(BaseModel):
