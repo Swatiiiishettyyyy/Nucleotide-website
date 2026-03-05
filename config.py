@@ -49,6 +49,11 @@ class Settings(BaseSettings):
 
     ENVIRONMENT: str = "development"
 
+    # Twilio Verify API - for SMS verification (separate from custom OTP flow)
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_VERIFY_SERVICE_SID: str = ""
+
     # Firebase FCM - path to service account JSON; empty = skip FCM send (notifications still stored in DB)
     FIREBASE_SERVICE_ACCOUNT_PATH: str = ""
     # When True (default), invalid FCM tokens are removed after failed send. When False (e.g. dev/test with dummy token), tokens are kept so notification trigger keeps running for every event.

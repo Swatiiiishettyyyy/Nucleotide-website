@@ -72,6 +72,7 @@ from Cart_module.Cart_router import router as cart_router
 from Category_module.Category_router import router as category_router
 from Consent_module.Consent_router import router as consent_router
 from Login_module.OTP.OTP_router import router as otp_router
+from Login_module.Twilio.Twilio_router import router as twilio_router
 from Login_module.Device.Device_session_router import router as session_router
 from Login_module.Utils.audit_query import router as audit_router
 from Login_module.Token.Auth_token_router import router as auth_token_router  # Dual-token strategy endpoints
@@ -600,6 +601,7 @@ app.add_middleware(CSRFProtectionMiddleware)
 
 # Include routers
 app.include_router(otp_router)  # /auth/send-otp, /auth/verify-otp
+app.include_router(twilio_router)  # /auth/twilio/send-verification, /auth/twilio/verify
 app.include_router(auth_token_router)  # /auth/refresh, /auth/logout, /auth/logout-all (dual-token strategy)
 app.include_router(product_router)
 app.include_router(category_router)

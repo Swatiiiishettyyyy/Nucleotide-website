@@ -26,6 +26,9 @@ google-auth-httplib2>=0.1.1
 # Firebase Admin SDK for FCM push notifications
 firebase-admin
 
+# Twilio Verify API for SMS verification
+twilio
+
 #pip install -r requirements.txt
 
 # cd nucleotide_backend
