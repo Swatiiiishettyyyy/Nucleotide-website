@@ -38,6 +38,7 @@ def post_notifications_send(
     current_user: User = Depends(get_current_user),
 ):
     """Create a notification in DB and send push via FCM to the user's devices. Requires auth."""
+    print(f"[FCM DEBUG] POST /notifications/send called: user_id={body.user_id}", flush=True)
     if body.user_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

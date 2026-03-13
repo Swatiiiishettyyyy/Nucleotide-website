@@ -125,6 +125,7 @@ def send_notification_to_user(
     Create a notification in DB and send push via FCM to the user's devices.
     Skips FCM send if user has notifications_enabled=False. Does not raise; logs errors.
     """
+    print(f"[FCM DEBUG] send_notification_to_user ENTRY: user_id={user_id} title={title!r}", flush=True)
     try:
         notification = create_notification(db, user_id=user_id, title=title, message=message, type=type)
         user = db.query(User).filter(User.id == user_id).first()
