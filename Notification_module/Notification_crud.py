@@ -130,10 +130,10 @@ def send_notification_to_user(
         notification = create_notification(db, user_id=user_id, title=title, message=message, type=type)
         user = db.query(User).filter(User.id == user_id).first()
         notifications_enabled_val = getattr(user, "notifications_enabled", True)
-        print(f"[FCM DEBUG] send_notification_to_user called: user_id={user_id} notifications_enabled={notifications_enabled_val!r} type={type(notifications_enabled_val).__name__}", flush=True)
+        print(f"[FCM DEBUG] send_notification_to_user called: user_id={user_id} notifications_enabled={notifications_enabled_val!r} pytype={notifications_enabled_val.__class__.__name__}", flush=True)
         logger.info(
-            "send_notification_to_user: user_id=%s notifications_enabled=%r (type=%s)",
-            user_id, notifications_enabled_val, type(notifications_enabled_val).__name__
+            "send_notification_to_user: user_id=%s notifications_enabled=%r (pytype=%s)",
+            user_id, notifications_enabled_val, notifications_enabled_val.__class__.__name__
         )
         if user and not notifications_enabled_val:
             print(f"[FCM DEBUG] Skipping FCM: notifications_enabled is falsy for user_id={user_id}", flush=True)
