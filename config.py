@@ -59,6 +59,28 @@ class Settings(BaseSettings):
     # When True (default), invalid FCM tokens are removed after failed send. When False (e.g. dev/test with dummy token), tokens are kept so notification trigger keeps running for every event.
     REMOVE_INVALID_FCM_TOKENS: bool = True
 
+    # Invoice Generation & Sending
+    INVOICE_SERVICE_ACCOUNT_PATH: str = "invoice generation/billing.json"
+    INVOICE_SENDER_EMAIL: str = "billing@nucleotide.life"
+    INVOICE_COMPANY_NAME: str = "Nucleotide Healthcare Pvt Ltd"
+    INVOICE_COMPANY_ADDRESS: str = "Bangalore, Karnataka, India"
+    INVOICE_PAN_NUMBER: str = "AADCE5479M"
+    INVOICE_SAC_CODE: str = "999312"
+    INVOICE_CUSTOMER_CARE_PHONE: str = "+91 9403891587"
+    INVOICE_CUSTOMER_CARE_EMAIL: str = "info@nucleotide.life"
+    INVOICE_WEBSITE: str = "www.nucleotide.life"
+    INVOICE_LOGO_PATH: str = "invoice generation/logo.png"
+
+    # Thyrocare Configuration
+    THYROCARE_BASE_URL: str = "https://api-sandbox.thyrocare.com"
+    THYROCARE_USERNAME: str = ""
+    THYROCARE_PASSWORD: str = ""
+    THYROCARE_PARTNER_ID: str = ""
+    THYROCARE_CLIENT_TYPE: str = "All"
+    THYROCARE_REQUEST_ID: str = "Pass"
+    THYROCARE_ENTITY_TYPE: str = "DSA"
+    THYROCARE_PAY_TYPE: str = "POSTPAID"
+
     model_config = ConfigDict(
         # Use absolute path to make sure .env is found
         env_file=os.path.join(os.path.dirname(__file__), "..", ".env"),
@@ -89,4 +111,3 @@ else:
 # Fallback CSRF_SECRET_KEY if not set (use SECRET_KEY with prefix)
 if not settings.CSRF_SECRET_KEY:
     settings.CSRF_SECRET_KEY = f"csrf_{settings.SECRET_KEY}"
-

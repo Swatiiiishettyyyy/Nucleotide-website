@@ -29,6 +29,13 @@ firebase-admin
 # Twilio Verify API for SMS verification
 twilio
 
+# PDF Invoice Generation
+reportlab
+num2words
+
+# JWT Handling
+PyJWT
+
 #pip install -r requirements.txt
 
 # cd nucleotide_backend

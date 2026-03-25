@@ -236,11 +236,27 @@ def extract_payment_method_from_razorpay_payload(entity: Dict[str, Any]) -> Tupl
     return payment_method, metadata if metadata else None
 
 
-def generate_order_number() -> str:
-    """Generate unique order number"""
-    timestamp = now_ist().strftime("%Y%m%d%H%M%S")
-    random_part = secrets.token_hex(4).upper()
-    return f"ORD{timestamp}{random_part}"
+def generate_order_number(db: Session) -> str:
+    """Generate unique 10-character random order number
+    Format: ORD + 7 random hex characters
+    Example: ORD7A2B1C9D
+    Guaranteed unique via database collision check (non-sequential)
+    """
+    max_retries = 10
+    
+    for attempt in range(max_retries):
+        # Generate 7 random hex chars (3 bytes = 6 hex chars, take first 7)
+        random_part = secrets.token_hex(4).upper()[:7]  # 4 bytes = 8 hex, take first 7
+        order_number = f"ORD{random_part}"
+        
+        # Check if already exists in database
+        existing = db.query(Order).filter(Order.order_number == order_number).first()
+        
+        if not existing:
+            return order_number
+    
+    # Fallback (extremely unlikely with 7 hex chars and 10 retries)
+    raise ValueError("Failed to generate unique order number after retries")
 
 
 def find_existing_order_for_retry(
@@ -463,7 +479,7 @@ def create_order_from_cart(
     
     # Create order (without payment fields - payment is in separate table)
     order = Order(
-        order_number=generate_order_number(),
+        order_number=generate_order_number(db),
         user_id=user_id,
         placed_by_member_id=placed_by_member_id,  # Member profile that was active when order was placed
         address_id=primary_address_id,
@@ -1140,7 +1156,123 @@ def confirm_order_from_webhook(
             f"Order confirmed but invoice may not be created. Manual intervention may be required.",
             exc_info=True
         )
-    
+
+    # ── CUSTOM PDF INVOICE GENERATION & EMAIL SENDING ─────
+    try:
+        import sys
+        import os
+        from pathlib import Path
+        
+        # Ensure the 'invoice generation' folder is in the system path for imports
+        # We use absolute path to be safe
+        project_root = Path(__file__).parent.parent
+        invoice_gen_path = project_root / "invoice generation"
+        if str(invoice_gen_path) not in sys.path:
+            sys.path.append(str(invoice_gen_path))
+            
+        from nucleotide_invoice_sender_wo_file import generate_and_send_invoice, build_email_body
+        
+        # Prepare invoice data mapping
+        # We use the primary address from the order
+        customer_address_str = ""
+        if order.address:
+            addr_parts = []
+            if order.address.street_address: addr_parts.append(order.address.street_address)
+            if order.address.city: addr_parts.append(order.address.city)
+            if order.address.state: addr_parts.append(order.address.state)
+            if order.address.postal_code: addr_parts.append(order.address.postal_code)
+            customer_address_str = ", ".join(addr_parts)
+        
+        # Build items list (Product Summary only)
+        invoice_items = []
+        for item in order.items:
+            # We use product name from snapshot or fallback to relationship
+            item_name = "Genetic Test Product"
+            if item.snapshot and item.snapshot.product_data:
+                item_name = item.snapshot.product_data.get("Name", item_name)
+            elif item.product:
+                item_name = item.product.Name
+                
+            invoice_items.append({
+                "name": item_name,
+                "amount": item.unit_price * item.quantity
+            })
+            
+        # Prepare payment info
+        payment_info = []
+        if payment:
+            mode = "Razorpay"
+            if payment.payment_method_details:
+                mode = f"Razorpay ({payment.payment_method_details.upper()})"
+            
+            payment_info.append({
+                "mode": mode,
+                "reference": payment.razorpay_payment_id or "N/A",
+                "amount": payment.amount
+            })
+            
+        # Build the final data dictionary exactly as expected by nucleotide_invoice
+        # Note: GST, detailed_items, and cheque info are omitted as requested
+        invoice_data = {
+            "invoice_number": order.razorpay_invoice_number or f"INV-{order.order_number}",
+            "invoice_date": now_ist().strftime("%B %d, %Y"),
+            "order_number": order.order_number,
+            "sac_code": settings.INVOICE_SAC_CODE,
+            
+            "company_name": settings.INVOICE_COMPANY_NAME,
+            "company_address": settings.INVOICE_COMPANY_ADDRESS,
+            "pan_number": settings.INVOICE_PAN_NUMBER,
+            
+            "customer_name": order.user.name or "Valued Customer",
+            "customer_address": customer_address_str,
+            
+            "items": invoice_items,
+            "detailed_items": [], # Omitted as requested
+            
+            "total_amount": order.subtotal,
+            "grand_total": order.total_amount,
+            "paid_amount": order.total_amount,
+            "discount_coupon": {
+                "code": order.coupon_code,
+                "amount": order.coupon_discount
+            } if order.coupon_code else None,
+            
+            "payment_info": payment_info,
+            "customer_care_phone": settings.INVOICE_CUSTOMER_CARE_PHONE,
+            "customer_care_email": settings.INVOICE_CUSTOMER_CARE_EMAIL,
+            "website": settings.INVOICE_WEBSITE
+        }
+        
+        # Build plain-text and HTML email bodies
+        plain_body, html_body = build_email_body(invoice_data)
+        
+        # Resolve logo path (relative to root)
+        logo_path = str(project_root / settings.INVOICE_LOGO_PATH)
+        if not os.path.exists(logo_path):
+            logger.warning(f"Invoice logo not found at {logo_path}. Falling back to text logo.")
+            logo_path = None
+            
+        # Send the invoice email
+        generate_and_send_invoice(
+            invoice_data=invoice_data,
+            logo_path=logo_path,
+            to=order.user.email,
+            subject=f"Order Confirmation & Invoice – {order.order_number}",
+            body=plain_body,
+            html_body=html_body,
+            pdf_filename=f"Invoice-{order.order_number}.pdf",
+            service_account_file=str(project_root / settings.INVOICE_SERVICE_ACCOUNT_PATH),
+            sender_email=settings.INVOICE_SENDER_EMAIL
+        )
+        logger.info(f"Custom branded PDF invoice sent to {order.user.email} for order {order.order_number}")
+
+    except Exception as e:
+        # Crucial: We do not let invoice errors stop the order confirmation
+        logger.error(
+            f"Error in Custom PDF Invoice generation/sending for order {order.order_number}: {str(e)}",
+            exc_info=True
+        )
+
     db.commit()
     db.refresh(order)
     

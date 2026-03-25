@@ -3,6 +3,7 @@ from typing import List, Optional
 import re
 
 from pydantic import BaseModel, Field, validator
+from Login_module.Utils.phone_validation import validate_indian_mobile
 
 class MemberRequest(BaseModel):
     member_id: int = Field(..., description="Member ID (for updates, use 0 for new members)", ge=0)
@@ -75,10 +76,7 @@ class MemberRequest(BaseModel):
     @validator('mobile')
     def validate_mobile(cls, v):
         if v:
-            # Basic mobile validation (exactly 10 digits)
-            v = v.strip().replace(" ", "").replace("-", "")
-            if len(v) != 10 or not v.isdigit():
-                raise ValueError('Mobile number must be exactly 10 digits')
+            return validate_indian_mobile(v)
         return v
     
     @validator('email')
@@ -165,10 +163,7 @@ class EditMemberRequest(BaseModel):
     @validator('mobile')
     def validate_mobile(cls, v):
         if v is not None:
-            # Basic mobile validation (exactly 10 digits)
-            v = v.strip().replace(" ", "").replace("-", "")
-            if len(v) != 10 or not v.isdigit():
-                raise ValueError('Mobile number must be exactly 10 digits')
+            return validate_indian_mobile(v)
         return v
     
     @validator('email')

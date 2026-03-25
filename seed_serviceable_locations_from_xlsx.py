@@ -25,7 +25,7 @@ def main() -> None:
     from database import SessionLocal
     from Address_module.Address_model import ServiceableLocation
 
-    xlsx_path = Path(sys.argv[1]) if len(sys.argv) > 1 else PROJECT_ROOT / "Locations.xlsx"
+    xlsx_path = Path(sys.argv[1]) if len(sys.argv) > 1 else PROJECT_ROOT / "Home_Collection.xlsx"
     if not xlsx_path.exists():
         print(f"File not found: {xlsx_path}")
         sys.exit(1)

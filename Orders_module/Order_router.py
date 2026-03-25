@@ -2927,3 +2927,195 @@ async def retry_invoice_creation(
             status_code=500,
             detail="An unexpected error occurred. Please try again or contact support."
         )
+
+
+@router.post("/test-invoice-email/{order_id}")
+async def test_invoice_email_generation(
+    order_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    TEST ENDPOINT: Manually trigger custom PDF invoice generation and email sending.
+    Use this to debug why invoice emails aren't being sent after Razorpay order confirmation.
+
+    This endpoint:
+    1. Finds the order (must be CONFIRMED status)
+    2. Generates the custom PDF invoice (same as webhook flow)
+    3. Sends it via Gmail API (same as webhook flow)
+    4. Returns detailed success/failure information
+
+    Usage: POST /orders/test-invoice-email/{order_id}
+    """
+    # Get order with user validation
+    order = db.query(Order).filter(
+        Order.id == order_id,
+        Order.user_id == current_user.id
+    ).first()
+
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Validate order state
+    if order.order_status != OrderStatus.CONFIRMED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can only test invoice email for confirmed orders. Current status: {order.order_status.value}"
+        )
+
+    # Check if user has email
+    if not order.user or not order.user.email:
+        raise HTTPException(
+            status_code=400,
+            detail="Order user has no email address. Cannot send invoice email."
+        )
+
+    logger.info(f"TEST: Manual invoice email generation for order {order.order_number} (ID: {order.id}) by user {current_user.id}")
+
+    # Extract the invoice generation logic from confirm_order_from_webhook
+    try:
+        import sys
+        import os
+        from pathlib import Path
+        from config import settings
+
+        # Ensure the 'invoice generation' folder is in the system path for imports
+        project_root = Path(__file__).parent.parent
+        invoice_gen_path = project_root / "invoice generation"
+        if str(invoice_gen_path) not in sys.path:
+            sys.path.append(str(invoice_gen_path))
+
+        from nucleotide_invoice_sender_wo_file import generate_and_send_invoice, build_email_body
+
+        # Prepare invoice data mapping (same as webhook)
+        customer_address_str = ""
+        if order.address:
+            addr_parts = []
+            if order.address.street_address: addr_parts.append(order.address.street_address)
+            if order.address.city: addr_parts.append(order.address.city)
+            if order.address.state: addr_parts.append(order.address.state)
+            if order.address.postal_code: addr_parts.append(order.address.postal_code)
+            customer_address_str = ", ".join(addr_parts)
+
+        # Build items list (Product Summary only)
+        invoice_items = []
+        for item in order.items:
+            item_name = "Genetic Test Product"
+            if item.snapshot and item.snapshot.product_data:
+                item_name = item.snapshot.product_data.get("Name", item_name)
+            elif item.product:
+                item_name = item.product.Name
+
+            invoice_items.append({
+                "name": item_name,
+                "amount": item.unit_price * item.quantity
+            })
+
+        # Prepare payment info
+        payment_info = []
+        payment = db.query(Payment).filter(Payment.order_id == order.id).first()
+        if payment:
+            mode = "Razorpay"
+            if payment.payment_method_details:
+                mode = f"Razorpay ({payment.payment_method_details.upper()})"
+
+            payment_info.append({
+                "mode": mode,
+                "reference": payment.razorpay_payment_id or "N/A",
+                "amount": payment.amount
+            })
+
+        # Build the final data dictionary exactly as expected by nucleotide_invoice
+        invoice_data = {
+            "invoice_number": order.razorpay_invoice_number or f"INV-{order.order_number}",
+            "invoice_date": now_ist().strftime("%B %d, %Y"),
+            "order_number": order.order_number,
+            "sac_code": settings.INVOICE_SAC_CODE,
+
+            "company_name": settings.INVOICE_COMPANY_NAME,
+            "company_address": settings.INVOICE_COMPANY_ADDRESS,
+            "pan_number": settings.INVOICE_PAN_NUMBER,
+
+            "customer_name": order.user.name or "Valued Customer",
+            "customer_address": customer_address_str,
+
+            "items": invoice_items,
+            "detailed_items": [], # Omitted as requested
+
+            "total_amount": order.subtotal,
+            "grand_total": order.total_amount,
+            "paid_amount": order.total_amount,
+            "discount_coupon": {
+                "code": order.coupon_code,
+                "amount": order.coupon_discount
+            } if order.coupon_code else None,
+
+            "payment_info": payment_info,
+            "customer_care_phone": settings.INVOICE_CUSTOMER_CARE_PHONE,
+            "customer_care_email": settings.INVOICE_CUSTOMER_CARE_EMAIL,
+            "website": settings.INVOICE_WEBSITE
+        }
+
+        # Build plain-text and HTML email bodies
+        plain_body, html_body = build_email_body(invoice_data)
+
+        # Resolve logo path (relative to root)
+        logo_path = str(project_root / settings.INVOICE_LOGO_PATH)
+        if not os.path.exists(logo_path):
+            logger.warning(f"TEST: Invoice logo not found at {logo_path}. Falling back to text logo.")
+            logo_path = None
+
+        # Send the invoice email
+        result = generate_and_send_invoice(
+            invoice_data=invoice_data,
+            logo_path=logo_path,
+            to=order.user.email,
+            subject=f"Order Confirmation & Invoice – {order.order_number}",
+            body=plain_body,
+            html_body=html_body,
+            pdf_filename=f"Invoice-{order.order_number}.pdf",
+            service_account_file=str(project_root / settings.INVOICE_SERVICE_ACCOUNT_PATH),
+            sender_email=settings.INVOICE_SENDER_EMAIL
+        )
+
+        logger.info(f"TEST: Custom branded PDF invoice sent to {order.user.email} for order {order.order_number}")
+
+        return {
+            "status": "success",
+            "message": "Invoice email sent successfully",
+            "order_number": order.order_number,
+            "recipient_email": order.user.email,
+            "invoice_number": invoice_data["invoice_number"],
+            "logo_found": logo_path is not None,
+            "email_result": result,
+            "debug_info": {
+                "order_id": order.id,
+                "user_id": current_user.id,
+                "order_status": order.order_status.value,
+                "total_amount": order.total_amount,
+                "customer_name": invoice_data["customer_name"],
+                "item_count": len(invoice_items),
+                "has_payment_info": len(payment_info) > 0
+            }
+        }
+
+    except ImportError as e:
+        logger.error(f"TEST: Import error for invoice generation: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invoice generation module not found: {str(e)}. Check if 'invoice generation' folder exists."
+        )
+
+    except FileNotFoundError as e:
+        logger.error(f"TEST: File not found error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Required file not found: {str(e)}. Check service account file and logo path."
+        )
+
+    except Exception as e:
+        logger.error(f"TEST: Error in invoice email generation for order {order.order_number}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invoice email generation failed: {str(e)}. Check logs for detailed error."
+        )

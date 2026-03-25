@@ -96,6 +96,9 @@ except ImportError:
 # Scheduler
 from Login_module.Device.scheduler import start_scheduler, shutdown_scheduler
 
+# Thyrocare Auth Task
+from Thyrocare_module.thyrocare_service import start_thyrocare_auth_task
+
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Middleware to log HTTP requests and responses with status codes, and add token expiration headers."""
@@ -224,6 +227,10 @@ async def lifespan(app: FastAPI):
                 logger.info("FCM not configured - notifications will be stored in DB only (no push)")
         except Exception as e:
             logger.warning("Firebase init skipped or failed: %s", e)
+        
+        logger.info("Step 5: Initializing Thyrocare authentication...")
+        start_thyrocare_auth_task()
+        
         logger.info("Application started successfully - all startup tasks completed")
     except KeyboardInterrupt:
         logger.warning("Application startup interrupted by user")
@@ -592,7 +599,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE","PATCH","OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Requested-With", "X-CSRF-Token", "X-CSRF-TOKEN"],
 )
 # CSRF protection middleware (must be after CORS)
