@@ -3,7 +3,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from .Address_model import ServiceableLocation
+from .Address_model import ServiceableLocation, ServiceLocation
 
 logger = logging.getLogger(__name__)
 
@@ -59,3 +59,31 @@ def is_serviceable_location(city: Optional[str], locality: Optional[str], db: Se
 
     logger.warning("Location validation failed - City: '%s' (normalized: '%s')", city, normalized_city)
     return False
+
+
+def is_serviceable_pincode(pincode: Optional[str], db: Session) -> bool:
+    """
+    Return True if the pincode exists in the service_locations table.
+    Only checks rows where pincode is not null/empty.
+    """
+    if not pincode or not str(pincode).strip():
+        # No pincode provided — skip pincode validation
+        return True
+
+    normalized = str(pincode).strip()
+
+    try:
+        exists = (
+            db.query(ServiceLocation)
+            .filter(ServiceLocation.pincode == normalized)
+            .first()
+        )
+        if exists:
+            logger.info("Pincode '%s' found in service_locations.", normalized)
+            return True
+        logger.warning("Pincode '%s' NOT found in service_locations.", normalized)
+        return False
+    except Exception as exc:
+        logger.error("Failed to query service_locations for pincode '%s': %s", normalized, exc)
+        # Fail open — don't block address save if DB query fails
+        return True

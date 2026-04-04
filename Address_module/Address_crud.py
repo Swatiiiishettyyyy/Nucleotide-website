@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any
 import logging
 import json
 
-from .location_validator import is_serviceable_location
+from .location_validator import is_serviceable_location, is_serviceable_pincode
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +45,21 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
             status_code=422,
             detail="Sample cannot be collected in your location. Please choose a different location."
         )
-    
-    logger.info(f"Address validation passed for city: '{req.city}'")
+
+    # Validate pincode against service_locations table (if pincode provided)
+    if req.postal_code and not is_serviceable_pincode(req.postal_code, db):
+        logger.warning(
+            "Address rejected for user %s: pincode='%s' not serviceable. City: %s.",
+            user.id,
+            req.postal_code,
+            req.city,
+        )
+        raise HTTPException(
+            status_code=422,
+            detail="Sample cannot be collected in your location. Please choose a different location."
+        )
+
+    logger.info(f"Address validation passed for city: '{req.city}', pincode: '{req.postal_code}'")
     
     # Get IP and user agent
     ip_address = None

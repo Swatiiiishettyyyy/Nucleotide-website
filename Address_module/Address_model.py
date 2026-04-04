@@ -36,3 +36,12 @@ class ServiceableLocation(Base):
     id = Column(Integer, primary_key=True, index=True)
     location = Column(String(150), nullable=False, unique=True)
     created_at = Column(DateTime(timezone=True), default=now_ist)
+
+
+class ServiceLocation(Base):
+    __tablename__ = "service_locations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    location = Column(String(255), nullable=False)
+    pincode = Column(String(10), nullable=True)
+    city_id = Column(Integer, ForeignKey("serviceable_locations.id"), nullable=False)

@@ -454,21 +454,19 @@ def create_order_from_cart(
     # This matches the cart view logic - recalculate discount based on current subtotal
     applied_coupon = get_applied_coupon(db, user_id)
     if applied_coupon:
-        # Re-validate and recalculate discount (cart total might have changed)
         coupon, calculated_discount, error_message = validate_and_calculate_discount(
             db, applied_coupon.coupon_code, user_id, subtotal
         )
-        
+
         if coupon and not error_message:
-            # Coupon is valid - use the recalculated discount
             coupon_discount = calculated_discount
             coupon_code = applied_coupon.coupon_code
             logger.info(f"Order will include coupon '{coupon_code}' with discount of ₹{coupon_discount} (recalculated from subtotal ₹{subtotal})")
         else:
-            # Validation failed - log warning but use stored discount as fallback
-            logger.warning(f"Coupon validation warning for '{applied_coupon.coupon_code}' during order creation: {error_message}. Using stored discount.")
-            coupon_discount = applied_coupon.discount_amount
-            coupon_code = applied_coupon.coupon_code
+            # Coupon is no longer valid — do not apply discount
+            logger.warning(f"Coupon '{applied_coupon.coupon_code}' failed validation during order creation: {error_message}. Coupon will not be applied.")
+            coupon_discount = 0.0
+            coupon_code = None
     
     # Calculate total amount
     # Note: subtotal already uses SpecialPrice (product discount is already applied)
@@ -1004,7 +1002,21 @@ def confirm_order_from_webhook(
             cart.last_activity_at = now_ist()
         
         # Remove applied coupon after successful payment
-        from Cart_module.coupon_service import remove_coupon_from_cart
+        from Cart_module.coupon_service import remove_coupon_from_cart, record_coupon_usage
+
+        # Record permanent coupon usage BEFORE removing from cart
+        if order.coupon_code:
+            record_coupon_usage(
+                db=db,
+                coupon_code=order.coupon_code,
+                user_id=order.user_id,
+                order_id=order.id,
+                order_number=order.order_number,
+                discount_amount=order.coupon_discount or 0.0
+            )
+            # No explicit commit here — db.flush() in record_coupon_usage stages the row,
+            # and the final db.commit() at the end of confirm_order_from_webhook commits it.
+
         remove_coupon_from_cart(db, order.user_id)
         
         logger.info(f"Cart cleared for user {order.user_id} after order {order.order_number} confirmation. {deleted_count} item(s) removed.")

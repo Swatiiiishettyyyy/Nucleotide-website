@@ -112,15 +112,19 @@ class CartResponse(BaseModel):
 class CouponCreate(BaseModel):
     coupon_code: str = Field(..., description="Coupon code (will be converted to uppercase)", min_length=1, max_length=50)
     description: Optional[str] = Field(None, description="Coupon description", max_length=500)
-    # Note: user_id removed - all coupons are applicable to all users
     discount_type: str = Field(..., description="Discount type: 'percentage' or 'fixed'")
     discount_value: float = Field(..., description="Discount value (percentage 0-100 or fixed amount)", gt=0)
     min_order_amount: float = Field(0.0, description="Minimum order amount to apply coupon", ge=0)
     max_discount_amount: Optional[float] = Field(None, description="Maximum discount cap (for percentage coupons)", ge=0)
-    max_uses: Optional[int] = Field(None, description="Total uses allowed (None = unlimited, not required)", ge=1)
+    max_uses: Optional[int] = Field(None, description="Total confirmed-order uses allowed (None = unlimited)", ge=1)
+    max_uses_per_user: Optional[int] = Field(1, description="Max times a single user can use this coupon (default 1, None = unlimited)", ge=1)
     valid_from: datetime = Field(..., description="Coupon valid from date (ISO format)")
     valid_until: datetime = Field(..., description="Coupon valid until date (ISO format)")
     status: str = Field("active", description="Coupon status: 'active', 'inactive', or 'expired'")
+    allowed_plan_types: Optional[str] = Field(
+        None,
+        description="Comma-separated plan types this coupon applies to, e.g. 'individual' or 'individual,couple'. Leave empty for all plans."
+    )
     
     @validator('coupon_code')
     def normalize_coupon_code(cls, v):

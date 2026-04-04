@@ -839,7 +839,8 @@ def view_cart(
     applied_coupon = get_applied_coupon(db, current_user.id)
     coupon_amount = 0.0
     coupon_code = None
-    
+    coupon_warning = None
+
     if applied_coupon:
         # Re-validate and recalculate discount (cart total might have changed)
         # Pass cart_items for product type validation (e.g., FAMILYCOUPLE30 coupon)
@@ -858,19 +859,29 @@ def view_cart(
                 db.commit()
                 logger.info(f"Updated coupon discount from {applied_coupon.discount_amount} to {calculated_discount} for user {current_user.id}")
         else:
-            # Validation failed - log the error but keep using the stored discount
-            # This ensures the coupon shows in cart even if validation temporarily fails
-            # (e.g., cart total changed, but coupon is still technically valid)
-            logger.warning(f"Coupon validation warning for '{applied_coupon.coupon_code}': {error_message}. Using stored discount.")
-            coupon_amount = applied_coupon.discount_amount
-            coupon_code = applied_coupon.coupon_code
-            
-            # Only remove if coupon is truly invalid (expired, deleted, inactive)
-            if error_message and any(keyword in error_message.lower() for keyword in ["expired", "has expired", "not active", "invalid coupon code"]):
+            # Validation failed
+            logger.warning(f"Coupon validation warning for '{applied_coupon.coupon_code}': {error_message}.")
+
+            # For min order not met — keep coupon code but show 0 discount + warning
+            if error_message and "minimum amount" in error_message.lower():
+                coupon_amount = 0.0
+                coupon_code = applied_coupon.coupon_code
+                coupon_warning = error_message
+            # For truly invalid cases — remove coupon entirely
+            elif error_message and any(keyword in error_message.lower() for keyword in [
+                "expired", "has expired", "not active", "invalid coupon code",
+                "already used", "usage limit reached", "no longer available",
+                "only valid for", "requires at least one"
+            ]):
                 logger.warning(f"Removing invalid coupon '{applied_coupon.coupon_code}'. Error: {error_message}")
                 remove_coupon_from_cart(db, current_user.id)
                 coupon_amount = 0.0
                 coupon_code = None
+                coupon_warning = error_message
+            else:
+                # Other temporary failures — keep stored discount
+                coupon_amount = applied_coupon.discount_amount
+                coupon_code = applied_coupon.coupon_code
     else:
         # No coupon applied - coupons are tracked in cart_coupons table
         # No need to check cart items for coupon codes anymore
@@ -908,13 +919,14 @@ def view_cart(
         cart_id = cart_items[0].cart_id if cart_items[0].cart_id else None
 
     summary = {
-        "cart_id": cart_id,  # Proper cart.id from cart table
-        "total_items": len(grouped_items),  # Number of product groups
-        "total_cart_items": len(cart_items),  # Total individual cart items
+        "cart_id": cart_id,
+        "total_items": len(grouped_items),
+        "total_cart_items": len(cart_items),
         "subtotal_amount": subtotal_amount,
         "discount_amount": discount_amount,
         "coupon_amount": coupon_amount,
         "coupon_code": coupon_code,
+        "coupon_warning": coupon_warning,
         "you_save": you_save,
         "delivery_charge": delivery_charge,
         "grand_total": grand_total
@@ -1193,7 +1205,6 @@ def list_coupons(
         
         for coupon in coupons:
             # Check if coupon is within validity period
-            # Normalize coupon datetime fields to IST to avoid timezone comparison issues
             valid_from_ist = to_ist(coupon.valid_from) if coupon.valid_from else None
             valid_until_ist = to_ist(coupon.valid_until) if coupon.valid_until else None
             
@@ -1203,12 +1214,23 @@ def list_coupons(
             )
             
             if not is_within_validity:
-                continue  # Skip expired or not yet valid coupons
-            
-            # Check if coupon has reached its usage limit
+                continue
+
+            # Check if coupon has reached its global usage limit
             if is_coupon_usage_limit_reached(db, coupon):
-                continue  # Skip coupons that have reached max_uses limit
-            
+                continue
+
+            # Check if this user has exhausted their per-user limit
+            from Cart_module.Coupon_model import CouponUsage as _CouponUsage
+            from sqlalchemy import func as _func
+            max_per_user = coupon.max_uses_per_user if coupon.max_uses_per_user is not None else 1
+            user_uses = db.query(_func.count(_CouponUsage.id)).filter(
+                _CouponUsage.coupon_id == coupon.id,
+                _CouponUsage.user_id == current_user.id
+            ).scalar() or 0
+            if user_uses >= max_per_user:
+                continue  # This user already used up their allowance
+
             # Get current usage count for display
             current_uses = get_coupon_usage_count(db, coupon.id)
             
@@ -1222,11 +1244,13 @@ def list_coupons(
                 "min_order_amount": coupon.min_order_amount,
                 "max_discount_amount": coupon.max_discount_amount,
                 "max_uses": coupon.max_uses,
+                "max_uses_per_user": coupon.max_uses_per_user,
                 "current_uses": current_uses,  # Show how many times it's been used
                 "remaining_uses": coupon.max_uses - current_uses if coupon.max_uses else None,
                 "valid_from": to_ist_isoformat(coupon.valid_from),
                 "valid_until": to_ist_isoformat(coupon.valid_until),
-                "created_at": to_ist_isoformat(coupon.created_at)
+                "created_at": to_ist_isoformat(coupon.created_at),
+                "allowed_plan_types": coupon.allowed_plan_types
             })
         
         return {
@@ -1266,15 +1290,16 @@ def create_coupon(
         new_coupon = Coupon(
             coupon_code=coupon_data.coupon_code.upper().strip(),
             description=coupon_data.description,
-            # user_id removed - all coupons are applicable to all users
             discount_type=CouponType(coupon_data.discount_type),
             discount_value=coupon_data.discount_value,
             min_order_amount=coupon_data.min_order_amount,
             max_discount_amount=coupon_data.max_discount_amount,
-            max_uses=coupon_data.max_uses,  # Optional, not required
+            max_uses=coupon_data.max_uses,
+            max_uses_per_user=coupon_data.max_uses_per_user,
             valid_from=coupon_data.valid_from,
             valid_until=coupon_data.valid_until,
-            status=CouponStatus(coupon_data.status)
+            status=CouponStatus(coupon_data.status),
+            allowed_plan_types=coupon_data.allowed_plan_types.strip().lower() if coupon_data.allowed_plan_types else None
         )
         
         db.add(new_coupon)
@@ -1294,9 +1319,11 @@ def create_coupon(
                 "min_order_amount": new_coupon.min_order_amount,
                 "max_discount_amount": new_coupon.max_discount_amount,
                 "max_uses": new_coupon.max_uses,
+                "max_uses_per_user": new_coupon.max_uses_per_user,
                 "valid_from": to_ist_isoformat(new_coupon.valid_from),
                 "valid_until": to_ist_isoformat(new_coupon.valid_until),
-                "status": new_coupon.status.value
+                "status": new_coupon.status.value,
+                "allowed_plan_types": new_coupon.allowed_plan_types
             }
         }
     except HTTPException:
