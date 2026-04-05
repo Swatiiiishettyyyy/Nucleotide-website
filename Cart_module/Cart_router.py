@@ -180,8 +180,7 @@ def add_to_cart(
             if len(member_names) == 1:
                 name = member_names[0]
                 message = (
-                    f"{name} is already selected for {existing_product_name} in your cart. "
-                    f"Remove that item from your cart first, or choose a different member."
+                    f"{name} is already in your cart. Please remove the existing item or select a different member."
                 )
             else:
                 if len(member_names) == 2:
@@ -189,8 +188,7 @@ def add_to_cart(
                 else:
                     members_str = ", ".join(member_names[:-1]) + f" and {member_names[-1]}"
                 message = (
-                    f"{members_str} are already selected for {existing_product_name} in your cart. "
-                    f"Remove that item from your cart first, or choose different members."
+                    f"{members_str} are already in your cart. Please remove the existing items or select different members."
                 )
             client_ip, user_agent = get_client_info(request) if request else (None, None)
             logger.warning(
@@ -200,10 +198,7 @@ def add_to_cart(
             )
             raise HTTPException(
                 status_code=422,
-                detail={
-                    "message": message,
-                    "conflicts": conflicts
-                }
+                detail=message
             )
         
         # Check if same product with same members already exists in cart
@@ -887,32 +882,15 @@ def view_cart(
         # No need to check cart items for coupon codes anymore
         pass
     
-    # Calculate discount amount (from product discounts - per product group, not per cart item row)
-    # For couple/family products, there are multiple cart item rows but discount applies once per product
-    total_product_discount = 0
-    processed_groups = set()
-    for item in cart_items:
-        # Skip if product is deleted or missing
-        if not item.product:
-            continue
-            
-        group_key = item.group_id or f"single_{item.id}"
-        if group_key not in processed_groups:
-            # Calculate discount once per product group
-            discount_per_item = item.product.Price - item.product.SpecialPrice
-            total_product_discount += discount_per_item * item.quantity
-            processed_groups.add(group_key)
-    discount_amount = total_product_discount
-    
-    # Calculate total savings
-    you_save = discount_amount + coupon_amount
-    
     # Calculate grand total
-    # Note: subtotal_amount already uses SpecialPrice (product discount is already applied)
-    # So we only subtract coupon_amount, not discount_amount
+    # subtotal_amount uses SpecialPrice, so we only subtract coupon_amount
     grand_total = subtotal_amount + delivery_charge - coupon_amount
-    # Ensure grand total is not negative
     grand_total = max(0.0, grand_total)
+
+    # you_save = coupon discount only
+    # MRP discount is already reflected in subtotal (SpecialPrice), so we don't double-count it
+    you_save = coupon_amount
+    discount_amount = 0  # kept for backward compat in summary response
 
     # Get cart_id from cart or first item
     if not cart_id and cart_items:
@@ -1014,7 +992,7 @@ def apply_coupon(
         
         cart_id = cart.id if cart else None
         
-        # Calculate subtotal and product discount
+        # Calculate subtotal
         subtotal_amount = 0.0
         grouped_items = {}
         for item in cart_items:
@@ -1024,30 +1002,22 @@ def apply_coupon(
             grouped_items[group_key].append(item)
         
         for group_key, items in grouped_items.items():
-            # Skip if group is empty (should not happen, but safety check)
             if not items:
                 continue
-                
             item = items[0]
             product = item.product
-            
-            # Skip if product is deleted or missing
             if not product:
                 continue
-                
             subtotal_amount += item.quantity * product.SpecialPrice
         
-        # Calculate product discount (from product discounts - per product group, not per cart item row)
+        # Calculate product discount (informational only)
         total_product_discount = 0.0
         processed_groups = set()
         for item in cart_items:
-            # Skip if product is deleted or missing
             if not item.product:
                 continue
-                
             group_key = item.group_id or f"single_{item.id}"
             if group_key not in processed_groups:
-                # Calculate discount once per product group
                 discount_per_item = item.product.Price - item.product.SpecialPrice
                 total_product_discount += discount_per_item * item.quantity
                 processed_groups.add(group_key)
@@ -1066,15 +1036,14 @@ def apply_coupon(
         
         # Coupon is now tracked in cart_coupons table, no need to update cart_items
         
-        # Calculate delivery charge and grand total (matching cart view calculation)
-        # Note: subtotal_amount already uses SpecialPrice (product discount is already applied)
-        # So we only subtract coupon_discount_amount, not total_product_discount
+        # Calculate delivery charge and grand total
         delivery_charge = 0.0
         grand_total = subtotal_amount + delivery_charge - coupon_discount_amount
         grand_total = max(0.0, grand_total)
-        
-        # Calculate total savings
-        you_save = total_product_discount + coupon_discount_amount
+
+        # you_save = coupon discount only
+        # MRP discount is already reflected in subtotal (SpecialPrice), so we don't double-count it
+        you_save = coupon_discount_amount
         
         # Audit log
         ip, user_agent = get_client_info(request)

@@ -340,7 +340,9 @@ def create_order_from_cart(
     address_id: Optional[int],
     cart_item_ids: List[int],
     razorpay_order_id: Optional[str] = None,
-    placed_by_member_id: Optional[int] = None
+    placed_by_member_id: Optional[int] = None,
+    prevalidated_coupon_code: Optional[str] = None,
+    prevalidated_coupon_discount: float = 0.0,
 ) -> Order:
     """
     Create order from cart items.
@@ -450,23 +452,28 @@ def create_order_from_cart(
         discount_per_item = product.Price - product.SpecialPrice
         discount += discount_per_item * item.quantity
     
-    # Get applied coupon from cart and re-validate to ensure accuracy
-    # This matches the cart view logic - recalculate discount based on current subtotal
-    applied_coupon = get_applied_coupon(db, user_id)
-    if applied_coupon:
-        coupon, calculated_discount, error_message = validate_and_calculate_discount(
-            db, applied_coupon.coupon_code, user_id, subtotal
-        )
+    # Use pre-validated coupon from router if provided (avoids double-validation
+    # which can falsely reject coupons due to usage already recorded from prior orders).
+    # Otherwise fall back to re-validating from the cart.
+    if prevalidated_coupon_code and prevalidated_coupon_discount > 0:
+        coupon_code = prevalidated_coupon_code
+        coupon_discount = prevalidated_coupon_discount
+        logger.info(f"Order will include pre-validated coupon '{coupon_code}' with discount of ₹{coupon_discount}")
+    else:
+        applied_coupon = get_applied_coupon(db, user_id)
+        if applied_coupon:
+            coupon, calculated_discount, error_message = validate_and_calculate_discount(
+                db, applied_coupon.coupon_code, user_id, subtotal, cart_items
+            )
 
-        if coupon and not error_message:
-            coupon_discount = calculated_discount
-            coupon_code = applied_coupon.coupon_code
-            logger.info(f"Order will include coupon '{coupon_code}' with discount of ₹{coupon_discount} (recalculated from subtotal ₹{subtotal})")
-        else:
-            # Coupon is no longer valid — do not apply discount
-            logger.warning(f"Coupon '{applied_coupon.coupon_code}' failed validation during order creation: {error_message}. Coupon will not be applied.")
-            coupon_discount = 0.0
-            coupon_code = None
+            if coupon and not error_message:
+                coupon_discount = calculated_discount
+                coupon_code = applied_coupon.coupon_code
+                logger.info(f"Order will include coupon '{coupon_code}' with discount of ₹{coupon_discount} (recalculated from subtotal ₹{subtotal})")
+            else:
+                logger.warning(f"Coupon '{applied_coupon.coupon_code}' failed validation during order creation: {error_message}. Coupon will not be applied.")
+                coupon_discount = 0.0
+                coupon_code = None
     
     # Calculate total amount
     # Note: subtotal already uses SpecialPrice (product discount is already applied)
@@ -1254,7 +1261,7 @@ def confirm_order_from_webhook(
             
             "total_amount": order.subtotal,
             "grand_total": order.total_amount,
-            "paid_amount": order.total_amount,
+            "paid_amount": sum(p["amount"] for p in payment_info) if payment_info else 0,
             "discount_coupon": {
                 "code": order.coupon_code,
                 "amount": order.coupon_discount

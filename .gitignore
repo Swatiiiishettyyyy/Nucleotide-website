@@ -58,3 +58,6 @@ Notifications.json
 invoice generation/billing.json
 Thyrocare B2C APIs.postman_collection.json
 firebase-service-account.json
+invoice generation/env.txt
+env.txt
+*.txt.env

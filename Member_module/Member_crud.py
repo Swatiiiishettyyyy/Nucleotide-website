@@ -383,7 +383,7 @@ def save_member(
             
             raise HTTPException(
                 status_code=422,
-                detail=f"Cannot edit '{req.name}' right now. This member is in your cart for {conflict_details}. Remove from cart first."
+                detail=f"'{req.name}' is currently in your cart and cannot be edited. Please remove them from your cart first."
             )
     
     if req.member_id == 0:

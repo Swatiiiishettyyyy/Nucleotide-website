@@ -374,6 +374,10 @@ def create_order(
             existing_order.payment_status = PaymentStatus.PENDING  # Denormalized
             existing_order.status_updated_at = now_ist()
             existing_order.updated_at = now_ist()
+            # Sync coupon and totals in case coupon was applied/changed since first attempt
+            existing_order.coupon_code = applied_coupon.coupon_code if applied_coupon and coupon_discount > 0 else None
+            existing_order.coupon_discount = coupon_discount
+            existing_order.total_amount = total_amount
             
             # Create new payment record for retry
             from .Order_model import Payment, PaymentTransition
@@ -456,7 +460,9 @@ def create_order(
                 address_id=primary_address_id,
                 cart_item_ids=cart_item_ids,
                 razorpay_order_id=razorpay_order.get("id"),
-                placed_by_member_id=placed_by_member_id
+                placed_by_member_id=placed_by_member_id,
+                prevalidated_coupon_code=applied_coupon.coupon_code if applied_coupon and coupon_discount > 0 else None,
+                prevalidated_coupon_discount=coupon_discount,
             )
             
             logger.info(f"Order {order.order_number} created for user {current_user.id}")
@@ -1429,6 +1435,7 @@ def get_orders(
             "razorpay_invoice_url": getattr(order, "razorpay_invoice_url", None),
             "razorpay_invoice_status": getattr(order, "razorpay_invoice_status", None),
             "created_at": to_ist_isoformat(order.created_at),
+            "order_date": to_ist_isoformat(order.status_updated_at or order.created_at),
             "items": order_items
         })
     
@@ -1925,6 +1932,7 @@ def get_order(
         "razorpay_invoice_url": getattr(order, "razorpay_invoice_url", None),
         "razorpay_invoice_status": getattr(order, "razorpay_invoice_status", None),
         "created_at": to_ist_isoformat(order.created_at),
+        "order_date": to_ist_isoformat(order.status_updated_at or order.created_at),
         "status_updated_at": to_ist_isoformat(order.status_updated_at),
         "payment_confirmed_at": to_ist_isoformat(payment_confirmed_at),
         "payment_failed_at": to_ist_isoformat(payment_failed_at),
@@ -2173,7 +2181,7 @@ def get_order_tracking(
         "data": {
             "order_id": order.id,
             "order_number": order.order_number,
-            "order_date": to_ist_isoformat(order.created_at),
+            "order_date": to_ist_isoformat(order.status_updated_at or order.created_at),
             "payment_status": order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status),
             "current_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
             "subtotal": order.subtotal,
@@ -3017,9 +3025,19 @@ async def test_invoice_email_generation(
                 _groups[group_key] = {"name": item_name, "amount": item.unit_price * item.quantity}
         invoice_items = list(_groups.values())
 
-        # Prepare payment info
+        # Prepare payment info — use the most recent COMPLETED payment, fallback to latest
         payment_info = []
-        payment = db.query(Payment).filter(Payment.order_id == order.id).first()
+        payment = (
+            db.query(Payment)
+            .filter(Payment.order_id == order.id, Payment.payment_status == PaymentStatus.COMPLETED)
+            .order_by(Payment.created_at.desc())
+            .first()
+        ) or (
+            db.query(Payment)
+            .filter(Payment.order_id == order.id)
+            .order_by(Payment.created_at.desc())
+            .first()
+        )
         if payment:
             mode = "Razorpay"
             if payment.payment_method_details:
@@ -3050,7 +3068,7 @@ async def test_invoice_email_generation(
 
             "total_amount": order.subtotal,
             "grand_total": order.total_amount,
-            "paid_amount": order.total_amount,
+            "paid_amount": sum(p["amount"] for p in payment_info) if payment_info else 0,
             "discount_coupon": {
                 "code": order.coupon_code,
                 "amount": order.coupon_discount
