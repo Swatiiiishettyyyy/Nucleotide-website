@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy import inspect
 
 revision: str = "055_add_coupon_usages_and_plan_types"
-down_revision: Union[str, None] = "068_thyrocare_sku_id"
+down_revision: Union[str, None] = "7b9cfffc6882"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

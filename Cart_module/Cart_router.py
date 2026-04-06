@@ -14,7 +14,7 @@ from Product_module.Product_model import Product, PlanType
 from Address_module.Address_model import Address
 from Member_module.Member_model import Member
 from Login_module.User.user_model import User
-from .Cart_schema import CartAdd, CartUpdate, ApplyCouponRequest, CouponCreate
+from .Cart_schema import CartAdd, CartUpdate, ApplyCouponRequest, CouponCreate, AllowlistAddRequest, AllowlistRemoveRequest, AllowlistEntryResponse
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user, get_current_member
 from Login_module.Utils.datetime_utils import to_ist_isoformat
@@ -25,7 +25,8 @@ from .coupon_service import (
     remove_coupon_from_cart,
     validate_and_calculate_discount,
     is_coupon_usage_limit_reached,
-    get_coupon_usage_count
+    get_coupon_usage_count,
+    is_user_allowed_for_coupon
 )
 from .Coupon_model import Coupon, CouponType, CouponStatus
 
@@ -1200,6 +1201,10 @@ def list_coupons(
             if user_uses >= max_per_user:
                 continue  # This user already used up their allowance
 
+            # Check user allowlist restriction
+            if not is_user_allowed_for_coupon(db, coupon, current_user.id, current_user.mobile or ""):
+                continue
+
             # Get current usage count for display
             current_uses = get_coupon_usage_count(db, coupon.id)
             
@@ -1302,3 +1307,108 @@ def create_coupon(
         db.rollback()
         raise HTTPException(status_code=500, detail="Something went wrong while creating the coupon. Please try again.")
 
+
+
+@router.post("/admin/coupons/allowlist/add")
+def add_coupon_allowlist(
+    request_data: AllowlistAddRequest,
+    db: Session = Depends(get_db)
+):
+    """Add users to a coupon's allowlist (admin only)."""
+    from .Coupon_model import CouponAllowedUser
+    from sqlalchemy.exc import IntegrityError
+
+    coupon = db.query(Coupon).filter(
+        func.upper(Coupon.coupon_code) == request_data.coupon_code.upper().strip()
+    ).first()
+    if not coupon:
+        raise HTTPException(status_code=404, detail=f"Coupon '{request_data.coupon_code}' not found.")
+
+    added = 0
+    added_entries = []
+    for entry in request_data.entries:
+        # Check for existing entry to skip duplicates
+        existing = db.query(CouponAllowedUser).filter(
+            CouponAllowedUser.coupon_id == coupon.id,
+            (CouponAllowedUser.user_id == entry.user_id) if entry.user_id else (CouponAllowedUser.mobile == entry.mobile)
+        ).first()
+        if existing:
+            continue
+        new_entry = CouponAllowedUser(
+            coupon_id=coupon.id,
+            user_id=entry.user_id,
+            mobile=entry.mobile
+        )
+        db.add(new_entry)
+        try:
+            db.flush()
+            added += 1
+            added_entries.append(new_entry)
+        except IntegrityError:
+            db.rollback()
+    db.commit()
+    for e in added_entries:
+        db.refresh(e)
+    return {
+        "status": "success",
+        "added": added,
+        "entries": [{"id": e.id, "coupon_id": e.coupon_id, "user_id": e.user_id, "mobile": e.mobile} for e in added_entries]
+    }
+
+
+@router.delete("/admin/coupons/allowlist/remove")
+def remove_coupon_allowlist(
+    request_data: AllowlistRemoveRequest,
+    db: Session = Depends(get_db)
+):
+    """Remove users from a coupon's allowlist (admin only)."""
+    from .Coupon_model import CouponAllowedUser
+
+    coupon = db.query(Coupon).filter(
+        func.upper(Coupon.coupon_code) == request_data.coupon_code.upper().strip()
+    ).first()
+    if not coupon:
+        raise HTTPException(status_code=404, detail=f"Coupon '{request_data.coupon_code}' not found.")
+
+    removed = 0
+    for entry in request_data.entries:
+        if entry.user_id is not None:
+            result = db.query(CouponAllowedUser).filter(
+                CouponAllowedUser.coupon_id == coupon.id,
+                CouponAllowedUser.user_id == entry.user_id
+            ).first()
+        else:
+            result = db.query(CouponAllowedUser).filter(
+                CouponAllowedUser.coupon_id == coupon.id,
+                CouponAllowedUser.mobile == entry.mobile
+            ).first()
+        if result:
+            db.delete(result)
+            removed += 1
+    db.commit()
+    return {"status": "success", "removed": removed}
+
+
+@router.get("/admin/coupons/allowlist")
+def get_coupon_allowlist(
+    coupon_code: str = Query(..., description="Coupon code to view allowlist for"),
+    db: Session = Depends(get_db)
+):
+    """View the allowlist for a coupon (admin only)."""
+    from .Coupon_model import CouponAllowedUser
+
+    coupon = db.query(Coupon).filter(
+        func.upper(Coupon.coupon_code) == coupon_code.upper().strip()
+    ).first()
+    if not coupon:
+        raise HTTPException(status_code=404, detail=f"Coupon '{coupon_code}' not found.")
+
+    entries = db.query(CouponAllowedUser).filter(
+        CouponAllowedUser.coupon_id == coupon.id
+    ).all()
+    return {
+        "status": "success",
+        "coupon_code": coupon.coupon_code,
+        "total": len(entries),
+        "entries": [{"id": e.id, "coupon_id": e.coupon_id, "user_id": e.user_id, "mobile": e.mobile} for e in entries]
+    }

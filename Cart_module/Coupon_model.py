@@ -1,7 +1,7 @@
 """
 Coupon model for managing discount coupons.
 """
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, func, Enum, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, func, Enum, ForeignKey, UniqueConstraint, CheckConstraint
 from sqlalchemy.orm import relationship
 from database import Base
 from Login_module.Utils.datetime_utils import now_ist
@@ -63,6 +63,7 @@ class Coupon(Base):
     # Relationships
     cart_applications = relationship("CartCoupon", back_populates="coupon", cascade="all, delete-orphan")
     usages = relationship("CouponUsage", back_populates="coupon", cascade="all, delete-orphan")
+    allowed_users = relationship("CouponAllowedUser", back_populates="coupon", cascade="all, delete-orphan")
 
 
 class CartCoupon(Base):
@@ -99,3 +100,24 @@ class CouponUsage(Base):
 
     coupon = relationship("Coupon", back_populates="usages")
 
+
+
+class CouponAllowedUser(Base):
+    """
+    Restricts a coupon to specific users (by user_id or mobile number).
+    If a coupon has any rows here, only those users/mobiles may apply it.
+    """
+    __tablename__ = "coupon_allowed_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    coupon_id = Column(Integer, ForeignKey("coupons.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True, index=True)
+    mobile = Column(String(100), nullable=True, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("coupon_id", "user_id", name="uq_coupon_user_id"),
+        UniqueConstraint("coupon_id", "mobile", name="uq_coupon_mobile"),
+        CheckConstraint("user_id IS NOT NULL OR mobile IS NOT NULL", name="ck_coupon_allowed_users_not_both_null"),
+    )
+
+    coupon = relationship("Coupon", back_populates="allowed_users")

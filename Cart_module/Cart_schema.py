@@ -148,3 +148,34 @@ class CouponCreate(BaseModel):
         if v.lower() not in ['active', 'inactive', 'expired']:
             raise ValueError('status must be "active", "inactive", or "expired"')
         return v.lower()
+
+
+class AllowlistEntry(BaseModel):
+    user_id: Optional[int] = None
+    mobile: Optional[str] = None
+
+    @validator("mobile", always=True)
+    def at_least_one(cls, mobile, values):
+        if not values.get("user_id") and not mobile:
+            raise ValueError("At least one of user_id or mobile is required")
+        return mobile
+
+
+class AllowlistAddRequest(BaseModel):
+    coupon_code: str
+    entries: List[AllowlistEntry]
+
+
+class AllowlistRemoveRequest(BaseModel):
+    coupon_code: str
+    entries: List[AllowlistEntry]
+
+
+class AllowlistEntryResponse(BaseModel):
+    id: int
+    coupon_id: int
+    user_id: Optional[int] = None
+    mobile: Optional[str] = None
+
+    class Config:
+        orm_mode = True

@@ -12,6 +12,28 @@ from Login_module.Utils.datetime_utils import now_ist
 logger = logging.getLogger(__name__)
 
 
+def is_user_allowed_for_coupon(db: Session, coupon, user_id: int, mobile: str) -> bool:
+    """
+    Returns True if the coupon is unrestricted OR the user is on the allowlist.
+    A coupon is unrestricted when it has zero coupon_allowed_users rows.
+    """
+    from .Coupon_model import CouponAllowedUser
+    from sqlalchemy import or_
+    count = db.query(func.count(CouponAllowedUser.id)).filter(
+        CouponAllowedUser.coupon_id == coupon.id
+    ).scalar() or 0
+    if count == 0:
+        return True  # unrestricted — no allowlist entries
+    match = db.query(CouponAllowedUser).filter(
+        CouponAllowedUser.coupon_id == coupon.id,
+        or_(
+            CouponAllowedUser.user_id == user_id,
+            CouponAllowedUser.mobile == mobile
+        )
+    ).first()
+    return match is not None
+
+
 def validate_and_calculate_discount(
     db: Session,
     coupon_code: str,
@@ -46,6 +68,13 @@ def validate_and_calculate_discount(
         return None, 0.0, "Invalid coupon code."
 
     logger.info(f"Found coupon: {coupon.coupon_code} (ID: {coupon.id}, Status: {coupon.status})")
+
+    # Check user allowlist restriction
+    from Login_module.User.user_model import User as _User
+    _user = db.query(_User).filter(_User.id == user_id).first()
+    _mobile = _user.mobile if _user else ""
+    if not is_user_allowed_for_coupon(db, coupon, user_id, _mobile or ""):
+        return None, 0.0, "Invalid coupon code."
 
     # Check active status
     if coupon.status != CouponStatus.ACTIVE:
