@@ -57,7 +57,6 @@ class VerifyOTPRequest(BaseModel):
 # Response schemas
 class OTPData(BaseModel):
     mobile: str
-    otp: str
     expires_in: int
     purpose: Optional[str]
 

@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     OTP_MAX_REQUESTS_PER_HOUR: int = 15  # 15 per hour
     OTP_MAX_FAILED_ATTEMPTS: int = 5  # Block after 5 failed attempts
     OTP_BLOCK_DURATION_SECONDS: int = 600  # 10 minutes block
+
+    # MSG91 configuration
+    MSG91_AUTH_KEY: str = ""
+    MSG91_OTP_TEMPLATE_ID: str = ""
+    MSG91_FLOW_URL: str = "https://api.msg91.com/api/v5/flow/"
+    MSG91_SHORT_URL: int = 0
+    MSG91_REALTIME_RESPONSE: int = 1
     
     # Session management
     MAX_ACTIVE_SESSIONS: int = 4  # Max 4 active sessions per user
