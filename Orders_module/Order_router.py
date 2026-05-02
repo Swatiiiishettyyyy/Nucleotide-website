@@ -2488,7 +2488,72 @@ def update_order_status_api(
                 send_notification_to_user(db, order.user_id, title, message, type=ntype)
             except Exception as notif_err:
                 logger.warning("Order status notification send error (order %s): %s", order.order_number, notif_err)
-        
+
+        # SMS: notify user when report is ready (best effort)
+        if status_data.status == OrderStatus.REPORT_READY:
+            try:
+                if settings.MSG91_REPORT_READY_TEMPLATE_ID and getattr(order, "user", None) and getattr(order.user, "mobile", None):
+                    from Login_module.Utils.phone_encryption import decrypt_phone
+                    from Login_module.OTP.msg91_service import send_flow
+                    _mobile = decrypt_phone(order.user.mobile)
+                    if _mobile:
+                        send_flow(
+                            "+91",
+                            _mobile,
+                            settings.MSG91_REPORT_READY_TEMPLATE_ID,
+                            variables={"url": "www.nucleotide.life"},
+                        )
+            except Exception as _sms_err:
+                logger.warning("Report-ready SMS failed (order=%s): %s", order.order_number, _sms_err)
+
+        # ── REPORT READY HTML EMAIL ────────────────────────────────────────────
+        if status_data.status == OrderStatus.REPORT_READY:
+            try:
+                import sys as _sys
+                from pathlib import Path as _Path
+
+                _rr_root = _Path(__file__).parent.parent
+                _rr_inv_gen = str(_rr_root / "invoice generation")
+                if _rr_inv_gen not in _sys.path:
+                    _sys.path.append(_rr_inv_gen)
+
+                from report_ready_email import send_report_ready_email
+
+                _rr_product_names = []
+                _rr_seen_groups: set = set()
+                for _rr_item in order.items:
+                    _rr_name = "Genetic Test Product"
+                    if _rr_item.snapshot and _rr_item.snapshot.product_data:
+                        _rr_name = _rr_item.snapshot.product_data.get("Name", _rr_name)
+                    elif _rr_item.product:
+                        _rr_name = _rr_item.product.Name
+                    _rr_gkey = None
+                    if _rr_item.snapshot and _rr_item.snapshot.cart_item_data:
+                        _rr_gkey = _rr_item.snapshot.cart_item_data.get("group_id")
+                    _rr_gkey = _rr_gkey or str(_rr_item.id)
+                    if _rr_gkey not in _rr_seen_groups:
+                        _rr_seen_groups.add(_rr_gkey)
+                        _rr_product_names.append(_rr_name)
+
+                if len(_rr_product_names) == 1:
+                    _rr_product_str = _rr_product_names[0]
+                elif _rr_product_names:
+                    _rr_product_str = ", ".join(_rr_product_names[:-1]) + " & " + _rr_product_names[-1]
+                else:
+                    _rr_product_str = "Genetic Test Product"
+
+                if getattr(order, "user", None) and getattr(order.user, "email", None):
+                    send_report_ready_email(
+                        to=order.user.email,
+                        name=(order.user.name if order.user else None) or "Valued Customer",
+                        product=_rr_product_str,
+                        service_account_file=str(_rr_root / settings.INVOICE_SERVICE_ACCOUNT_PATH),
+                        sender_email=settings.INFO_SENDER_EMAIL,
+                    )
+                    logger.info(f"Report ready email sent to {order.user.email} for order {order.order_number}")
+            except Exception as _rr_err:
+                logger.warning("Report-ready email failed (order=%s): %s", order.order_number, _rr_err)
+
         # Refresh order to get updated items
         db.refresh(order)
         
@@ -2734,6 +2799,22 @@ def schedule_order(
                 send_notification_to_user(db, order.user_id, title, message, type=ntype)
             except Exception as notif_err:
                 logger.warning("Schedule notification send error (order %s): %s", order.order_number, notif_err)
+
+        # SMS: notify user when sample collection slot is selected (best effort)
+        try:
+            if settings.MSG91_SLOT_SELECTED_TEMPLATE_ID and getattr(current_user, "mobile", None):
+                from Login_module.Utils.phone_encryption import decrypt_phone
+                from Login_module.OTP.msg91_service import send_flow
+                _mobile = decrypt_phone(current_user.mobile)
+                if _mobile:
+                    send_flow(
+                        "+91",
+                        _mobile,
+                        settings.MSG91_SLOT_SELECTED_TEMPLATE_ID,
+                        variables={"order_id": order.order_number},
+                    )
+        except Exception as _sms_err:
+            logger.warning("Slot-selected SMS failed (order=%s): %s", order.order_number, _sms_err)
 
         # Build simple response summarizing schedules
         scheduled_items: List[Dict[str, Any]] = []

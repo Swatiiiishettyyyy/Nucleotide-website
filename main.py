@@ -99,6 +99,8 @@ from Login_module.Device.scheduler import start_scheduler, shutdown_scheduler
 # Thyrocare Auth Task
 from Thyrocare_module.thyrocare_service import start_thyrocare_auth_task
 
+from config import settings
+
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Middleware to log HTTP requests and responses with status codes, and add token expiration headers."""
@@ -208,11 +210,41 @@ def initialize_database():
         logger.warning("Category seeding will be retried on next startup. Application will continue to start.")
 
 
+def _check_critical_settings() -> None:
+    # S3 settings are loaded via os.getenv() in individual service files, not via Settings
+    checks = [
+        (
+            not settings.MSG91_AUTH_KEY or not settings.MSG91_OTP_TEMPLATE_ID,
+            "MSG91_AUTH_KEY and/or MSG91_OTP_TEMPLATE_ID not set — /auth/send-otp will return 503"
+        ),
+        (
+            not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN or not settings.TWILIO_VERIFY_SERVICE_SID,
+            "TWILIO_* vars not set — /auth/twilio/* endpoints will return 503"
+        ),
+        (
+            not settings.THYROCARE_USERNAME or not settings.THYROCARE_PASSWORD,
+            "THYROCARE credentials not set — lab services will fail"
+        ),
+    ]
+    for is_missing, message in checks:
+        if is_missing:
+            logger.warning("CONFIG MISSING: %s", message)
+    import os as _os
+    raw = _os.environ.get("MSG91_OTP_TEMPLATE_ID", "__not_in_environ__")
+    logger.info(
+        "MSG91 config: AUTH_KEY=%s TEMPLATE_ID=%s | raw os.environ MSG91_OTP_TEMPLATE_ID=%s",
+        "set" if settings.MSG91_AUTH_KEY else "MISSING",
+        "set" if settings.MSG91_OTP_TEMPLATE_ID else "MISSING",
+        "set" if raw not in ("", "__not_in_environ__") else f"MISSING(value={repr(raw)})",
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
     try:
         logger.info("Starting application...")
+        _check_critical_settings()
         logger.info("Step 1: Initializing database...")
         initialize_database()
         logger.info("Step 2: Database initialization complete")

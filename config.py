@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # MSG91 configuration
     MSG91_AUTH_KEY: str = ""
     MSG91_OTP_TEMPLATE_ID: str = ""
+    MSG91_WELCOME_SMS_TEMPLATE_ID: str = "69f44d91ddb266e8b80172a3"
+    MSG91_SLOT_SELECTED_TEMPLATE_ID: str = "69f44ef4e1ffe4db810f7622"
+    MSG91_REPORT_READY_TEMPLATE_ID: str = "69f44dbf9fe3b2ab780d5982"
     MSG91_FLOW_URL: str = "https://api.msg91.com/api/v5/flow/"
     MSG91_SHORT_URL: int = 0
     MSG91_REALTIME_RESPONSE: int = 1
@@ -69,6 +72,7 @@ class Settings(BaseSettings):
     # Invoice Generation & Sending
     INVOICE_SERVICE_ACCOUNT_PATH: str = "invoice generation/billing.json"
     INVOICE_SENDER_EMAIL: str = "billing@nucleotide.life"
+    INFO_SENDER_EMAIL: str = "info@nucleotide.life"
     INVOICE_COMPANY_NAME: str = "Nucleotide Healthcare Pvt Ltd"
     INVOICE_COMPANY_ADDRESS: str = "Bangalore, Karnataka, India"
     INVOICE_PAN_NUMBER: str = "AADCE5479M"
@@ -79,6 +83,7 @@ class Settings(BaseSettings):
     INVOICE_LOGO_PATH: str = "invoice generation/logo.png"
     # Comma-separated BCC addresses for invoice emails, e.g. "a@x.com,b@x.com"
     INVOICE_BCC_EMAILS: str = ""
+    ORDER_CONFIRMATION_GIF_URL: str = "https://nucleotide-email-template.s3.ap-south-1.amazonaws.com/Delivery+Boy.gif"
 
     # Thyrocare Configuration
     THYROCARE_BASE_URL: str = "https://api-sandbox.thyrocare.com"
