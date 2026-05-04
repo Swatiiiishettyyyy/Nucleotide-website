@@ -1,7 +1,13 @@
+import enum
 from sqlalchemy import Column, Integer, ForeignKey, DateTime, func, String, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 from database import Base
 from Login_module.Utils.datetime_utils import now_ist
+
+
+class ProductType(str, enum.Enum):
+    GENETIC = "genetic"
+    BLOOD_TEST = "blood_test"
 
 
 class Cart(Base):
@@ -37,7 +43,8 @@ class CartItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     cart_id = Column(Integer, ForeignKey("carts.id", ondelete="CASCADE"), nullable=False, index=True)  # Foreign key to cart table
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)  # Keep for validation/security
-    product_id = Column(Integer, ForeignKey("products.ProductId"), nullable=False, index=True)
+    product_type = Column(String(20), nullable=False, default=ProductType.GENETIC.value, index=True)
+    product_id = Column(Integer, ForeignKey("products.ProductId"), nullable=True, index=True)
     address_id = Column(Integer, ForeignKey("addresses.id"), nullable=False, index=True)
     member_id = Column(Integer, ForeignKey("members.id"), nullable=False, index=True)
     quantity = Column(Integer, nullable=False, default=1)

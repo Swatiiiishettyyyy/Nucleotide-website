@@ -702,7 +702,10 @@ def view_cart(
         )
     
     all_cart_items = query.order_by(CartItem.group_id, CartItem.created_at).all()
-    
+    all_cart_items = [
+        i for i in all_cart_items
+        if str(getattr(i, 'product_type', 'genetic')).lower() != 'blood_test'
+    ]
     # If cart doesn't exist but user has items, create cart now
     if not cart and all_cart_items:
         cart = get_or_create_user_cart(db, current_user.id)
@@ -813,8 +816,9 @@ def view_cart(
         discount_per_item = product.Price - product.SpecialPrice
 
         cart_item_details.append({
-            "cart_id": item.cart_id,  # Simple cart_id number
-            "cart_item_ids": [i.id for i in items],  # All cart item IDs in this group
+            "product_type": "genetic",
+            "cart_id": item.cart_id,
+            "cart_item_ids": [i.id for i in items],
             "product_id": product.ProductId,
             "address_ids": address_ids,  # List of unique address IDs used
             "member_ids": member_ids,
@@ -897,10 +901,13 @@ def view_cart(
     if not cart_id and cart_items:
         cart_id = cart_items[0].cart_id if cart_items[0].cart_id else None
 
+    visible_line_count = len(cart_item_details)
+    visible_row_count = sum(len(entry["cart_item_ids"]) for entry in cart_item_details)
+
     summary = {
         "cart_id": cart_id,
-        "total_items": len(grouped_items),
-        "total_cart_items": len(cart_items),
+        "total_items": visible_line_count,
+        "total_cart_items": visible_row_count,
         "subtotal_amount": subtotal_amount,
         "discount_amount": discount_amount,
         "coupon_amount": coupon_amount,
@@ -921,8 +928,8 @@ def view_cart(
         action="VIEW",
         entity_type="CART",
         details={
-            "items_count": len(cart_items),
-            "product_groups": len(grouped_items),
+            "items_count": visible_row_count,
+            "product_groups": visible_line_count,
             "grand_total": grand_total,
             "cart_id": cart_id
         },
@@ -1006,6 +1013,8 @@ def apply_coupon(
             if not items:
                 continue
             item = items[0]
+            if str(getattr(item, 'product_type', 'genetic')).lower() == 'blood_test':
+                continue
             product = item.product
             if not product:
                 continue
