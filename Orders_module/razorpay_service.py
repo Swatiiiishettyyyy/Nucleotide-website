@@ -1,70 +1,128 @@
 """
 Razorpay payment gateway integration service.
-"""
-import razorpay
-import logging
-import hmac
-import hashlib
-from typing import Dict, Any, Optional
-from dotenv import load_dotenv
-import os
 
-load_dotenv()
+Switch test vs live via RAZORPAY_MODE in .env (test | live).
+Uses RAZORPAY_TEST_* or RAZORPAY_LIVE_* credentials from config.settings.
+"""
+import hashlib
+import hmac
+import logging
+from typing import Any, Dict, Optional
+
+import razorpay
+
+from config import settings
 
 logger = logging.getLogger(__name__)
 
-# Razorpay configuration
-RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
-RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
-RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET")
-
-if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
-    raise ValueError("RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must be set in .env file")
-
-if not RAZORPAY_WEBHOOK_SECRET:
-    logger.warning("RAZORPAY_WEBHOOK_SECRET not set. Webhook signature verification will fail.")
-
-# Initialize Razorpay client
-razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
-
-# Set API version (optional)
-# razorpay_client.set_app_details({"title": "Nucleotide", "version": "1.0.0"})
+_razorpay_client: Optional[razorpay.Client] = None
 
 
-def create_razorpay_order(amount: float, currency: str = "INR", receipt: Optional[str] = None, notes: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def get_razorpay_mode() -> str:
+    return (settings.RAZORPAY_MODE or "test").strip().lower()
+
+
+def get_razorpay_key_id() -> str:
+    return settings.RAZORPAY_KEY_ID or ""
+
+
+def get_razorpay_key_secret() -> str:
+    return settings.RAZORPAY_KEY_SECRET or ""
+
+
+def get_razorpay_webhook_secret() -> str:
+    return settings.RAZORPAY_WEBHOOK_SECRET or ""
+
+
+def get_razorpay_public_config() -> Dict[str, str]:
+    """Public values safe to return to the frontend (never include secrets)."""
+    return {
+        "razorpay_mode": get_razorpay_mode(),
+        "razorpay_key_id": get_razorpay_key_id(),
+    }
+
+
+def _ensure_razorpay_configured() -> None:
+    if not get_razorpay_key_id() or not get_razorpay_key_secret():
+        raise ValueError(
+            f"Razorpay credentials missing for mode '{get_razorpay_mode()}'. "
+            "Set RAZORPAY_TEST_* or RAZORPAY_LIVE_* (or legacy RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET) in .env."
+        )
+
+
+def get_razorpay_client() -> razorpay.Client:
+    """Return Razorpay client for the active mode (test or live)."""
+    global _razorpay_client
+    _ensure_razorpay_configured()
+    if _razorpay_client is None:
+        _razorpay_client = razorpay.Client(
+            auth=(get_razorpay_key_id(), get_razorpay_key_secret())
+        )
+        logger.info("Razorpay client initialized (mode=%s)", get_razorpay_mode())
+    return _razorpay_client
+
+
+def reset_razorpay_client() -> None:
+    """Clear cached client (e.g. after tests or config reload)."""
+    global _razorpay_client
+    _razorpay_client = None
+
+
+def __getattr__(name: str):
+    if name == "RAZORPAY_KEY_ID":
+        return get_razorpay_key_id()
+    if name == "RAZORPAY_KEY_SECRET":
+        return get_razorpay_key_secret()
+    if name == "RAZORPAY_WEBHOOK_SECRET":
+        return get_razorpay_webhook_secret()
+    if name == "razorpay_client":
+        return get_razorpay_client()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def create_razorpay_order(
+    amount: float,
+    currency: str = "INR",
+    receipt: Optional[str] = None,
+    notes: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Create a Razorpay order.
-    
+
     Args:
         amount: Amount in rupees (will be converted to paise)
         currency: Currency code (default: INR)
         receipt: Receipt ID for internal tracking
         notes: Additional notes/metadata
-    
+
     Returns:
         Razorpay order object
     """
     try:
-        # Convert rupees to paise (multiply by 100)
         amount_in_paise = int(amount * 100)
-        
-        order_data = {
+
+        order_data: Dict[str, Any] = {
             "amount": amount_in_paise,
             "currency": currency,
-            "payment_capture": 1,  # Auto-capture payment
+            "payment_capture": 1,
         }
-        
+
         if receipt:
             order_data["receipt"] = receipt
-        
+
         if notes:
             order_data["notes"] = notes
-        
-        order = razorpay_client.order.create(data=order_data)
-        
-        logger.info(f"Razorpay order created: {order.get('id')} for amount {amount}")
+
+        order = get_razorpay_client().order.create(data=order_data)
+
+        logger.info(
+            "Razorpay order created (mode=%s): %s for amount %s",
+            get_razorpay_mode(),
+            order.get("id"),
+            amount,
+        )
         return order
-    
+
     except razorpay.errors.BadRequestError as e:
         logger.error(f"Razorpay bad request error: {e}")
         raise ValueError(f"Invalid request to Razorpay: {str(e)}")
@@ -76,56 +134,40 @@ def create_razorpay_order(amount: float, currency: str = "INR", receipt: Optiona
         raise ValueError(f"Failed to create Razorpay order: {str(e)}")
 
 
-def verify_payment_signature(razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str) -> bool:
+def verify_payment_signature(
+    razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str
+) -> bool:
     """
     Verify Razorpay payment signature to ensure payment authenticity.
-    
-    Args:
-        razorpay_order_id: Razorpay order ID
-        razorpay_payment_id: Razorpay payment ID
-        razorpay_signature: Signature received from Razorpay
-    
-    Returns:
-        True if signature is valid, False otherwise
     """
     try:
-        # Create message to verify
         message = f"{razorpay_order_id}|{razorpay_payment_id}"
-        
-        # Generate expected signature
+
+        key_secret = get_razorpay_key_secret()
         generated_signature = hmac.new(
-            RAZORPAY_KEY_SECRET.encode('utf-8'),
-            message.encode('utf-8'),
-            hashlib.sha256
+            key_secret.encode("utf-8"),
+            message.encode("utf-8"),
+            hashlib.sha256,
         ).hexdigest()
-        
-        # Compare signatures (use constant-time comparison to prevent timing attacks)
+
         is_valid = hmac.compare_digest(generated_signature, razorpay_signature)
-        
+
         if is_valid:
             logger.info(f"Payment signature verified for order: {razorpay_order_id}")
         else:
             logger.warning(f"Invalid payment signature for order: {razorpay_order_id}")
-        
+
         return is_valid
-    
+
     except Exception as e:
         logger.error(f"Error verifying payment signature: {e}")
         return False
 
 
 def get_payment_details(payment_id: str) -> Optional[Dict[str, Any]]:
-    """
-    Get payment details from Razorpay.
-    
-    Args:
-        payment_id: Razorpay payment ID
-    
-    Returns:
-        Payment details or None if not found
-    """
+    """Get payment details from Razorpay."""
     try:
-        payment = razorpay_client.payment.fetch(payment_id)
+        payment = get_razorpay_client().payment.fetch(payment_id)
         return payment
     except razorpay.errors.BadRequestError as e:
         logger.error(f"Payment not found: {payment_id}, error: {e}")
@@ -136,17 +178,9 @@ def get_payment_details(payment_id: str) -> Optional[Dict[str, Any]]:
 
 
 def get_order_details(razorpay_order_id: str) -> Optional[Dict[str, Any]]:
-    """
-    Get Razorpay order details.
-    
-    Args:
-        razorpay_order_id: Razorpay order ID
-    
-    Returns:
-        Order details or None if not found
-    """
+    """Get Razorpay order details."""
     try:
-        order = razorpay_client.order.fetch(razorpay_order_id)
+        order = get_razorpay_client().order.fetch(razorpay_order_id)
         return order
     except razorpay.errors.BadRequestError as e:
         logger.error(f"Order not found: {razorpay_order_id}, error: {e}")
@@ -155,169 +189,33 @@ def get_order_details(razorpay_order_id: str) -> Optional[Dict[str, Any]]:
         logger.error(f"Error fetching order details: {e}")
         return None
 
-
-def create_razorpay_customer(
-    name: Optional[str] = None,
-    email: Optional[str] = None,
-    contact: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Create a Razorpay customer that can be reused for invoices.
-
-    At least one of name, email, or contact should be provided.
-    """
-    data: Dict[str, Any] = {}
-    if name:
-        data["name"] = name
-    if email:
-        data["email"] = email
-    if contact:
-        data["contact"] = contact
-
-    if not data:
-        raise ValueError("Cannot create Razorpay customer without any of name, email, or contact")
-
-    try:
-        customer = razorpay_client.customer.create(data=data)
-        logger.info(f"Razorpay customer created: {customer.get('id')}")
-        return customer
-    except razorpay.errors.BadRequestError as e:
-        error_str = str(e).lower()
-        # Razorpay returns 400 when a customer with the same email/contact already exists.
-        # In that case, fetch the existing customer instead of failing.
-        if "already exists" in error_str and data.get("email"):
-            logger.info(
-                f"Razorpay customer already exists for email {data['email']}. "
-                f"Fetching existing customer."
-            )
-            try:
-                # Razorpay customer search by email
-                result = razorpay_client.customer.all({"email": data["email"]})
-                items = result.get("items") or []
-                if items:
-                    existing = items[0]
-                    logger.info(f"Reusing existing Razorpay customer: {existing.get('id')}")
-                    return existing
-            except Exception as fetch_err:
-                logger.error(f"Failed to fetch existing Razorpay customer: {fetch_err}")
-        logger.error(f"Razorpay customer bad request error: {e}")
-        raise ValueError(f"Invalid request to Razorpay while creating customer: {str(e)}")
-    except razorpay.errors.ServerError as e:
-        logger.error(f"Razorpay customer server error: {e}")
-        raise ValueError(f"Razorpay server error while creating customer: {str(e)}")
-    except Exception as e:
-        logger.error(f"Error creating Razorpay customer: {e}")
-        raise ValueError(f"Failed to create Razorpay customer: {str(e)}")
-
-
-def create_razorpay_invoice_for_order(
-    customer_id: str,
-    order_number: str,
-    total_amount: float,
-    currency: str = "INR",
-    email: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Create a Razorpay invoice for a confirmed order using an existing customer_id.
-
-    This uses the public Razorpay example for creating an invoice with customer_id:
-    https://www.postman.com/razorpaydev/razorpay-public-workspace/request/llu74wr/create-an-invoice-with-customer-id?tab=body
-    """
-    try:
-        import time as _time
-        amount_in_paise = int(total_amount * 100)
-
-        invoice_data: Dict[str, Any] = {
-            "type": "invoice",
-            "date": int(_time.time()),  # Required by Razorpay: Unix timestamp of invoice date
-            "customer_id": customer_id,
-            "currency": currency,
-            "line_items": [
-                {
-                    "name": f"Order {order_number}",
-                    "amount": amount_in_paise,
-                    "currency": currency,
-                    "quantity": 1,
-                }
-            ],
-            # We only create the invoice now; email/SMS sending can be enabled later
-            "sms_notify": 0,
-            "email_notify": 0,
-            "notes": {
-                "order_number": order_number,
-            },
-        }
-
-        # Optionally attach email so it can be used later from Razorpay side
-        if email:
-            invoice_data["email"] = email
-
-        # Log invoice creation attempt with key details
-        logger.info(f"Creating Razorpay invoice for order {order_number} (customer_id={customer_id}, amount={total_amount} {currency})")
-        logger.debug(f"Invoice payload: {invoice_data}")
-
-        invoice = razorpay_client.invoice.create(data=invoice_data)
-
-        # Validate response contains required fields
-        if not invoice:
-            logger.error(f"Razorpay invoice.create() returned None for order {order_number}")
-            raise ValueError("Razorpay invoice.create() returned None - API call may have failed silently")
-
-        if not invoice.get("id"):
-            logger.error(f"Invoice response missing 'id' field for order {order_number}. Response: {invoice}")
-            raise ValueError(f"Invoice response incomplete - missing 'id' field. Got: {list(invoice.keys())}")
-
-        logger.info(f"Razorpay invoice created successfully: {invoice.get('id')} for order {order_number} (status: {invoice.get('status')})")
-        return invoice
-    except razorpay.errors.BadRequestError as e:
-        logger.error(f"Razorpay invoice bad request error for order {order_number}: {e}")
-        logger.error("Possible causes: Invalid customer_id, invoice feature not enabled in Razorpay account, or API key lacks invoice permissions")
-        logger.error("Check Razorpay Dashboard > Settings > Invoices and Settings > API Keys > Permissions")
-        raise ValueError(f"Invalid request to Razorpay: {str(e)}")
-    except razorpay.errors.ServerError as e:
-        logger.error(f"Razorpay invoice server error for order {order_number}: {e}")
-        logger.error("Razorpay API is experiencing issues. This may be temporary - retry may succeed.")
-        raise ValueError(f"Razorpay server error: {str(e)}")
-    except Exception as e:
-        logger.error(f"Error creating Razorpay invoice for order {order_number}: {e}", exc_info=True)
-        raise ValueError(f"Failed to create Razorpay invoice: {str(e)}")
-
-
 def verify_webhook_signature(webhook_body: str, webhook_signature: str) -> bool:
-    """
-    Verify Razorpay webhook signature using webhook secret.
-    
-    Args:
-        webhook_body: Raw webhook request body (as string)
-        webhook_signature: X-Razorpay-Signature header value
-    
-    Returns:
-        True if signature is valid, False otherwise
-    """
+    """Verify Razorpay webhook signature using the webhook secret for the active mode."""
     try:
-        if not RAZORPAY_WEBHOOK_SECRET:
-            logger.error("RAZORPAY_WEBHOOK_SECRET not configured. Cannot verify webhook signature.")
+        webhook_secret = get_razorpay_webhook_secret()
+        if not webhook_secret:
+            logger.error(
+                "Razorpay webhook secret not configured for mode '%s'. "
+                "Cannot verify webhook signature.",
+                get_razorpay_mode(),
+            )
             return False
-        
-        # Generate expected signature using webhook secret
+
         generated_signature = hmac.new(
-            RAZORPAY_WEBHOOK_SECRET.encode('utf-8'),
-            webhook_body.encode('utf-8'),
-            hashlib.sha256
+            webhook_secret.encode("utf-8"),
+            webhook_body.encode("utf-8"),
+            hashlib.sha256,
         ).hexdigest()
-        
-        # Compare signatures (use constant-time comparison to prevent timing attacks)
+
         is_valid = hmac.compare_digest(generated_signature, webhook_signature)
-        
+
         if is_valid:
-            logger.info("Webhook signature verified successfully")
+            logger.info("Webhook signature verified successfully (mode=%s)", get_razorpay_mode())
         else:
-            logger.warning("Invalid webhook signature")
-        
+            logger.warning("Invalid webhook signature (mode=%s)", get_razorpay_mode())
+
         return is_valid
-    
+
     except Exception as e:
         logger.error(f"Error verifying webhook signature: {e}")
         return False
-
-

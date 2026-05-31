@@ -18,6 +18,8 @@ class RazorpayOrderResponse(BaseModel):
     razorpay_order_id: str
     amount: float
     currency: str = "INR"
+    razorpay_key_id: str = Field(..., description="Razorpay key_id for checkout (matches RAZORPAY_MODE)")
+    razorpay_mode: str = Field(..., description="Active Razorpay mode: test or live")
 
 
 class VerifyPaymentRequest(BaseModel):
@@ -148,11 +150,6 @@ class OrderResponse(BaseModel):
     payment_method_details: Optional[str] = None
     payment_method_metadata: Optional[Dict[str, Any]] = None
     razorpay_order_id: Optional[str] = None
-    razorpay_customer_id: Optional[str] = None
-    razorpay_invoice_id: Optional[str] = None
-    razorpay_invoice_number: Optional[str] = None
-    razorpay_invoice_url: Optional[str] = None
-    razorpay_invoice_status: Optional[str] = None
     created_at: Optional[datetime] = None
     status_updated_at: Optional[datetime] = None
     payment_confirmed_at: Optional[datetime] = None

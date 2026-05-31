@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, JSON, Enum, ForeignKey, DateTime, Boolean, func
+from sqlalchemy import Column, Integer, String, Float, JSON, Enum, ForeignKey, DateTime, Boolean
 from sqlalchemy.orm import relationship
 from database import Base
 import enum
@@ -31,10 +31,10 @@ class Product(Base):
     SpecialPrice = Column(Float, nullable=False)      # Earlier sale_price
 
     ShortDescription = Column(String(500), nullable=False)
-    Discount = Column(String(50), nullable=False)
 
     Description = Column(String(2000), nullable=False)
     Images = Column(JSON, nullable=False)   # List of image URLs
+    Emi = Column(Float, nullable=True)
     
     # New fields for plan type and category
     plan_type = Column(Enum(PlanType), nullable=False, default=PlanType.SINGLE, index=True)

@@ -1,6 +1,7 @@
 import sys
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 _TEMPLATE_PATH = Path(__file__).parent.parent / "Email_template" / "order_confirmation_template.html"
 _HTML_TEMPLATE: str = _TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -27,6 +28,7 @@ def send_order_confirmation_email(
     sender_email: str = "info@nucleotide.life",
     gif_url: str = "",
     order_number: str = "",
+    order_tracking_url: str = "",
 ) -> dict:
     invoice_gen_path = str(Path(__file__).parent)
     if invoice_gen_path not in sys.path:
@@ -34,12 +36,19 @@ def send_order_confirmation_email(
 
     from nucleotide_invoice_sender_wo_file import InvoiceSender
 
+    if not order_tracking_url:
+        order_tracking_url = "https://www.nucleotide.life/track-order"
+    if order_number:
+        separator = "&" if "?" in order_tracking_url else "?"
+        order_tracking_url = f"{order_tracking_url.rstrip('/')}{separator}order_number={quote(order_number)}"
+
     html = (
         _HTML_TEMPLATE
         .replace("{customer_name}", customer_name or "Valued Customer")
         .replace("{products_text}", _build_products_text(items))
         .replace("{gif_url}", gif_url or "")
         .replace("{order_id}", order_number or "")
+        .replace("{order_tracking_url}", order_tracking_url)
     )
 
     order_line = f"Order ID: {order_number}\n\n" if order_number else ""

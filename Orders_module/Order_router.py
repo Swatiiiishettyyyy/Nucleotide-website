@@ -10,6 +10,7 @@ import uuid
 import logging
 import json
 
+from config import settings
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user, get_current_member
 from Login_module.Utils.datetime_utils import now_ist, to_ist_isoformat
@@ -36,13 +37,20 @@ from .Order_crud import (
     get_order_by_id,
     get_order_by_number,
     get_user_orders,
-    mark_payment_failed_or_cancelled
+    mark_payment_failed_or_cancelled,
+    repair_confirmed_order_item_statuses,
+    build_invoice_items_for_order,
+    finalize_verified_processing_order,
 )
-from .razorpay_service import create_razorpay_order, verify_webhook_signature, get_payment_details, create_razorpay_invoice_for_order, razorpay_client, RAZORPAY_KEY_ID
+from .razorpay_service import (
+    create_razorpay_order,
+    verify_webhook_signature,
+    get_payment_details,
+    get_razorpay_public_config,
+)
 from .Order_model import OrderStatus, PaymentStatus, PaymentMethod, Order, OrderItem, Payment, PaymentTransition, WebhookLog
 from Cart_module.Cart_model import CartItem, Cart
 from Notification_module.Notification_crud import send_notification_to_user
-import razorpay
 
 # Fixed password for PUT order status endpoint (admin/lab use)
 ORDER_STATUS_PASSWORD = "4567"
@@ -273,7 +281,6 @@ def create_order(
         # Calculate total amount (will be recalculated in create_order_from_cart with coupon)
         # This is just for Razorpay order creation - actual order will have correct totals
         subtotal = 0.0
-        delivery_charge = 0.0
         grouped_items = {}
         
         for item in cart_items:
@@ -333,8 +340,8 @@ def create_order(
         # Calculate total amount
         # Note: subtotal already uses SpecialPrice (product discount is already applied)
         # So we only subtract coupon_discount, not product_discount
-        # This matches the corrected cart calculation: grand_total = subtotal_amount + delivery_charge - coupon_amount
-        total_amount = subtotal + delivery_charge - coupon_discount
+        # Delivery is always free; subtotal already uses SpecialPrice.
+        total_amount = subtotal - coupon_discount
         total_amount = max(0.0, total_amount)  # Ensure not negative
 
         # Get all cart item IDs
@@ -467,12 +474,15 @@ def create_order(
             
             logger.info(f"Order {order.order_number} created for user {current_user.id}")
         
+        razorpay_config = get_razorpay_public_config()
         return RazorpayOrderResponse(
             order_id=order.id,
             order_number=order.order_number,
             razorpay_order_id=razorpay_order.get("id"),
             amount=total_amount,
-            currency="INR"
+            currency="INR",
+            razorpay_key_id=razorpay_config["razorpay_key_id"],
+            razorpay_mode=razorpay_config["razorpay_mode"],
         )
     
     except HTTPException:
@@ -510,10 +520,8 @@ def verify_payment(
 ):
     """
     Verify Razorpay payment from frontend.
-    Provides immediate feedback but does NOT confirm order.
-    Sets payment_status = PROCESSING and order_status = PROCESSING (frontend verified, waiting for webhook).
-    Order confirmation happens via webhook only.
-    Cart clearing happens via webhook only.
+    Confirms the order and clears the cart after a valid Razorpay signature.
+    Razorpay webhooks remain idempotent and can safely arrive later.
     """
     try:
         # First, verify order belongs to user BEFORE payment verification (security check)
@@ -552,7 +560,7 @@ def verify_payment(
                 order_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status)
             )
         
-        # Verify payment (frontend verification - sets PROCESSING, waiting for webhook)
+        # Verify payment and finalize the order.
         # Note: verify_payment_frontend commits the transaction internally
         from .Order_crud import verify_payment_frontend
         order = verify_payment_frontend(
@@ -566,11 +574,10 @@ def verify_payment(
         # Refresh order to get latest state
         db.refresh(order)
         
-        # Determine appropriate message based on status
         if order.order_status == OrderStatus.CONFIRMED:
             message = "Payment verified successfully. Order confirmed."
         else:
-            message = "Payment verified successfully. Waiting for confirmation..."
+            message = "Payment verified successfully."
         
         logger.info(f"Frontend payment verification successful for order {order.order_number} (user {current_user.id}). Payment status: {order.payment_status.value}")
         
@@ -1142,6 +1149,16 @@ def get_orders(
     all_orders = db.query(Order).options(joinedload(Order.payments)).filter(
         Order.user_id == current_user.id
     ).order_by(Order.created_at.desc()).all()
+
+    repaired_processing_order = False
+    for order in all_orders:
+        if finalize_verified_processing_order(db, order):
+            repaired_processing_order = True
+
+    if repaired_processing_order:
+        all_orders = db.query(Order).options(joinedload(Order.payments)).filter(
+            Order.user_id == current_user.id
+        ).order_by(Order.created_at.desc()).all()
     
     # Filter to only show CONFIRMED and later statuses
     POST_CONFIRMATION_STATUSES = {
@@ -1418,10 +1435,10 @@ def get_orders(
             "user_id": order.user_id,
             "address_id": order.address_id,
             "subtotal": order.subtotal,
-            "discount": order.discount,
+            "discount": 0.0,
             "coupon_code": order.coupon_code,
             "coupon_discount": order.coupon_discount,
-            "delivery_charge": order.delivery_charge,
+            "delivery_charge": 0.0,
             "total_amount": order.total_amount,
             "payment_status": order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status),
             "order_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
@@ -1429,11 +1446,6 @@ def get_orders(
             "payment_method": payment_method,
             "payment_method_details": payment_method_details,
             "payment_method_metadata": payment_method_metadata,
-            "razorpay_customer_id": getattr(order, "razorpay_customer_id", None),
-            "razorpay_invoice_id": getattr(order, "razorpay_invoice_id", None),
-            "razorpay_invoice_number": getattr(order, "razorpay_invoice_number", None),
-            "razorpay_invoice_url": getattr(order, "razorpay_invoice_url", None),
-            "razorpay_invoice_status": getattr(order, "razorpay_invoice_status", None),
             "created_at": to_ist_isoformat(order.created_at),
             "order_date": to_ist_isoformat(order.status_updated_at or order.created_at),
             "items": order_items
@@ -1621,7 +1633,6 @@ def get_orders(
 #             product_discount=product_discount,
 #             coupon_code=order.coupon_code,
 #             coupon_discount=order.coupon_discount,
-#             delivery_charge=order.delivery_charge,
 #             total_amount=order.total_amount,
 #             order_items=order_items_list
 #         ))
@@ -1915,10 +1926,10 @@ def get_order(
         "user_id": order.user_id,
         "address_id": order.address_id,
         "subtotal": order.subtotal,
-        "discount": order.discount,
+        "discount": 0.0,
         "coupon_code": order.coupon_code,
         "coupon_discount": order.coupon_discount,
-        "delivery_charge": order.delivery_charge,
+        "delivery_charge": 0.0,
         "total_amount": order.total_amount,
         "payment_status": order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status),
         "order_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
@@ -1926,11 +1937,6 @@ def get_order(
         "payment_method": payment_method,
         "payment_method_details": payment_method_details,
         "payment_method_metadata": payment_method_metadata,
-        "razorpay_customer_id": getattr(order, "razorpay_customer_id", None),
-        "razorpay_invoice_id": getattr(order, "razorpay_invoice_id", None),
-        "razorpay_invoice_number": getattr(order, "razorpay_invoice_number", None),
-        "razorpay_invoice_url": getattr(order, "razorpay_invoice_url", None),
-        "razorpay_invoice_status": getattr(order, "razorpay_invoice_status", None),
         "created_at": to_ist_isoformat(order.created_at),
         "order_date": to_ist_isoformat(order.status_updated_at or order.created_at),
         "status_updated_at": to_ist_isoformat(order.status_updated_at),
@@ -1993,6 +1999,12 @@ def get_order_tracking(
             "order_status": order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
             "payment_status": order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status)
         }
+
+    if repair_confirmed_order_item_statuses(db, order):
+        db.commit()
+        db.refresh(order)
+        for item in order.items:
+            db.refresh(item)
     
     # Filter order items by member if a member is selected
     # If member placed the order, show all items; otherwise show only items for that member
@@ -2188,7 +2200,7 @@ def get_order_tracking(
             "product_discount": product_discount,
             "coupon_code": order.coupon_code,
             "coupon_discount": order.coupon_discount,
-            "delivery_charge": order.delivery_charge,
+            "delivery_charge": 0.0,
             "total_amount": order.total_amount,
             "status_updated_at": to_ist_isoformat(order.status_updated_at),
             "payment_confirmed_at": to_ist_isoformat(payment_confirmed_at),
@@ -2507,52 +2519,54 @@ def update_order_status_api(
                 logger.warning("Report-ready SMS failed (order=%s): %s", order.order_number, _sms_err)
 
         # ── REPORT READY HTML EMAIL ────────────────────────────────────────────
-        if status_data.status == OrderStatus.REPORT_READY:
-            try:
-                import sys as _sys
-                from pathlib import Path as _Path
-
-                _rr_root = _Path(__file__).parent.parent
-                _rr_inv_gen = str(_rr_root / "invoice generation")
-                if _rr_inv_gen not in _sys.path:
-                    _sys.path.append(_rr_inv_gen)
-
-                from report_ready_email import send_report_ready_email
-
-                _rr_product_names = []
-                _rr_seen_groups: set = set()
-                for _rr_item in order.items:
-                    _rr_name = "Genetic Test Product"
-                    if _rr_item.snapshot and _rr_item.snapshot.product_data:
-                        _rr_name = _rr_item.snapshot.product_data.get("Name", _rr_name)
-                    elif _rr_item.product:
-                        _rr_name = _rr_item.product.Name
-                    _rr_gkey = None
-                    if _rr_item.snapshot and _rr_item.snapshot.cart_item_data:
-                        _rr_gkey = _rr_item.snapshot.cart_item_data.get("group_id")
-                    _rr_gkey = _rr_gkey or str(_rr_item.id)
-                    if _rr_gkey not in _rr_seen_groups:
-                        _rr_seen_groups.add(_rr_gkey)
-                        _rr_product_names.append(_rr_name)
-
-                if len(_rr_product_names) == 1:
-                    _rr_product_str = _rr_product_names[0]
-                elif _rr_product_names:
-                    _rr_product_str = ", ".join(_rr_product_names[:-1]) + " & " + _rr_product_names[-1]
-                else:
-                    _rr_product_str = "Genetic Test Product"
-
-                if getattr(order, "user", None) and getattr(order.user, "email", None):
-                    send_report_ready_email(
-                        to=order.user.email,
-                        name=(order.user.name if order.user else None) or "Valued Customer",
-                        product=_rr_product_str,
-                        service_account_file=str(_rr_root / settings.INVOICE_SERVICE_ACCOUNT_PATH),
-                        sender_email=settings.INFO_SENDER_EMAIL,
-                    )
-                    logger.info(f"Report ready email sent to {order.user.email} for order {order.order_number}")
-            except Exception as _rr_err:
-                logger.warning("Report-ready email failed (order=%s): %s", order.order_number, _rr_err)
+        # Genetic report-ready email is disabled for now. Keep the code here so
+        # it can be re-enabled without rebuilding the email integration.
+        # if status_data.status == OrderStatus.REPORT_READY:
+        #     try:
+        #         import sys as _sys
+        #         from pathlib import Path as _Path
+        #
+        #         _rr_root = _Path(__file__).parent.parent
+        #         _rr_inv_gen = str(_rr_root / "invoice generation")
+        #         if _rr_inv_gen not in _sys.path:
+        #             _sys.path.append(_rr_inv_gen)
+        #
+        #         from report_ready_email import send_report_ready_email
+        #
+        #         _rr_product_names = []
+        #         _rr_seen_groups: set = set()
+        #         for _rr_item in order.items:
+        #             _rr_name = "Genetic Test Product"
+        #             if _rr_item.snapshot and _rr_item.snapshot.product_data:
+        #                 _rr_name = _rr_item.snapshot.product_data.get("Name", _rr_name)
+        #             elif _rr_item.product:
+        #                 _rr_name = _rr_item.product.Name
+        #             _rr_gkey = None
+        #             if _rr_item.snapshot and _rr_item.snapshot.cart_item_data:
+        #                 _rr_gkey = _rr_item.snapshot.cart_item_data.get("group_id")
+        #             _rr_gkey = _rr_gkey or str(_rr_item.id)
+        #             if _rr_gkey not in _rr_seen_groups:
+        #                 _rr_seen_groups.add(_rr_gkey)
+        #                 _rr_product_names.append(_rr_name)
+        #
+        #         if len(_rr_product_names) == 1:
+        #             _rr_product_str = _rr_product_names[0]
+        #         elif _rr_product_names:
+        #             _rr_product_str = ", ".join(_rr_product_names[:-1]) + " & " + _rr_product_names[-1]
+        #         else:
+        #             _rr_product_str = "Genetic Test Product"
+        #
+        #         if getattr(order, "user", None) and getattr(order.user, "email", None):
+        #             send_report_ready_email(
+        #                 to=order.user.email,
+        #                 name=(order.user.name if order.user else None) or "Valued Customer",
+        #                 product=_rr_product_str,
+        #                 service_account_file=str(_rr_root / settings.INVOICE_SERVICE_ACCOUNT_PATH),
+        #                 sender_email=settings.INFO_SENDER_EMAIL,
+        #             )
+        #             logger.info(f"Report ready email sent to {order.user.email} for order {order.order_number}")
+        #     except Exception as _rr_err:
+        #         logger.warning("Report-ready email failed (order=%s): %s", order.order_number, _rr_err)
 
         # Refresh order to get updated items
         db.refresh(order)
@@ -2862,160 +2876,7 @@ def schedule_order(
         )
 
 
-# ==================== DIAGNOSTIC & INVOICE RETRY ENDPOINTS ====================
-
-
-@router.get("/debug/razorpay-invoice-test")
-async def test_razorpay_invoice_creation(
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Test Razorpay invoice API with minimal payload.
-    Helps diagnose permission issues and API configuration.
-    """
-    try:
-        # Step 1: Create test customer
-        test_customer = razorpay_client.customer.create(data={
-            "name": "Test Customer",
-            "email": "test@nucleotide.com"
-        })
-
-        # Step 2: Create test invoice
-        test_invoice = razorpay_client.invoice.create(data={
-            "type": "invoice",
-            "customer_id": test_customer["id"],
-            "currency": "INR",
-            "line_items": [{
-                "name": "Test Order",
-                "amount": 100,
-                "currency": "INR",
-                "quantity": 1
-            }]
-        })
-
-        return {
-            "status": "success",
-            "message": "Invoice API is working correctly",
-            "test_customer_id": test_customer.get("id"),
-            "test_invoice_id": test_invoice.get("id"),
-            "test_invoice_status": test_invoice.get("status"),
-            "test_invoice_url": test_invoice.get("short_url")
-        }
-
-    except razorpay.errors.BadRequestError as e:
-        return {
-            "status": "error",
-            "error_type": "BadRequestError",
-            "message": str(e),
-            "possible_causes": [
-                "Invoice feature not enabled in Razorpay account",
-                "API key lacks invoice creation permissions",
-                "Check Razorpay Dashboard > Settings > Invoices",
-                "Check Razorpay Dashboard > Settings > API Keys > Permissions"
-            ]
-        }
-    except razorpay.errors.ServerError as e:
-        return {
-            "status": "error",
-            "error_type": "ServerError",
-            "message": str(e),
-            "possible_causes": [
-                "Razorpay API is experiencing issues",
-                "This may be temporary - try again later"
-            ]
-        }
-    except Exception as e:
-        logger.error(f"Razorpay invoice test failed: {e}", exc_info=True)
-        return {
-            "status": "error",
-            "error_type": type(e).__name__,
-            "message": str(e)
-        }
-
-
-@router.post("/orders/{order_id}/retry-invoice")
-async def retry_invoice_creation(
-    order_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Manually retry invoice creation for a confirmed order.
-    Useful when invoice creation fails during webhook processing.
-    """
-    # Get order with user validation
-    order = db.query(Order).filter(
-        Order.id == order_id,
-        Order.user_id == current_user.id
-    ).first()
-
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    # Validate order state
-    if order.order_status != OrderStatus.CONFIRMED:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Can only create invoice for confirmed orders. Current status: {order.order_status}"
-        )
-
-    if order.razorpay_invoice_id:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invoice already exists: {order.razorpay_invoice_id}"
-        )
-
-    if not order.razorpay_customer_id:
-        raise HTTPException(
-            status_code=400,
-            detail="No Razorpay customer_id found. Cannot create invoice."
-        )
-
-    # Retry invoice creation
-    try:
-        logger.info(f"Manual invoice retry for order {order.order_number} (ID: {order.id}) by user {current_user.id}")
-
-        invoice = create_razorpay_invoice_for_order(
-            customer_id=order.razorpay_customer_id,
-            order_number=order.order_number,
-            total_amount=order.total_amount,
-            currency="INR",
-            email=order.user.email if order.user else None
-        )
-
-        # Update order with invoice details
-        order.razorpay_invoice_id = invoice.get("id")
-        order.razorpay_invoice_number = invoice.get("invoice_number") or invoice.get("number")
-        order.razorpay_invoice_url = invoice.get("short_url") or invoice.get("invoice_url") or invoice.get("pdf_url")
-        order.razorpay_invoice_status = invoice.get("status")
-
-        db.commit()
-        db.refresh(order)
-
-        logger.info(f"Manual invoice retry successful for order {order.order_number}: {order.razorpay_invoice_id}")
-
-        return {
-            "status": "success",
-            "message": "Invoice created successfully",
-            "invoice_id": order.razorpay_invoice_id,
-            "invoice_number": order.razorpay_invoice_number,
-            "invoice_url": order.razorpay_invoice_url,
-            "invoice_status": order.razorpay_invoice_status
-        }
-
-    except ValueError as e:
-        # Log and return error details
-        logger.error(f"Manual invoice retry failed for order {order.order_number}: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Invoice creation failed: {str(e)}"
-        )
-    except Exception as e:
-        logger.error(f"Unexpected error during manual invoice retry for order {order.order_number}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="An unexpected error occurred. Please try again or contact support."
-        )
+# ==================== CUSTOM INVOICE EMAIL TEST ENDPOINT ====================
 
 
 @router.post("/test-invoice-email/{order_id}")
@@ -3086,25 +2947,7 @@ async def test_invoice_email_generation(
             if order.address.postal_code: addr_parts.append(order.address.postal_code)
             customer_address_str = ", ".join(addr_parts)
 
-        # Build items list (Product Summary only)
-        # Group by group_id so couple/family packs appear as one line per pack,
-        # not one line per member. If no group_id, fall back to item id.
-        _groups: dict = {}
-        for item in order.items:
-            item_name = "Genetic Test Product"
-            if item.snapshot and item.snapshot.product_data:
-                item_name = item.snapshot.product_data.get("Name", item_name)
-            elif item.product:
-                item_name = item.product.Name
-
-            group_key = None
-            if item.snapshot and item.snapshot.cart_item_data:
-                group_key = item.snapshot.cart_item_data.get("group_id")
-            group_key = group_key or str(item.id)
-
-            if group_key not in _groups:
-                _groups[group_key] = {"name": item_name, "amount": item.unit_price * item.quantity}
-        invoice_items = list(_groups.values())
+        invoice_items = build_invoice_items_for_order(db, order)
 
         # Prepare payment info — use the most recent COMPLETED payment, fallback to latest
         payment_info = []
@@ -3132,7 +2975,7 @@ async def test_invoice_email_generation(
 
         # Build the final data dictionary exactly as expected by nucleotide_invoice
         invoice_data = {
-            "invoice_number": order.razorpay_invoice_id or order.razorpay_invoice_number or f"INV-{order.order_number}",
+            "invoice_number": f"INV-{order.order_number}",
             "invoice_date": now_ist().strftime("%B %d, %Y"),
             "order_number": order.order_number,
             "sac_code": settings.INVOICE_SAC_CODE,

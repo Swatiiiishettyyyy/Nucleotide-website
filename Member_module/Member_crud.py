@@ -2,42 +2,14 @@ from .Member_model import Member
 from .Member_audit_model import MemberAuditLog
 from sqlalchemy.orm import Session
 from Login_module.Utils.datetime_utils import to_ist_isoformat
-from sqlalchemy import or_, text
+from sqlalchemy import text
 from fastapi import HTTPException
-from typing import Any, Dict, Optional, Union
+from typing import Optional
 import logging
-
-from Product_module.category_service import resolve_category
 
 logger = logging.getLogger(__name__)
 
 _VALID_PLAN_TYPES = {"single", "couple", "family"}
-
-
-def _build_member_api_key(user_id: int, member_id: int, dob, mobile: Optional[str]) -> str:
-    """Build a deterministic, human-readable member API key.
-
-    Pattern (example): nu1532100812345
-    - nu               : fixed prefix
-    - 15               : day of DOB (DD)
-    - 3210             : last 4 digits of mobile
-    - 08               : month of DOB (MM)
-    - 12               : user_id
-    - 345              : member_id
-    """
-    # Day and month as zero-padded 2-digit strings
-    day = f"{dob.day:02d}" if dob is not None else "00"
-    month = f"{dob.month:02d}" if dob is not None else "00"
-
-    # Extract digits from mobile and take last 4, padding if needed
-    digits = "".join(filter(str.isdigit, str(mobile))) if mobile else ""
-    if len(digits) >= 4:
-        last4 = digits[-4:]
-    else:
-        # Pad on the left with zeros if fewer than 4 digits
-        last4 = digits.zfill(4)
-
-    return f"nu{day}{last4}{month}{user_id}{member_id}"
 
 
 def _normalize_relation(relation: Optional[str]) -> str:
@@ -80,51 +52,10 @@ def _normalize_plan_type(plan_type: Optional[str]) -> Optional[str]:
     return plan
 
 
-def _family_member_count(db: Session, user_id: int, category_filter, exclude_member_id: Optional[int] = None) -> int:
-    """Count current family-plan members for a user/category."""
-    query = db.query(Member).filter(
-        Member.user_id == user_id,
-        Member.associated_plan_type == "family",
-        category_filter,
-        Member.is_deleted == False
-    )
-    if exclude_member_id:
-        query = query.filter(Member.id != exclude_member_id)
-    return query.count()
-
-
-def _build_family_plan_status(db: Session, user_id: int, member: Member) -> Optional[Dict[str, Any]]:
-    """Return family-plan progress details for the member's category."""
-    if member.associated_plan_type != "family":
-        return None
-
-    category_filter = or_(
-        Member.associated_category_id == member.associated_category_id,
-        Member.associated_category == member.associated_category,
-    )
-    total_members = _family_member_count(db, user_id, category_filter)
-    mandatory_slots_remaining = max(0, 3 - total_members)
-    optional_slot_available = total_members < 4
-
-    if mandatory_slots_remaining > 0:
-        status = "incomplete"
-    elif optional_slot_available:
-        status = "ready"
-    else:
-        status = "full"
-
-    return {
-        "total_members": total_members,
-        "mandatory_slots_remaining": mandatory_slots_remaining,
-        "optional_slot_available": optional_slot_available,
-        "status": status,
-    }
-
 def save_member(
     db: Session,
     user,
     req,
-    category_id: Optional[int] = None,
     plan_type: Optional[str] = None,
     ip_address: Optional[str] = None,
     user_agent: Optional[str] = None,
@@ -132,20 +63,12 @@ def save_member(
 ):
     """
     Save or update member (create if member_id=0, update if member_id>0).
-    For new members: category_id and plan_type are required.
-    For existing members: category_id and plan_type are ignored (preserved from existing member).
-    Validates that member is not already in a conflicting plan type.
+    The member table no longer stores plan/category associations.
+    The optional plan_type argument is accepted only for backward-compatible validation.
     Prevents editing if member is associated with cart items.
     """
-    plan_type_normalized = _normalize_plan_type(plan_type)
-    family_status: Optional[Dict[str, Any]] = None
-
-    category_obj = resolve_category(db, category_id)
-    category_name = category_obj.name
-    category_filter = or_(
-        Member.associated_category_id == category_obj.id,
-        Member.associated_category == category_name
-    )
+    _normalize_plan_type(plan_type)
+    family_status = None
 
     # Get relation value from request - it's already validated and trimmed by schema validator
     # The validator ensures it's not empty and trims it, so we can use it directly
@@ -195,7 +118,6 @@ def save_member(
             Member.user_id == user.id,
             Member.name == req.name,
             Member.relation == relation_to_store,
-            category_filter,
             Member.is_deleted == False
         ).first()
         
@@ -203,7 +125,7 @@ def save_member(
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"'{req.name}' with relation '{req.relation}' already exists in the '{category_name}' category. This member is already there."
+                    f"'{req.name}' with relation '{req.relation}' already exists. This member is already there."
                 )
             )
         
@@ -213,7 +135,6 @@ def save_member(
             Member.user_id == user.id,
             Member.name == req.name,
             Member.relation == relation_to_store,
-            category_filter,
             Member.is_deleted == True
         ).first()
         
@@ -238,27 +159,11 @@ def save_member(
             if hasattr(req, 'email'):
                 deleted_member.email = getattr(req, 'email', None)
 
-            # Ensure restored member has an API key; build from current fields if missing
-            if not getattr(deleted_member, "api_key", None):
-                deleted_member.api_key = _build_member_api_key(
-                    user_id=deleted_member.user_id,
-                    member_id=deleted_member.id,
-                    dob=deleted_member.dob,
-                    mobile=deleted_member.mobile,
-                )
-            
             # Preserve profile photo URL (restore original photo if it existed)
             deleted_member.profile_photo_url = preserved_profile_photo_url
             
             # Preserve is_self_profile flag (don't change primary profile status)
             deleted_member.is_self_profile = preserved_is_self_profile
-            
-            # Update category and plan type if provided (allows moving to different plan)
-            if category_obj:
-                deleted_member.associated_category = category_name
-                deleted_member.associated_category_id = category_obj.id
-            if plan_type_normalized:
-                deleted_member.associated_plan_type = plan_type_normalized
             
             # Update updated_at timestamp
             from Login_module.Utils.datetime_utils import now_ist
@@ -266,12 +171,6 @@ def save_member(
             
             db.commit()
             db.refresh(deleted_member)
-            
-            # Build family status if applicable
-            if deleted_member.associated_plan_type == "family":
-                family_status = _build_family_plan_status(db, user.id, deleted_member)
-            else:
-                family_status = None
             
             # Create audit log for restoration
             # Note: MemberAuditLog is already imported at the top of the file
@@ -294,52 +193,6 @@ def save_member(
             # Return restored member (skip the rest of the creation logic)
             return deleted_member, family_status
         
-        # If adding to family plan, check if member is already in personal/couple plan
-        if plan_type_normalized == "family":
-            conflicting_member = db.query(Member).filter(
-                Member.user_id == user.id,
-                Member.name == req.name,
-                category_filter,
-                Member.associated_plan_type.in_(["single", "couple"]),
-                Member.is_deleted == False
-            ).first()
-            
-            if conflicting_member:
-                plan = conflicting_member.associated_plan_type or "another plan"
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"{req.name} is already in your {plan} plan for {category_name}. "
-                        f"Please remove them there before adding again."
-                    )
-                )
-
-            current_family_members = _family_member_count(db, user.id, category_filter)
-            if current_family_members >= 4:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Family plan allows up to 4 members (3 mandatory + 1 optional). Remove an existing member before adding a new one."
-                )
-        else:
-            # If adding to personal/couple, check if member is in family plan
-            conflicting_member = db.query(Member).filter(
-                Member.user_id == user.id,
-                Member.name == req.name,
-                category_filter,
-                Member.associated_plan_type == "family",
-                Member.is_deleted == False
-            ).first()
-            
-            if conflicting_member:
-                plan = conflicting_member.associated_plan_type or "family"
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"{req.name} is already in your {plan} plan for {category_name}. "
-                        f"Please remove them there before adding again."
-                    )
-                )
-    
     old_data = None
     
     # If editing existing member, check if member is in cart
@@ -425,7 +278,6 @@ def save_member(
         
         # Create member with the relation value
         # IMPORTANT: relation_to_store has been validated and is guaranteed to be non-empty
-        # API key is built after we have a member ID (post-flush) using the agreed deterministic pattern.
         member = Member(
             user_id=user.id,
             name=req.name,
@@ -435,21 +287,10 @@ def save_member(
             dob=req.dob,
             mobile=member_mobile,  # Store as plain text
             email=getattr(req, 'email', None),  # Optional email field
-            associated_category=category_name,
-            associated_category_id=category_obj.id,
-            associated_plan_type=plan_type_normalized,
             is_self_profile=should_mark_as_self,  # Mark as self profile if first member with "Self" relation
         )
         db.add(member)
         db.flush()  # Flush to get the ID without committing
-
-        # Now that member.id is available, build the deterministic API key
-        member.api_key = _build_member_api_key(
-            user_id=user.id,
-            member_id=member.id,
-            dob=member.dob,
-            mobile=member.mobile,
-        )
         
         # CRITICAL: Verify the relation was set correctly BEFORE commit
         if not member.relation or str(member.relation).strip() == "":
@@ -619,9 +460,7 @@ def save_member(
             "gender": req.gender,
             "dob": to_ist_isoformat(req.dob) if req.dob else None,
             "mobile": req.mobile,
-            "email": getattr(req, 'email', None),
-            "category": category_name,
-            "plan_type": plan_type_normalized
+            "email": getattr(req, 'email', None)
         }
         # Note: new_data already has req.mobile (plaintext) which is fine for audit logs
         audit = MemberAuditLog(
@@ -652,12 +491,10 @@ def save_member(
             "gender": member.gender,
             "dob": to_ist_isoformat(member.dob) if member.dob else None,
             "mobile": member.mobile,
-            "email": member.email,
-            "category": member.associated_category,
-            "plan_type": member.associated_plan_type
+            "email": member.email
         }
         
-        # Update member fields (category and plan_type are preserved from existing member)
+        # Update member fields.
         # Ensure relation_to_store is not empty before updating
         if not relation_to_store or len(relation_to_store.strip()) == 0:
             raise ValueError(f"Cannot update member with empty relation. Received: '{req.relation}'")
@@ -673,7 +510,6 @@ def save_member(
         member.dob = req.dob
         member.mobile = req.mobile  # Store as plain text
         member.email = getattr(req, 'email', None)  # Optional email field
-        # Note: category_id and plan_type are not updated on edit to maintain data integrity
         # Note: is_self_profile is not updated on edit to protect primary profile
         
         # If this is a self-profile member, also update user table fields
@@ -831,9 +667,7 @@ def save_member(
             "age": member.age,  # Use actual stored value
             "gender": member.gender,  # Use actual stored value
             "dob": to_ist_isoformat(member.dob) if member.dob else None,  # Use actual stored value
-            "mobile": member.mobile,  # Use plain text value for audit log
-            "category": member.associated_category,
-            "plan_type": member.associated_plan_type
+            "mobile": member.mobile  # Use plain text value for audit log
         }
         
         audit = MemberAuditLog(
@@ -851,13 +685,10 @@ def save_member(
         db.add(audit)
         db.commit()
 
-    family_status = _build_family_plan_status(db, user.id, member)
-    
-    
     return member, family_status
 
-def get_members_by_user(db: Session, user, category: Optional[Union[int, str]] = None, plan_type: Optional[str] = None):
-    """Get members for user, optionally filtered by category and plan_type"""
+def get_members_by_user(db: Session, user, plan_type: Optional[str] = None):
+    """Get members for user. plan_type is ignored because members no longer store plan association."""
     import logging
     logger = logging.getLogger(__name__)
     
@@ -867,22 +698,15 @@ def get_members_by_user(db: Session, user, category: Optional[Union[int, str]] =
         logger.error(f"get_members_by_user: Invalid user object - no id attribute. User: {user}")
         return []
     
-    # Debug: Log query parameters
-    logger.info(f"get_members_by_user called: user_id={user_id}, category={category}, plan_type={plan_type}")
+    # Validate legacy query parameter without applying it to the member table.
+    _normalize_plan_type(plan_type)
+    logger.info(f"get_members_by_user called: user_id={user_id}")
     
     # Build base query - check both user_id types (int vs object)
     query = db.query(Member).filter(
         Member.user_id == user_id,
         Member.is_deleted == False
     )
-    
-    if category:
-        if isinstance(category, int):
-            query = query.filter(Member.associated_category_id == category)
-        else:
-            query = query.filter(Member.associated_category == category)
-    if plan_type:
-        query = query.filter(Member.associated_plan_type == plan_type)
     
     members = query.all()
     
@@ -901,23 +725,10 @@ def get_members_by_user(db: Session, user, category: Optional[Union[int, str]] =
             Member.is_deleted == False
         ).count()
         
-        # Check if category/plan_type filter is too restrictive
-        if category or plan_type:
-            unfiltered_count = db.query(Member).filter(
-                Member.user_id == user_id,
-                Member.is_deleted == False
-            ).count()
-            logger.warning(
-                f"No members found with filters | "
-                f"User ID: {user_id} | Category: {category} | Plan Type: {plan_type} | "
-                f"Unfiltered active members: {unfiltered_count} | "
-                f"Total members: {all_members_count} | Deleted: {deleted_members_count} | Active: {active_members_count}"
-            )
-        else:
-            logger.warning(
-                f"No active members found for user_id={user_id}. "
-                f"Total members: {all_members_count}, Deleted: {deleted_members_count}, Active: {active_members_count}"
-            )
+        logger.warning(
+            f"No active members found for user_id={user_id}. "
+            f"Total members: {all_members_count}, Deleted: {deleted_members_count}, Active: {active_members_count}"
+        )
     
     
     return members

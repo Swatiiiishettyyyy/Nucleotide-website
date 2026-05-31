@@ -673,6 +673,26 @@ def view_cart(
     Returns cart items with product_id, address_id, cart_id, member_id.
     Groups items by group_id for couple/family products.
     """
+    try:
+        from Orders_module.Order_model import Order, OrderStatus, PaymentStatus
+        from Orders_module.Order_crud import finalize_verified_processing_order
+
+        processing_orders = db.query(Order).filter(
+            Order.user_id == current_user.id,
+            Order.order_status == OrderStatus.PROCESSING,
+            Order.payment_status == PaymentStatus.PROCESSING,
+        ).order_by(Order.created_at.desc()).all()
+
+        for order in processing_orders:
+            finalize_verified_processing_order(db, order)
+    except Exception as repair_error:
+        logger.error(
+            "Error repairing verified processing order before cart view for user %s: %s",
+            current_user.id,
+            repair_error,
+            exc_info=True,
+        )
+
     # Get user's active cart (or create if doesn't exist and has items)
     cart = db.query(Cart).filter(
         Cart.user_id == current_user.id,
@@ -1245,6 +1265,7 @@ def list_coupons(
             }
         }
     except Exception as e:
+        logger.error("list_coupons failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Something went wrong while loading available coupons. Please try again.")
 
 

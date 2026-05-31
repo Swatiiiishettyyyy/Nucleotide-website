@@ -1,6 +1,11 @@
 import os
 from pydantic_settings import BaseSettings
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
+
+
+def _clean_env_value(value) -> str:
+    return str(value or "").strip().strip('"').strip("'")
+
 
 class Settings(BaseSettings):
     DATABASE_URL: str
@@ -59,6 +64,19 @@ class Settings(BaseSettings):
 
     ENVIRONMENT: str = "development"
 
+    # Razorpay — set RAZORPAY_MODE=test or live; keys resolved at startup (see resolve_razorpay_keys)
+    RAZORPAY_MODE: str = "test"
+    RAZORPAY_TEST_KEY_ID: str = ""
+    RAZORPAY_TEST_KEY_SECRET: str = ""
+    RAZORPAY_TEST_WEBHOOK_SECRET: str = ""
+    RAZORPAY_LIVE_KEY_ID: str = ""
+    RAZORPAY_LIVE_KEY_SECRET: str = ""
+    RAZORPAY_LIVE_WEBHOOK_SECRET: str = ""
+    # Resolved from mode; also accepts legacy RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET / RAZORPAY_WEBHOOK_SECRET
+    RAZORPAY_KEY_ID: str = ""
+    RAZORPAY_KEY_SECRET: str = ""
+    RAZORPAY_WEBHOOK_SECRET: str = ""
+
     # Twilio Verify API - for SMS verification (separate from custom OTP flow)
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
@@ -73,6 +91,7 @@ class Settings(BaseSettings):
     INVOICE_SERVICE_ACCOUNT_PATH: str = "invoice generation/billing.json"
     INVOICE_SENDER_EMAIL: str = "billing@nucleotide.life"
     INFO_SENDER_EMAIL: str = "info@nucleotide.life"
+    ORDER_TRACKING_BASE_URL: str = "https://www.nucleotide.life/track-order"
     INVOICE_COMPANY_NAME: str = "Nucleotide Healthcare Pvt Ltd"
     INVOICE_COMPANY_ADDRESS: str = "Bangalore, Karnataka, India"
     INVOICE_PAN_NUMBER: str = "AADCE5479M"
@@ -85,15 +104,9 @@ class Settings(BaseSettings):
     INVOICE_BCC_EMAILS: str = ""
     ORDER_CONFIRMATION_GIF_URL: str = "https://nucleotide-email-template.s3.ap-south-1.amazonaws.com/Delivery+Boy.gif"
 
-    # Thyrocare Configuration
-    THYROCARE_BASE_URL: str = "https://api-sandbox.thyrocare.com"
-    THYROCARE_USERNAME: str = ""
-    THYROCARE_PASSWORD: str = ""
-    THYROCARE_PARTNER_ID: str = ""
-    THYROCARE_CLIENT_TYPE: str = "All"
-    THYROCARE_REQUEST_ID: str = "Pass"
-    THYROCARE_ENTITY_TYPE: str = "DSA"
-    THYROCARE_PAY_TYPE: str = "POSTPAID"
+    # Google Maps / reverse geocoding
+    GOOGLE_MAPS_API_KEY: str = ""
+    VITE_GOOGLE_MAPS_API_KEY: str = ""
 
     model_config = ConfigDict(
         env_file=os.path.join(os.path.dirname(__file__), ".env"),
@@ -102,8 +115,73 @@ class Settings(BaseSettings):
         extra="ignore"  # Ignore extra env vars not defined in Settings
     )
 
+    @model_validator(mode="after")
+    def resolve_razorpay_keys(self) -> "Settings":
+        mode = (self.RAZORPAY_MODE or "test").strip().lower()
+        if mode not in {"test", "live"}:
+            raise ValueError("RAZORPAY_MODE must be either 'test' or 'live'")
+        self.RAZORPAY_MODE = mode
+
+        legacy_key_id = _clean_env_value(self.RAZORPAY_KEY_ID)
+        legacy_secret = _clean_env_value(self.RAZORPAY_KEY_SECRET)
+        legacy_webhook = _clean_env_value(self.RAZORPAY_WEBHOOK_SECRET)
+
+        if mode == "live":
+            self.RAZORPAY_KEY_ID = _clean_env_value(self.RAZORPAY_LIVE_KEY_ID) or legacy_key_id
+            self.RAZORPAY_KEY_SECRET = _clean_env_value(self.RAZORPAY_LIVE_KEY_SECRET) or legacy_secret
+            self.RAZORPAY_WEBHOOK_SECRET = (
+                _clean_env_value(self.RAZORPAY_LIVE_WEBHOOK_SECRET) or legacy_webhook
+            )
+        else:
+            self.RAZORPAY_KEY_ID = _clean_env_value(self.RAZORPAY_TEST_KEY_ID) or legacy_key_id
+            self.RAZORPAY_KEY_SECRET = _clean_env_value(self.RAZORPAY_TEST_KEY_SECRET) or legacy_secret
+            self.RAZORPAY_WEBHOOK_SECRET = (
+                _clean_env_value(self.RAZORPAY_TEST_WEBHOOK_SECRET) or legacy_webhook
+            )
+        return self
+
+
 # Create the settings instance
 settings = Settings()
+
+
+def _read_local_env_value(*names: str) -> str:
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    try:
+        with open(env_path, "r", encoding="utf-8") as env_file:
+            for raw_line in env_file:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                if key.strip() in names:
+                    return _clean_env_value(value.split(" #", 1)[0])
+    except OSError:
+        return ""
+    return ""
+
+
+def _first_config_value(*names: str) -> str:
+    for name in names:
+        value = _clean_env_value(getattr(settings, name, ""))
+        if value:
+            return value
+    for name in names:
+        value = _clean_env_value(os.getenv(name))
+        if value:
+            return value
+    return _read_local_env_value(*names)
+
+
+# Normalize MSG91 settings after BaseSettings loads. This covers local shells or
+# process managers that accidentally export empty values and shadow .env.
+settings.MSG91_AUTH_KEY = _first_config_value("MSG91_AUTH_KEY")
+settings.MSG91_OTP_TEMPLATE_ID = _first_config_value(
+    "MSG91_OTP_TEMPLATE_ID",
+    "MSG91_TEMPLATE_ID_OTP",
+    "MSG91_LOGIN_OTP_TEMPLATE_ID",
+)
+settings.MSG91_FLOW_URL = _first_config_value("MSG91_FLOW_URL") or settings.MSG91_FLOW_URL
 
 # Backward compatibility: If ACCESS_TOKEN_EXPIRE_SECONDS is set in env, use it
 # Otherwise, calculate from ACCESS_TOKEN_EXPIRE_MINUTES

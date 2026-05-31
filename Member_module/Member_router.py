@@ -28,10 +28,6 @@ from config import settings
 
 router = APIRouter(prefix="/member", tags=["Member"])
 
-# Standard header for passing the per-member API key from frontend to backend.
-# Frontend should read `api_key` from /member/current and send it as this header
-# on any request that needs to be associated with a specific member.
-MEMBER_API_KEY_HEADER_NAME = "X-Member-Api-Key"
 # HTTPBearer is optional; main authentication is handled by get_current_user,
 # which supports both cookies (web) and Authorization header (mobile/apps).
 security_scheme = HTTPBearer(auto_error=False)
@@ -39,15 +35,33 @@ security_scheme = HTTPBearer(auto_error=False)
 
 def _member_order_and_flag_fields(db: Session, member_id: int) -> dict:
     """Return has_taken_genetic_test, latest_order_*, and gene_report_* for member profile. Two queries: latest order (any status) and latest Report Ready order."""
-    from GeneticTest_module.GeneticTest_crud import (
-        get_participant_by_member_id,
-        get_latest_order_for_member,
-        get_latest_report_ready_order_for_member,
-    )
-    participant = get_participant_by_member_id(db, member_id)
-    has_taken_genetic_test = participant.has_taken_genetic_test if participant else False
-    latest = get_latest_order_for_member(db, member_id)
-    gene_report = get_latest_report_ready_order_for_member(db, member_id)
+    defaults = {
+        "has_taken_genetic_test": False,
+        "latest_order_no": None,
+        "latest_order_status": None,
+        "gene_report_order_no": None,
+        "gene_report_status": None,
+    }
+
+    try:
+        from GeneticTest_module.GeneticTest_crud import (
+            get_participant_by_member_id,
+            get_latest_order_for_member,
+            get_latest_report_ready_order_for_member,
+        )
+        participant = get_participant_by_member_id(db, member_id)
+        has_taken_genetic_test = participant.has_taken_genetic_test if participant else False
+        latest = get_latest_order_for_member(db, member_id)
+        gene_report = get_latest_report_ready_order_for_member(db, member_id)
+    except Exception as exc:
+        db.rollback()
+        logger.warning(
+            "Member order summary lookup failed for member %s: %s",
+            member_id,
+            exc,
+        )
+        return defaults
+
     return {
         "has_taken_genetic_test": has_taken_genetic_test,
         "latest_order_no": latest["order_number"] if latest else None,
@@ -128,13 +142,12 @@ def generate_token_with_member(
 def save_member_api(
     req: MemberRequest,
     request: Request,
-    category_id: Optional[int] = Query(None, description="Category ID (defaults to Genetic Testing)"),
+    http_response: Response,
     plan_type: Optional[str] = Query(None, description="Plan type: single, couple, or family"),
     db: Session = Depends(get_db),
     user = Depends(get_current_user),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
     access_token_cookie: Optional[str] = Cookie(None, alias="access_token"),
-    response: Response = None,
 ):
     """
     Create a new member (requires authentication).
@@ -151,7 +164,6 @@ def save_member_api(
     
     member, family_status = save_member(
         db, user, req,
-        category_id=category_id,
         plan_type=plan_type,
         ip_address=ip_address,
         user_agent=user_agent,
@@ -160,7 +172,7 @@ def save_member_api(
     if not member:
         logger.error(
             f"Member creation failed - Unable to create member | "
-            f"User ID: {user.id} | Category ID: {category_id} | Plan Type: {plan_type} | IP: {ip_address}"
+            f"User ID: {user.id} | Plan Type: {plan_type} | IP: {ip_address}"
         )
         raise HTTPException(status_code=404, detail="We couldn't create the family member profile. Please try again.")
 
@@ -237,13 +249,12 @@ def save_member_api(
         email=member.email,
         profile_photo_url=member.profile_photo_url,
         has_taken_genetic_test=fields["has_taken_genetic_test"],
-        api_key=getattr(member, "api_key", None),
         latest_order_no=fields["latest_order_no"],
         latest_order_status=fields["latest_order_status"],
         gene_report_order_no=fields["gene_report_order_no"],
         gene_report_status=fields["gene_report_status"],
     )
-    response = {
+    result = {
         "status": "success",
         "message": message,
         "data": member_data
@@ -277,8 +288,6 @@ def save_member_api(
             device_platform = payload.get("device_platform", "unknown")
             
             if not session_id:
-                import logging
-                logger = logging.getLogger(__name__)
                 logger.warning(f"No session_id in token for user {user.id} when creating first member")
             else:
                 # generate_token_with_member now validates session internally
@@ -289,12 +298,12 @@ def save_member_api(
                     device_platform=device_platform,
                     selected_member_id=member.id
                 )
-                response["token"] = new_token
-                response["token_type"] = "Bearer"
+                result["token"] = new_token
+                result["token_type"] = "Bearer"
 
                 # For web clients, also update the HttpOnly access_token cookie
-                if is_web_request and response is not None:
-                    response.set_cookie(
+                if is_web_request and http_response is not None:
+                    http_response.set_cookie(
                         key="access_token",
                         value=new_token,
                         path="/",
@@ -306,18 +315,14 @@ def save_member_api(
         except HTTPException:
             # Re-raise HTTP exceptions (like invalid token, invalid session)
             # Don't fail member creation, but log the error
-            import logging
-            logger = logging.getLogger(__name__)
             logger.warning(f"HTTP error generating token for first member (user {user.id}, member {member.id})", exc_info=True)
             # Continue without token - member is still created successfully
         except Exception as e:
             # Log error but don't fail the member creation
-            import logging
-            logger = logging.getLogger(__name__)
             logger.error(f"Error generating token for first member (user {user.id}, member {member.id}): {str(e)}", exc_info=True)
             # Continue without token - member is still created successfully
 
-    return response
+    return result
 
 # Update existing member
 @router.put("/edit/{member_id}", response_model=MemberResponse)
@@ -338,7 +343,7 @@ def edit_member_api(
     1. Send PUT request with member_id in path and only fields you want to change in body
     2. Endpoint autofills missing fields from existing member
     3. Cannot edit member if it's associated with cart items.
-    4. Category and plan_type cannot be changed during edit (preserved from existing member).
+    4. Member plan/category associations are no longer stored on member profiles.
     
     Example: To change only name, send: {"name": "New Name"}
     All other fields will be autofilled from existing member.
@@ -408,11 +413,10 @@ def edit_member_api(
     user_agent = request.headers.get("user-agent")
     correlation_id = str(uuid.uuid4())
     
-    # For edit, category_id and plan_type are not used (preserved from existing member)
+    # For edit, plan_type is not stored on members.
     member, family_status = save_member(
         db, user, complete_req,
-        category_id=None,  # Not used for edit
-        plan_type=None,    # Not used for edit
+        plan_type=None,
         ip_address=ip_address,
         user_agent=user_agent,
         correlation_id=correlation_id
@@ -454,7 +458,6 @@ def edit_member_api(
         email=member.email,
         profile_photo_url=member.profile_photo_url,
         has_taken_genetic_test=fields["has_taken_genetic_test"],
-        api_key=getattr(member, "api_key", None),
         latest_order_no=fields["latest_order_no"],
         latest_order_status=fields["latest_order_status"],
         gene_report_order_no=fields["gene_report_order_no"],
@@ -471,12 +474,11 @@ def edit_member_api(
 # Get list of members for user
 @router.get("/list", response_model=MemberListResponse)
 def get_member_list(
-    category_id: Optional[int] = Query(None, description="Filter by category ID"),
-    plan_type: Optional[str] = Query(None, description="Filter by plan type"),
+    plan_type: Optional[str] = Query(None, description="Deprecated; ignored because members no longer store plan association"),
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    members = get_members_by_user(db, user, category=category_id, plan_type=plan_type)
+    members = get_members_by_user(db, user, plan_type=plan_type)
     data = []
     for m in members:
         relation_value = str(m.relation) if m.relation is not None else ""
@@ -493,7 +495,6 @@ def get_member_list(
             "email": m.email,
             "profile_photo_url": m.profile_photo_url,
             "has_taken_genetic_test": fields["has_taken_genetic_test"],
-            "api_key": getattr(m, "api_key", None),
             "latest_order_no": fields["latest_order_no"],
             "latest_order_status": fields["latest_order_status"],
             "gene_report_order_no": fields["gene_report_order_no"],
@@ -621,9 +622,7 @@ def delete_member_api(
         "age": member.age,
         "gender": member.gender,
         "dob": to_ist_isoformat(member.dob) if member.dob else None,
-        "mobile": member.mobile,
-        "category": member.associated_category,
-        "plan_type": member.associated_plan_type
+        "mobile": member.mobile
     }
     
     # Get IP and user agent for audit log
@@ -920,7 +919,6 @@ def get_current_member_api(
             "email": current_member.email,
             "profile_photo_url": current_member.profile_photo_url,
             "has_taken_genetic_test": fields["has_taken_genetic_test"],
-            "api_key": getattr(current_member, "api_key", None),
             "latest_order_no": fields["latest_order_no"],
             "latest_order_status": fields["latest_order_status"],
             "gene_report_order_no": fields["gene_report_order_no"],

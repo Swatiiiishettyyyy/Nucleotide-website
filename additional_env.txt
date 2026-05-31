@@ -44,3 +44,20 @@ GOOGLE_OAUTH_REDIRECT_URI=https://uvhesg33fj.ap-south-1.awsapprunner.com/gmeet/a
 FRONTEND_COUNSELLOR_SUCCESS_URL=
 FRONTEND_COUNSELLOR_ERROR_URL=
 ENVIRONMENT=
+
+# ============================================
+# Razorpay (genetic checkout) — test vs live
+# ============================================
+# Set RAZORPAY_MODE to test or live (only these two values).
+# Keys are picked from RAZORPAY_TEST_* or RAZORPAY_LIVE_* automatically.
+# Legacy RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET / RAZORPAY_WEBHOOK_SECRET are optional fallbacks.
+#
+# RAZORPAY_MODE=test
+# RAZORPAY_TEST_KEY_ID=rzp_test_...
+# RAZORPAY_TEST_KEY_SECRET=...
+# RAZORPAY_TEST_WEBHOOK_SECRET=...
+# RAZORPAY_LIVE_KEY_ID=rzp_live_...
+# RAZORPAY_LIVE_KEY_SECRET=...
+# RAZORPAY_LIVE_WEBHOOK_SECRET=...
+#
+# Frontend: GET /config/payment or use razorpay_key_id from POST /orders/create response.

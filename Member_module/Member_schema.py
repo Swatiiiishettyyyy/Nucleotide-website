@@ -189,7 +189,6 @@ class MemberData(BaseModel):
     email: Optional[str] = None
     profile_photo_url: Optional[str] = None
     has_taken_genetic_test: Optional[bool] = False
-    api_key: Optional[str] = None
     latest_order_no: Optional[str] = None
     latest_order_status: Optional[str] = None
     gene_report_order_no: Optional[str] = None

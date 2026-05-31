@@ -17,6 +17,7 @@ class OrderStatus(str, enum.Enum):
     PENDING_PAYMENT = "PENDING_PAYMENT"  # Order created, waiting for payment
     PROCESSING = "PROCESSING"  # Frontend verified, waiting for webhook
     PAYMENT_FAILED = "PAYMENT_FAILED"  # Payment failed - order not confirmed
+    CANCELLED = "CANCELLED"  # Order/payment was cancelled before confirmation
     CONFIRMED = "CONFIRMED"  # Payment verified by webhook, order finalized
     COMPLETED = "COMPLETED"  # Order completed
     SCHEDULED = "SCHEDULED"
@@ -55,8 +56,6 @@ class Order(Base):
     
     # Order totals
     subtotal = Column(Float, nullable=False)
-    delivery_charge = Column(Float, default=0.0)
-    discount = Column(Float, default=0.0)
     coupon_code = Column(String(50), nullable=True, index=True)  # Applied coupon code (None if no coupon)
     coupon_discount = Column(Float, default=0.0)  # Discount from coupon
     total_amount = Column(Float, nullable=False)  # Final amount paid
@@ -71,13 +70,6 @@ class Order(Base):
     # Additional notes
     notes = Column(Text, nullable=True)
     
-    # Razorpay customer and invoice details (set after successful payment + invoice creation)
-    razorpay_customer_id = Column(String(255), nullable=True, index=True)
-    razorpay_invoice_id = Column(String(255), nullable=True, index=True)
-    razorpay_invoice_number = Column(String(255), nullable=True)
-    razorpay_invoice_url = Column(String(500), nullable=True)
-    razorpay_invoice_status = Column(String(50), nullable=True, index=True)
-
     # Timestamps
     created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=now_ist)
@@ -94,7 +86,7 @@ class OrderItem(Base):
     Each order item represents one product purchased for one member.
     Each item has its own status for tracking per-address delivery.
     """
-    __tablename__ = "order_items"
+    __tablename__ = "genetic_order_items"
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -169,7 +161,7 @@ class OrderStatusHistory(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
-    order_item_id = Column(Integer, ForeignKey("order_items.id", ondelete="CASCADE"), nullable=True, index=True)  # NULL for order-level status
+    order_item_id = Column(Integer, ForeignKey("genetic_order_items.id", ondelete="CASCADE"), nullable=True, index=True)  # NULL for order-level status
     status = Column(Enum(OrderStatus), nullable=False, index=True)
     previous_status = Column(Enum(OrderStatus), nullable=True)  # NULL for initial status
     notes = Column(Text, nullable=False)  # Additional notes about status change

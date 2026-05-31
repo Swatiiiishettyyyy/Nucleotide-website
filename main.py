@@ -1,4 +1,4 @@
-"""
+﻿"""
 Main FastAPI application entry point.
 """
 import os
@@ -78,6 +78,7 @@ from Login_module.Utils.audit_query import router as audit_router
 from Login_module.Token.Auth_token_router import router as auth_token_router  # Dual-token strategy endpoints
 from Member_module.Member_router import router as member_router
 from Orders_module.Order_router import router as order_router
+from Orders_module.payment_config_router import router as payment_config_router
 from Product_module.Product_router import router as product_router
 from PhoneChange_module.PhoneChange_router import router as phone_change_router
 from Newsletter_module.Newsletter_router import router as newsletter_router
@@ -96,9 +97,6 @@ except ImportError:
 # Scheduler
 from Login_module.Device.scheduler import start_scheduler, shutdown_scheduler
 
-# Thyrocare Auth Task
-from Thyrocare_module.thyrocare_service import start_thyrocare_auth_task
-
 from config import settings
 
 
@@ -110,7 +108,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         start_time = time.time()
         
         # Log incoming request
-        logger.info(f"→ {request.method} {request.url.path} | IP: {client_ip}")
+        logger.info(f"â†’ {request.method} {request.url.path} | IP: {client_ip}")
         
         try:
             response = await call_next(request)
@@ -139,16 +137,16 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             
             # Determine status code category and emoji
             if 200 <= status_code < 300:
-                status_emoji = "✅"
+                status_emoji = "âœ…"
                 status_category = "SUCCESS"
             elif 300 <= status_code < 400:
-                status_emoji = "⚠️"
+                status_emoji = "âš ï¸"
                 status_category = "REDIRECT"
             elif 400 <= status_code < 500:
-                status_emoji = "❌"
+                status_emoji = "âŒ"
                 status_category = "CLIENT_ERROR"
             else:
-                status_emoji = "💥"
+                status_emoji = "ðŸ’¥"
                 status_category = "SERVER_ERROR"
             
             # Log response with detailed status code information - make it more visible
@@ -167,7 +165,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         except Exception as e:
             duration = time.time() - start_time
             error_message = (
-                f"💥 {request.method} {request.url.path} | "
+                f"ðŸ’¥ {request.method} {request.url.path} | "
                 f"Status: 500 (SERVER_ERROR) | "
                 f"Error: {str(e)} | "
                 f"Duration: {duration:.3f}s | "
@@ -215,15 +213,11 @@ def _check_critical_settings() -> None:
     checks = [
         (
             not settings.MSG91_AUTH_KEY or not settings.MSG91_OTP_TEMPLATE_ID,
-            "MSG91_AUTH_KEY and/or MSG91_OTP_TEMPLATE_ID not set — /auth/send-otp will return 503"
+            "MSG91_AUTH_KEY and/or MSG91_OTP_TEMPLATE_ID not set â€” /auth/send-otp will return 503"
         ),
         (
             not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN or not settings.TWILIO_VERIFY_SERVICE_SID,
-            "TWILIO_* vars not set — /auth/twilio/* endpoints will return 503"
-        ),
-        (
-            not settings.THYROCARE_USERNAME or not settings.THYROCARE_PASSWORD,
-            "THYROCARE credentials not set — lab services will fail"
+            "TWILIO_* vars not set â€” /auth/twilio/* endpoints will return 503"
         ),
     ]
     for is_missing, message in checks:
@@ -236,6 +230,12 @@ def _check_critical_settings() -> None:
         "set" if settings.MSG91_AUTH_KEY else "MISSING",
         "set" if settings.MSG91_OTP_TEMPLATE_ID else "MISSING",
         "set" if raw not in ("", "__not_in_environ__") else f"MISSING(value={repr(raw)})",
+    )
+    logger.info(
+        "Razorpay config: mode=%s key_id=%s webhook_secret=%s",
+        settings.RAZORPAY_MODE,
+        "set" if settings.RAZORPAY_KEY_ID else "MISSING",
+        "set" if settings.RAZORPAY_WEBHOOK_SECRET else "MISSING",
     )
 
 
@@ -259,9 +259,6 @@ async def lifespan(app: FastAPI):
                 logger.info("FCM not configured - notifications will be stored in DB only (no push)")
         except Exception as e:
             logger.warning("Firebase init skipped or failed: %s", e)
-        
-        logger.info("Step 5: Initializing Thyrocare authentication...")
-        start_thyrocare_auth_task()
         
         logger.info("Application started successfully - all startup tasks completed")
     except KeyboardInterrupt:
@@ -357,6 +354,8 @@ def custom_openapi():
         "/auth/verify-otp",
         "/newsletter/subscribe",
         "/api/tracking/event",  # Tracking endpoint - no CSRF required
+        "/config/payment",
+        "/config/reverse-geocode",
     }
     
     # Add security requirements to all protected endpoints
@@ -379,6 +378,7 @@ def custom_openapi():
             is_product = path.startswith("/products") or path.startswith("/product/")
             is_category = path.startswith("/categories") or path.startswith("/category/")
             is_banner = path.startswith("/banners") or path.startswith("/banner/")
+            is_config = path.startswith("/config/")
             is_location = path.startswith("/location/") or path.startswith("/api/v1/location/")
             is_order_status = "/status" in path and ("/order" in path or path.startswith("/order"))
             is_exempted = (
@@ -388,6 +388,7 @@ def custom_openapi():
                 is_product or 
                 is_category or 
                 is_banner or 
+                is_config or
                 is_location or 
                 is_order_status
             )
@@ -419,6 +420,7 @@ def custom_openapi():
                     is_product = path.startswith("/products") or path.startswith("/product/")
                     is_category = path.startswith("/categories") or path.startswith("/category/")
                     is_banner = path.startswith("/banners") or path.startswith("/banner/")
+                    is_config = path.startswith("/config/")
                     is_location = path.startswith("/location/") or path.startswith("/api/v1/location/")
                     is_order_status = "/status" in path and ("/order" in path or path.startswith("/order"))
                     should_skip_csrf = (
@@ -428,6 +430,7 @@ def custom_openapi():
                         is_product or 
                         is_category or 
                         is_banner or 
+                        is_config or
                         is_location or 
                         is_order_status
                     )
@@ -458,7 +461,7 @@ def custom_openapi():
                         # Add note about CSRF requirement to description
                         if "description" not in methods[method]:
                             methods[method]["description"] = ""
-                        csrf_note = "\n\n**ℹ️ CSRF Token (Optional):** You can optionally include a CSRF token in the `X-CSRF-Token` header. Get your token from GET /auth/csrf-token endpoint (requires authentication)."
+                        csrf_note = "\n\n**â„¹ï¸ CSRF Token (Optional):** You can optionally include a CSRF token in the `X-CSRF-Token` header. Get your token from GET /auth/csrf-token endpoint (requires authentication)."
                         if csrf_note not in methods[method].get("description", ""):
                             methods[method]["description"] = (methods[method].get("description", "") + csrf_note).strip()
                     
@@ -509,7 +512,7 @@ async def request_validation_exception_handler(request: Request, exc: RequestVal
         validation_details += f" ... and {len(detail_list) - 5} more errors"
     
     log_message = (
-        f"❌ {request.method} {request.url.path} | "
+        f"âŒ {request.method} {request.url.path} | "
         f"Status: 422 (VALIDATION_ERROR) | "
         f"Validation Errors: {validation_details} | "
         f"IP: {client_ip} | "
@@ -540,7 +543,7 @@ async def pydantic_validation_exception_handler(request: Request, exc: Validatio
         for err in detail_list
     ])
     log_message = (
-        f"❌ {request.method} {request.url.path} | "
+        f"âŒ {request.method} {request.url.path} | "
         f"Status: 422 (VALIDATION_ERROR) | "
         f"Validation Errors: {validation_details} | "
         f"IP: {client_ip}"
@@ -566,11 +569,11 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     
     # Determine status category and emoji
     if 400 <= exc.status_code < 500:
-        status_emoji = "❌"
+        status_emoji = "âŒ"
         status_category = "CLIENT_ERROR"
         log_level = logger.warning
     else:
-        status_emoji = "💥"
+        status_emoji = "ðŸ’¥"
         status_category = "SERVER_ERROR"
         log_level = logger.error
     
@@ -625,18 +628,18 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
 if ALLOWED_ORIGINS == ["*"] and ENVIRONMENT == "production":
     warnings.warn("CORS is set to allow all origins. This is not recommended for production.")
 
-# Middleware
+# Middleware executes in reverse add_middleware order. Add CORS last so it is
+# outermost and can attach browser headers even when inner middleware/routes fail.
 app.add_middleware(RequestLoggingMiddleware)
+from Login_module.Utils.csrf_middleware import CSRFProtectionMiddleware
+app.add_middleware(CSRFProtectionMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE","PATCH","OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Requested-With", "X-CSRF-Token", "X-CSRF-TOKEN"],
 )
-# CSRF protection middleware (must be after CORS)
-from Login_module.Utils.csrf_middleware import CSRFProtectionMiddleware
-app.add_middleware(CSRFProtectionMiddleware)
 
 # Include routers
 app.include_router(otp_router)  # /auth/send-otp, /auth/verify-otp
@@ -650,6 +653,7 @@ app.include_router(banner_router)
 app.include_router(consent_router)
 app.include_router(member_router)
 app.include_router(order_router)
+app.include_router(payment_config_router)
 app.include_router(audit_router)
 app.include_router(session_router)
 app.include_router(phone_change_router)
@@ -680,6 +684,8 @@ def root():
             "consent": "/consent",
             "member": "/member",
             "orders": "/orders",
+            "payment_config": "/config/payment (razorpay_mode, razorpay_key_id)",
+            "maps": "/config/reverse-geocode",
             "audit": "/audit",
             "sessions": "/sessions",
             "gmeet": "/gmeet",

@@ -5,7 +5,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, date, time
 from typing import Optional, List, Tuple, Dict, Any
-import secrets
 from Login_module.Utils.datetime_utils import now_ist, to_ist_isoformat
 from .Order_model import (
     Order, OrderItem, OrderSnapshot, OrderStatusHistory,
@@ -177,6 +176,114 @@ def sync_order_item_statuses_with_order_status(
             item.status_updated_at = now_ist()
 
 
+def repair_confirmed_order_item_statuses(db: Session, order: Order) -> bool:
+    """
+    Repair legacy/inconsistent orders where the parent order is confirmed or later
+    but one or more order items are still in a pre-confirmation state.
+    """
+    POST_CONFIRMATION_STATUSES = {
+        OrderStatus.CONFIRMED,
+        OrderStatus.SCHEDULED,
+        OrderStatus.SCHEDULE_CONFIRMED_BY_LAB,
+        OrderStatus.SAMPLE_COLLECTED,
+        OrderStatus.SAMPLE_RECEIVED_BY_LAB,
+        OrderStatus.TESTING_IN_PROGRESS,
+        OrderStatus.REPORT_READY,
+        OrderStatus.COMPLETED,
+    }
+    PRE_CONFIRMATION_ITEM_STATUSES = {
+        OrderStatus.PENDING,
+        OrderStatus.PENDING_PAYMENT,
+        OrderStatus.PROCESSING,
+    }
+
+    if order.order_status not in POST_CONFIRMATION_STATUSES:
+        return False
+
+    target_status = order.order_status
+    changed = False
+    now = now_ist()
+
+    for item in order.items:
+        if item.order_status not in PRE_CONFIRMATION_ITEM_STATUSES:
+            continue
+
+        previous_status = item.order_status
+        item.order_status = target_status
+        item.status_updated_at = now
+        db.add(OrderStatusHistory(
+            order_id=order.id,
+            order_item_id=item.id,
+            status=target_status,
+            previous_status=previous_status,
+            notes=(
+                "Order item status repaired to match confirmed order status. "
+                f"Parent order status: {target_status.value}."
+            ),
+            changed_by="system",
+        ))
+        changed = True
+
+    if changed:
+        db.flush()
+        logger.info(
+            "Repaired pending order item statuses for order %s to %s",
+            order.order_number,
+            target_status.value,
+        )
+
+    return changed
+
+
+def build_invoice_items_for_order(db: Session, order: Order) -> List[Dict[str, Any]]:
+    """
+    Build product-level invoice items from persisted order items.
+    Queries the database directly so invoice emails do not depend on whether
+    order.items happened to be populated on the in-memory Order object.
+    """
+    from sqlalchemy.orm import joinedload
+
+    order_items = (
+        db.query(OrderItem)
+        .options(joinedload(OrderItem.snapshot), joinedload(OrderItem.product))
+        .filter(OrderItem.order_id == order.id)
+        .order_by(OrderItem.id.asc())
+        .all()
+    )
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    for item in order_items:
+        item_name = "Genetic Test Product"
+        if item.snapshot and item.snapshot.product_data:
+            item_name = (
+                item.snapshot.product_data.get("Name")
+                or item.snapshot.product_data.get("name")
+                or item_name
+            )
+        elif item.product:
+            item_name = item.product.Name
+
+        group_key = None
+        if item.snapshot and item.snapshot.cart_item_data:
+            group_key = item.snapshot.cart_item_data.get("group_id")
+        group_key = group_key or str(item.id)
+
+        if group_key not in groups:
+            groups[group_key] = {
+                "name": item_name,
+                "amount": float(item.unit_price or 0) * int(item.quantity or 1),
+            }
+
+    if not groups:
+        logger.warning(
+            "No order items found while building invoice items for order %s (ID: %s)",
+            order.order_number,
+            order.id,
+        )
+
+    return list(groups.values())
+
+
 def extract_payment_method_from_razorpay_payload(entity: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """
     Extract payment method details from Razorpay webhook payload.
@@ -238,26 +345,28 @@ def extract_payment_method_from_razorpay_payload(entity: Dict[str, Any]) -> Tupl
 
 
 def generate_order_number(db: Session) -> str:
-    """Generate unique 10-character random order number
-    Format: ORD + 7 random hex characters
-    Example: ORD7A2B1C9D
-    Guaranteed unique via database collision check (non-sequential)
+    """Generate the next sequential numeric order number.
+
+    Format: 2627001001, 2627001002, ...
+    Existing random ORD-prefixed order numbers are ignored.
     """
-    max_retries = 10
-    
-    for attempt in range(max_retries):
-        # Generate 7 random hex chars (3 bytes = 6 hex chars, take first 7)
-        random_part = secrets.token_hex(4).upper()[:7]  # 4 bytes = 8 hex, take first 7
-        order_number = f"ORD{random_part}"
-        
-        # Check if already exists in database
-        existing = db.query(Order).filter(Order.order_number == order_number).first()
-        
-        if not existing:
-            return order_number
-    
-    # Fallback (extremely unlikely with 7 hex chars and 10 retries)
-    raise ValueError("Failed to generate unique order number after retries")
+    prefix = "262700"
+    starting_number = 2627001000
+
+    order_numbers = (
+        db.query(Order.order_number)
+        .filter(Order.order_number.like(f"{prefix}%"))
+        .all()
+    )
+
+    numeric_order_numbers = [
+        int(order_number)
+        for (order_number,) in order_numbers
+        if order_number and order_number.isdigit()
+    ]
+
+    next_number = (max(numeric_order_numbers) if numeric_order_numbers else starting_number) + 1
+    return str(next_number)
 
 
 def find_existing_order_for_retry(
@@ -417,8 +526,6 @@ def create_order_from_cart(
     
     # Calculate totals
     subtotal = 0.0
-    delivery_charge = 0.0  # Free delivery
-    discount = 0.0
     coupon_discount = 0.0
     coupon_code = None
     
@@ -448,10 +555,6 @@ def create_order_from_cart(
         # Only count once per product group
         subtotal += item.quantity * product.SpecialPrice
         
-        # Calculate discount once per product group (same logic as cart view)
-        discount_per_item = product.Price - product.SpecialPrice
-        discount += discount_per_item * item.quantity
-    
     # Use pre-validated coupon from router if provided (avoids double-validation
     # which can falsely reject coupons due to usage already recorded from prior orders).
     # Otherwise fall back to re-validating from the cart.
@@ -478,8 +581,8 @@ def create_order_from_cart(
     # Calculate total amount
     # Note: subtotal already uses SpecialPrice (product discount is already applied)
     # So we only subtract coupon_discount, not discount
-    # This matches the corrected cart calculation: grand_total = subtotal_amount + delivery_charge - coupon_amount
-    total_amount = subtotal + delivery_charge - coupon_discount
+    # Delivery is always free; subtotal already uses SpecialPrice.
+    total_amount = subtotal - coupon_discount
     # Ensure total is not negative
     total_amount = max(0.0, total_amount)
     
@@ -490,8 +593,6 @@ def create_order_from_cart(
         placed_by_member_id=placed_by_member_id,  # Member profile that was active when order was placed
         address_id=primary_address_id,
         subtotal=subtotal,
-        delivery_charge=delivery_charge,
-        discount=discount,
         coupon_code=coupon_code,
         coupon_discount=coupon_discount,
         total_amount=total_amount,
@@ -641,9 +742,8 @@ def verify_payment_frontend(
 ) -> Order:
     """
     Verify Razorpay payment from frontend (verify-payment endpoint).
-    ONLY sets payment_status = SUCCESS (temporary).
-    DOES NOT confirm order or clear cart.
-    Webhook will finalize confirmation later.
+    Verifies the Razorpay signature, then finalizes the order immediately.
+    Webhook processing remains idempotent and can safely arrive later.
     """
     # Load order with items
     from sqlalchemy.orm import joinedload
@@ -654,15 +754,19 @@ def verify_payment_frontend(
     # Refresh to get latest state (prevent race conditions)
     db.refresh(order)
     
-    # If webhook already confirmed, do nothing (idempotent)
-    if order.order_status == OrderStatus.CONFIRMED:
-        logger.info(f"Order {order.order_number} already confirmed by webhook. Frontend verification skipped.")
+    # If the order is already paid, do nothing. This also avoids regressing
+    # later statuses like SCHEDULED/REPORT_READY back to CONFIRMED.
+    if order.payment_status == PaymentStatus.COMPLETED:
+        logger.info(f"Order {order.order_number} already completed. Frontend verification skipped.")
         return order
     
-    # If already verified by frontend, return success (idempotent)
+    # If a previous verification left the order in PROCESSING, continue through
+    # signature verification and final confirmation instead of returning early.
     if order.payment_status == PaymentStatus.PROCESSING:
-        logger.info(f"Payment already verified for order {order.order_number}. Returning success.")
-        return order
+        logger.info(
+            f"Payment already verified for order {order.order_number}. "
+            "Continuing to final confirmation."
+        )
     
     # If payment already failed, raise error
     if order.payment_status == PaymentStatus.FAILED:
@@ -774,7 +878,7 @@ def verify_payment_frontend(
         logger.warning(f"Payment verification failed for order {order.order_number} (ID: {order.id}). Payment status set to FAILED.")
         raise ValueError("Payment verification failed. Please check your payment details and try again. If the problem persists, please contact support.")
     
-    # Payment signature valid - update to PROCESSING (frontend verified, waiting for webhook)
+    # Payment signature valid - store signature details before final confirmation.
     previous_payment_status = payment.payment_status
     payment.razorpay_payment_id = razorpay_payment_id
     payment.razorpay_signature = razorpay_signature
@@ -786,27 +890,78 @@ def verify_payment_frontend(
         payment_id=payment.id,
         from_status=previous_payment_status,
         to_status=PaymentStatus.PROCESSING,
-        transition_reason="Frontend payment verification successful. Waiting for webhook confirmation.",
+        transition_reason="Frontend payment verification successful. Finalizing order.",
         triggered_by="system"
     )
     db.add(payment_transition)
     
-    # Update order (denormalized payment_status)
+    # Update order (denormalized payment_status) while confirmation completes.
     order.payment_status = PaymentStatus.PROCESSING
-    order.order_status = OrderStatus.PROCESSING  # Frontend verified, waiting for webhook
+    order.order_status = OrderStatus.PROCESSING
     order.status_updated_at = now_ist()
     
     # Sync all order item statuses with order status
     sync_order_item_statuses_with_order_status(db, order, OrderStatus.PROCESSING, update_timestamp=True)
     
-    # DO NOT clear cart - webhook will handle this
-    
-    db.commit()
-    db.refresh(order)
-    
-    logger.info(f"Frontend payment verification successful for order {order.order_number}. Payment status: PROCESSING. Order status: PROCESSING. Waiting for webhook confirmation.")
-    
-    return order
+    db.flush()
+
+    logger.info(
+        f"Frontend payment verification successful for order {order.order_number}. "
+        "Finalizing order without waiting for Razorpay webhook."
+    )
+
+    # Confirm order and clear cart now. Razorpay webhooks still call this same
+    # helper later and return early if the order is already confirmed.
+    return confirm_order_from_webhook(
+        db=db,
+        order_id=order.id,
+        razorpay_order_id=razorpay_order_id,
+        razorpay_payment_id=razorpay_payment_id,
+        webhook_log_id=None,
+    )
+
+
+def finalize_verified_processing_order(db: Session, order: Order) -> bool:
+    """
+    Repair orders that were already signature-verified by the frontend but got
+    stuck in PROCESSING before final confirmation/cart clearing.
+    """
+    if (
+        order.order_status != OrderStatus.PROCESSING
+        or order.payment_status != PaymentStatus.PROCESSING
+    ):
+        return False
+
+    payment = (
+        db.query(Payment)
+        .filter(
+            Payment.order_id == order.id,
+            Payment.payment_status == PaymentStatus.PROCESSING,
+            Payment.razorpay_order_id.isnot(None),
+            Payment.razorpay_payment_id.isnot(None),
+            Payment.razorpay_signature.isnot(None),
+        )
+        .order_by(Payment.created_at.desc())
+        .first()
+    )
+
+    if not payment:
+        return False
+
+    logger.info(
+        "Repairing verified PROCESSING order %s by finalizing confirmation.",
+        order.order_number,
+    )
+    confirm_order_from_webhook(
+        db=db,
+        order_id=order.id,
+        razorpay_order_id=payment.razorpay_order_id,
+        razorpay_payment_id=payment.razorpay_payment_id,
+        webhook_log_id=None,
+        payment_method_details=payment.payment_method_details,
+        payment_method_metadata=payment.payment_method_metadata,
+    )
+    return True
 
 
 def confirm_order_from_webhook(
@@ -1084,104 +1239,6 @@ def confirm_order_from_webhook(
             exc_info=True
         )
     
-    # Create Razorpay invoice for the confirmed order (idempotent with respect to this function)
-    try:
-        from .razorpay_service import create_razorpay_customer, create_razorpay_invoice_for_order
-
-        # Try to reuse an existing customer_id from any previous order of this user
-        existing_with_customer = (
-            db.query(Order)
-            .filter(
-                Order.user_id == order.user_id,
-                Order.razorpay_customer_id.isnot(None)
-            )
-            .order_by(Order.created_at.desc())
-            .first()
-        )
-
-        customer_id = existing_with_customer.razorpay_customer_id if existing_with_customer else None
-
-        user = order.user
-
-        # Create a new Razorpay customer if we don't have one yet
-        if not customer_id:
-            # Build contact number from user's mobile (decrypt and normalize to last 10 digits if possible)
-            contact = None
-            try:
-                from Login_module.Utils.phone_encryption import decrypt_phone
-
-                raw_mobile = getattr(user, "mobile", None)
-                if raw_mobile:
-                    try:
-                        decrypted_mobile = decrypt_phone(raw_mobile)
-                    except Exception:
-                        # If decryption fails, fall back to raw value
-                        decrypted_mobile = raw_mobile
-
-                    digits_only = "".join(filter(str.isdigit, str(decrypted_mobile)))
-                    if len(digits_only) >= 10:
-                        contact = digits_only[-10:]
-                    elif len(digits_only) > 0:
-                        contact = digits_only
-            except Exception:
-                # If anything goes wrong while preparing contact, keep it None
-                contact = None
-
-            customer = create_razorpay_customer(
-                name=getattr(user, "name", None),
-                email=getattr(user, "email", None),
-                contact=contact,
-            )
-            customer_id = customer.get("id")
-
-        if not customer_id:
-            logger.error(
-                f"Unable to determine Razorpay customer_id for order {order.order_number} (user {order.user_id}). "
-                f"Invoice will not be created."
-            )
-        else:
-            # Persist customer_id immediately so retry-invoice endpoint can work
-            # even if invoice creation fails below
-            order.razorpay_customer_id = customer_id
-            db.flush()
-
-            # Log invoice creation attempt
-            logger.info(f"Creating Razorpay invoice for order {order.order_number} with customer_id={customer_id}, amount={order.total_amount}")
-
-            invoice = create_razorpay_invoice_for_order(
-                customer_id=customer_id,
-                order_number=order.order_number,
-                total_amount=order.total_amount,
-                currency=payment.currency if payment and payment.currency else "INR",
-                email=getattr(user, "email", None)
-            )
-
-            # Validate invoice response before persisting
-            if not invoice:
-                raise ValueError(f"Invoice creation returned None for order {order.order_number}")
-
-            if not invoice.get("id"):
-                raise ValueError(f"Invoice missing 'id' field. Response keys: {list(invoice.keys())}")
-
-            # Persist invoice details on the order for frontend and future email sending
-            order.razorpay_customer_id = customer_id
-            order.razorpay_invoice_id = invoice.get("id")
-            order.razorpay_invoice_number = invoice.get("invoice_number") or invoice.get("number")
-            order.razorpay_invoice_url = invoice.get("short_url") or invoice.get("invoice_url") or invoice.get("pdf_url")
-            order.razorpay_invoice_status = invoice.get("status")
-
-            logger.info(
-                f"Razorpay invoice created for order {order.order_number} (ID: {order.id}) - "
-                f"invoice_id={order.razorpay_invoice_id}, status={order.razorpay_invoice_status}"
-            )
-    except Exception as e:
-        # Log error but don't fail order confirmation if invoice creation fails
-        logger.error(
-            f"CRITICAL: Error creating Razorpay invoice for order {order.order_number} (ID: {order.id}): {str(e)}. "
-            f"Order confirmed but invoice may not be created. Manual intervention may be required.",
-            exc_info=True
-        )
-
     # ── CUSTOM PDF INVOICE GENERATION & EMAIL SENDING ─────
     try:
         import sys
@@ -1208,25 +1265,7 @@ def confirm_order_from_webhook(
             if order.address.postal_code: addr_parts.append(order.address.postal_code)
             customer_address_str = ", ".join(addr_parts)
         
-        # Build items list (Product Summary only)
-        # Group by group_id so couple/family packs appear as one line per pack,
-        # not one line per member. If no group_id, fall back to item id.
-        _groups: dict = {}
-        for item in order.items:
-            item_name = "Genetic Test Product"
-            if item.snapshot and item.snapshot.product_data:
-                item_name = item.snapshot.product_data.get("Name", item_name)
-            elif item.product:
-                item_name = item.product.Name
-
-            group_key = None
-            if item.snapshot and item.snapshot.cart_item_data:
-                group_key = item.snapshot.cart_item_data.get("group_id")
-            group_key = group_key or str(item.id)
-
-            if group_key not in _groups:
-                _groups[group_key] = {"name": item_name, "amount": item.unit_price * item.quantity}
-        invoice_items = list(_groups.values())
+        invoice_items = build_invoice_items_for_order(db, order)
             
         # Prepare payment info
         payment_info = []
@@ -1244,7 +1283,7 @@ def confirm_order_from_webhook(
         # Build the final data dictionary exactly as expected by nucleotide_invoice
         # Note: GST, detailed_items, and cheque info are omitted as requested
         invoice_data = {
-            "invoice_number": order.razorpay_invoice_id or order.razorpay_invoice_number or f"INV-{order.order_number}",
+            "invoice_number": f"INV-{order.order_number}",
             "invoice_date": now_ist().strftime("%B %d, %Y"),
             "order_number": order.order_number,
             "sac_code": settings.INVOICE_SAC_CODE,
@@ -1339,6 +1378,7 @@ def confirm_order_from_webhook(
             sender_email=settings.INFO_SENDER_EMAIL,
             gif_url=settings.ORDER_CONFIRMATION_GIF_URL,
             order_number=order.order_number,
+            order_tracking_url=settings.ORDER_TRACKING_BASE_URL,
         )
         logger.info(f"Order confirmation HTML email sent to {order.user.email} for order {order.order_number}")
     except Exception as e:
@@ -1596,12 +1636,13 @@ def update_order_status(
         )
     
     
-    # Prevent manually setting order to CONFIRMED - only webhook can confirm orders
-    # This ensures cart clearing and genetic test flag setting happen correctly
+    # Prevent manually setting order to CONFIRMED. Payment verification/webhook
+    # confirmation must use the shared confirmation helper so cart clearing and
+    # genetic test flag updates happen correctly.
     if new_status == OrderStatus.CONFIRMED:
         raise ValueError(
             "Cannot manually set order status to CONFIRMED. "
-            "Order confirmation must happen via webhook (confirm_order_from_webhook) to ensure "
+            "Order confirmation must happen through payment verification or webhook processing to ensure "
             "cart clearing and genetic test flag setting occur correctly."
         )
     
